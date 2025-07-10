@@ -1,0 +1,21 @@
+[project]
+authors = [{name = "Guillermo Gil", email = "guillegil@proton.me"}]
+dependencies = ["pytest>=7"]
+description = "A pytest-plugin for updating doctest outputs"
+dynamic = ["version"]
+license = "Apache-2.0"
+name = "pytest-strategy"
+readme = "README.md"
+requires-python = ">=3.9"
+urls = {homepage = "https://google.es", repository = "https://google.es"}
+
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project.entry-points."pytest11"]
+pytest_strategy = "pytest_strategy.plugin"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["pytest_strategy*"]
