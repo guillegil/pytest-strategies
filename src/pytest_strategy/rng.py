@@ -1,6 +1,7 @@
 # rng.py
 
-from typing import Callable
+from typing import Callable, Type
+from enum import Enum
 import random
 import time
 
@@ -347,6 +348,105 @@ class RNGChoice(RNGType):
         return type(self.choices[0]) if self.choices else object
 
 
+class RNGEnum(RNGType):
+    """
+    RNG type for choosing from Python Enum values.
+    
+    Supports:
+    - Simple random selection from all enum members
+    - Weighted probabilities for specific enum values
+    - Predicate constraints to filter valid values
+    
+    Examples:
+        # Simple enum selection
+        RNGEnum(MyEnum)
+        
+        # Weighted selection (70% SUCCESS, 20% PENDING, 10% FAILED)
+        RNGEnum(Status, weights={Status.SUCCESS: 0.7, Status.PENDING: 0.2, Status.FAILED: 0.1})
+        
+        # With predicate (only non-error statuses)
+        RNGEnum(Status, predicate=lambda s: s != Status.ERROR)
+        
+        # Weighted with predicate
+        RNGEnum(Priority, weights={Priority.HIGH: 0.6, Priority.MEDIUM: 0.3}, predicate=lambda p: p != Priority.LOW)
+    """
+
+    def __init__(
+        self,
+        enum_class: Type[Enum],
+        weights: dict[Enum, float] | None = None,
+        predicate: Callable[[Enum], bool] | None = None
+    ):
+        """
+        Initialize RNGEnum.
+        
+        Args:
+            enum_class: The Enum class to generate values from
+            weights: Optional dictionary mapping enum members to their weights.
+                    If provided, only weighted members will be selected.
+                    Weights don't need to sum to 1.0 (they'll be normalized).
+            predicate: Optional function to filter valid enum values
+            
+        Raises:
+            RNGValueError: If enum_class is not an Enum, or if weights reference non-existent members
+        """
+        if not issubclass(enum_class, Enum):
+            raise RNGValueError(f"{enum_class} is not an Enum class")
+        
+        self.enum_class = enum_class
+        self.weights = weights
+        self.predicate = predicate
+        
+        # Validate weights if provided
+        if weights:
+            for member in weights.keys():
+                if not isinstance(member, enum_class):
+                    raise RNGValueError(
+                        f"Weight key {member} is not a member of {enum_class.__name__}"
+                    )
+    
+    def generate(self) -> Enum:
+        """
+        Generate a random enum value.
+        
+        Returns:
+            Random enum member satisfying constraints
+            
+        Raises:
+            RNGValueError: If no valid value found after max_retries attempts
+        """
+        if self.weights:
+            # Weighted selection
+            members = list(self.weights.keys())
+            weights = list(self.weights.values())
+            
+            if self.predicate:
+                # With predicate: use retry logic
+                def generator():
+                    return random.choices(members, weights=weights, k=1)[0]
+                return RNG._generate_with_constraint(generator, self.predicate)
+            else:
+                # Without predicate: direct selection
+                return random.choices(members, weights=weights, k=1)[0]
+        else:
+            # Uniform selection from all members
+            members = list(self.enum_class)
+            
+            if self.predicate:
+                # With predicate: use retry logic
+                def generator():
+                    return random.choice(members)
+                return RNG._generate_with_constraint(generator, self.predicate)
+            else:
+                # Without predicate: direct selection
+                return random.choice(members)
+    
+    @property
+    def python_type(self):
+        """Return the Enum class type"""
+        return self.enum_class
+
+
 class RNGString(RNGType):
     """RNG type for generating strings"""
 
@@ -413,6 +513,21 @@ class RNGWeightedFloat(RNGType):
 # ====
 
 if __name__ == "__main__":
+    from enum import Enum
+    
+    # Define example enums
+    class Status(Enum):
+        PENDING = "pending"
+        SUCCESS = "success"
+        FAILED = "failed"
+        ERROR = "error"
+    
+    class Priority(Enum):
+        LOW = 1
+        MEDIUM = 2
+        HIGH = 3
+        CRITICAL = 4
+    
     # Set seed for reproducibility
     RNG.seed(42)
 
@@ -437,3 +552,33 @@ if __name__ == "__main__":
 
     choice_type = RNGChoice(choices=['fast', 'slow', 'medium'])
     print(f"RNGChoice: {choice_type.generate()}, type: {choice_type.python_type}")
+    
+    print("\n=== RNGEnum Examples ===")
+    # Simple enum selection
+    enum_type = RNGEnum(Status)
+    print(f"RNGEnum (uniform): {enum_type.generate()}")
+    
+    # Weighted enum selection
+    weighted_enum = RNGEnum(Status, weights={
+        Status.SUCCESS: 0.7,
+        Status.PENDING: 0.2,
+        Status.FAILED: 0.1
+    })
+    print(f"RNGEnum (weighted): {weighted_enum.generate()}")
+    
+    # Enum with predicate
+    filtered_enum = RNGEnum(Status, predicate=lambda s: s != Status.ERROR)
+    print(f"RNGEnum (filtered): {filtered_enum.generate()}")
+    
+    # Weighted with predicate
+    priority_enum = RNGEnum(
+        Priority,
+        weights={Priority.HIGH: 0.6, Priority.MEDIUM: 0.3, Priority.LOW: 0.1},
+        predicate=lambda p: p != Priority.CRITICAL
+    )
+    print(f"RNGEnum (weighted + filtered): {priority_enum.generate()}")
+    
+    # Generate multiple samples
+    print("\nMultiple samples:")
+    for i in range(5):
+        print(f"  Sample {i+1}: {weighted_enum.generate()}")
