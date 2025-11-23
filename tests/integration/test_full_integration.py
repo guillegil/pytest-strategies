@@ -164,11 +164,11 @@ class TestReproducibility:
         
         # Generate with seed 42
         RNG.seed(42)
-        samples1 = param.generate_samples(10, mode="random_only")
+        samples1 = param.generate_vectors(10, mode="random_only")
         
         # Generate with same seed
         RNG.seed(42)
-        samples2 = param.generate_samples(10, mode="random_only")
+        samples2 = param.generate_vectors(10, mode="random_only")
         
         # Should be identical
         assert samples1 == samples2
@@ -183,11 +183,11 @@ class TestReproducibility:
         
         # Generate with seed 42
         RNG.seed(42)
-        samples1 = param.generate_samples(20, mode="random_only")
+        samples1 = param.generate_vectors(20, mode="random_only")
         
         # Generate with different seed
         RNG.seed(99)
-        samples2 = param.generate_samples(20, mode="random_only")
+        samples2 = param.generate_vectors(20, mode="random_only")
         
         # Should be different
         assert samples1 != samples2
@@ -214,7 +214,7 @@ class TestDirectedVectors:
         )
         
         # Generate in 'all' mode
-        samples = param.generate_samples(5, mode="all")
+        samples = param.generate_vectors(5, mode="all")
         
         # Should include directed vectors
         assert (0, 0) in samples
@@ -234,7 +234,7 @@ class TestDirectedVectors:
             }
         )
         
-        samples = param.generate_samples(100, mode="directed_only")
+        samples = param.generate_vectors(100, mode="directed_only")
         
         # Should only have directed vectors
         assert len(samples) == 3
@@ -259,7 +259,7 @@ class TestCLIIntegration:
             directed_vectors={"zero": (0,)}
         )
         
-        samples = param.generate_samples(10, mode="random_only")
+        samples = param.generate_vectors(10, mode="random_only")
         
         # Should not include directed vector
         assert (0,) not in samples
@@ -279,7 +279,7 @@ class TestCLIIntegration:
             }
         )
         
-        samples = param.generate_samples(0, filter_by_name="center")
+        samples = param.generate_vectors(0, filter_by_name="center")
         
         # Should only have the named vector
         assert len(samples) == 1
@@ -298,7 +298,7 @@ class TestCLIIntegration:
             }
         )
         
-        samples = param.generate_samples(0, filter_by_index=1)
+        samples = param.generate_vectors(0, filter_by_index=1)
         
         # Should only have the indexed vector
         assert len(samples) == 1
@@ -366,13 +366,13 @@ class TestCompleteWorkflow:
         )
         
         # Test different generation modes
-        all_samples = param.generate_samples(5, mode="all")
+        all_samples = param.generate_vectors(5, mode="all")
         assert len(all_samples) == 8  # 3 directed + 5 random
         
-        random_samples = param.generate_samples(10, mode="random_only")
+        random_samples = param.generate_vectors(10, mode="random_only")
         assert len(random_samples) == 10
         
-        directed_samples = param.generate_samples(0, mode="directed_only")
+        directed_samples = param.generate_vectors(0, mode="directed_only")
         assert len(directed_samples) == 3
         
         # Verify all samples satisfy constraints
@@ -382,7 +382,7 @@ class TestCompleteWorkflow:
             assert sample[2] in ["fast", "slow", "medium"]
         
         # Test CLI filtering
-        filtered = param.generate_samples(0, filter_by_name="baseline")
+        filtered = param.generate_vectors(0, filter_by_name="baseline")
         assert len(filtered) == 1
         assert filtered[0] == (10, 0.5, "medium")
         

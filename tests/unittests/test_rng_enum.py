@@ -337,10 +337,10 @@ class TestRNGEnumIntegration:
         )
         
         RNG.seed(42)
-        samples = param.generate_samples(10, mode="random_only")
+        vectors = param.generate_vectors(n=10, mode="random_only")
         
-        assert len(samples) == 10
-        for status, priority in samples:
+        assert len(vectors) == 10
+        for status, priority in vectors:
             assert isinstance(status, Status)
             assert isinstance(priority, Priority)
 
@@ -360,7 +360,7 @@ class TestRNGEnumIntegration:
         )
         
         RNG.seed(42)
-        samples = param.generate_samples(20, mode="random_only")
+        samples = param.generate_vectors(20, mode="random_only")
         
         assert len(samples) == 20
         for status, priority in samples:

@@ -1,6 +1,6 @@
 # parameter.py
 
-from typing import Callable
+from typing import Callable, Any
 from .test_args import TestArg
 
 
@@ -176,7 +176,21 @@ class Parameter:
             "Check your constraints."
         )
 
-    def generate_samples(
+    def to_dict(self) -> dict[str, Any]:
+        """
+        Serialize the parameter metadata to a dictionary.
+        """
+        return {
+            "arguments": [arg.to_dict() for arg in self.test_args],
+            "directed_vectors": {
+                name: [str(v) for v in vector] 
+                for name, vector in self.directed_vectors.items()
+            },
+            "always_include_directed": self.always_include_directed,
+            "has_constraints": bool(self.vector_constraints)
+        }
+
+    def generate_vectors(
         self, 
         n: int,
         mode: str = "all",

@@ -43,7 +43,7 @@ class TestBasicIntegration:
         param = Parameter(arg)
         
         # Generate samples
-        samples = param.generate_samples(10, mode="random_only")
+        samples = param.generate_vectors(10, mode="random_only")
         
         # Verify
         assert len(samples) == 10
@@ -64,7 +64,7 @@ class TestBasicIntegration:
         param = Parameter(arg1, arg2, arg3)
         
         # Generate samples
-        samples = param.generate_samples(20, mode="random_only")
+        samples = param.generate_vectors(20, mode="random_only")
         
         # Verify
         assert len(samples) == 20
@@ -100,7 +100,7 @@ class TestBasicIntegration:
         )
         
         # Generate samples in 'all' mode
-        samples = param.generate_samples(5, mode="all")
+        samples = param.generate_vectors(5, mode="all")
         
         # Should have 3 directed vectors + 5 random = 8 total
         assert len(samples) == 8
@@ -125,11 +125,11 @@ class TestRNGReproducibility:
         
         # Generate with seed 42
         RNG.seed(42)
-        samples1 = param.generate_samples(20, mode="random_only")
+        samples1 = param.generate_vectors(20, mode="random_only")
         
         # Generate with same seed
         RNG.seed(42)
-        samples2 = param.generate_samples(20, mode="random_only")
+        samples2 = param.generate_vectors(20, mode="random_only")
         
         # Should be identical
         assert samples1 == samples2
@@ -144,11 +144,11 @@ class TestRNGReproducibility:
         
         # Generate with seed 123
         RNG.seed(123)
-        samples1 = param.generate_samples(15, mode="random_only")
+        samples1 = param.generate_vectors(15, mode="random_only")
         
         # Generate with same seed
         RNG.seed(123)
-        samples2 = param.generate_samples(15, mode="random_only")
+        samples2 = param.generate_vectors(15, mode="random_only")
         
         # Should be identical
         assert samples1 == samples2
@@ -160,11 +160,11 @@ class TestRNGReproducibility:
         
         # Generate with seed 42
         RNG.seed(42)
-        samples1 = param.generate_samples(20, mode="random_only")
+        samples1 = param.generate_vectors(20, mode="random_only")
         
         # Generate with different seed
         RNG.seed(99)
-        samples2 = param.generate_samples(20, mode="random_only")
+        samples2 = param.generate_vectors(20, mode="random_only")
         
         # Should be different
         assert samples1 != samples2
@@ -192,7 +192,7 @@ class TestConstraintIntegration:
         )
         
         param = Parameter(arg1, arg2)
-        samples = param.generate_samples(20, mode="random_only")
+        samples = param.generate_vectors(20, mode="random_only")
         
         # Verify predicates were respected
         assert all(s[0] % 2 == 0 for s in samples)  # even
@@ -211,7 +211,7 @@ class TestConstraintIntegration:
             vector_constraints=[lambda v: v[0] < v[1]]
         )
         
-        samples = param.generate_samples(30, mode="random_only")
+        samples = param.generate_vectors(30, mode="random_only")
         
         # Verify constraint is satisfied
         assert all(s[0] < s[1] for s in samples)
@@ -237,7 +237,7 @@ class TestConstraintIntegration:
             vector_constraints=[lambda v: v[0] + v[1] < 60]
         )
         
-        samples = param.generate_samples(25, mode="random_only")
+        samples = param.generate_vectors(25, mode="random_only")
         
         # Verify both predicates and constraints
         assert all(s[0] % 2 == 0 for s in samples)  # x is even
@@ -268,7 +268,7 @@ class TestWeightedRNGIntegration:
         )
         
         param = Parameter(arg)
-        samples = param.generate_samples(100, mode="random_only")
+        samples = param.generate_vectors(100, mode="random_only")
         
         # Count distribution
         low_count = sum(1 for s in samples if 0 <= s[0] <= 10)
@@ -299,7 +299,7 @@ class TestWeightedRNGIntegration:
             vector_constraints=[lambda v: v[1] <= v[0] or v[1] >= 0.7]
         )
         
-        samples = param.generate_samples(50, mode="random_only")
+        samples = param.generate_vectors(50, mode="random_only")
         
         # Verify constraint
         assert all(s[1] <= s[0] or s[1] >= 0.7 for s in samples)
@@ -327,7 +327,7 @@ class TestComplexTypeIntegration:
         ]
         
         param = Parameter(*args)
-        samples = param.generate_samples(10, mode="random_only")
+        samples = param.generate_vectors(10, mode="random_only")
         
         # Verify all samples have correct structure
         assert len(samples) == 10
@@ -351,7 +351,7 @@ class TestComplexTypeIntegration:
         arg2 = TestArg("code", rng_type=RNGString(length=4, charset="0123456789"))
         
         param = Parameter(arg1, arg2)
-        samples = param.generate_samples(15, mode="random_only")
+        samples = param.generate_vectors(15, mode="random_only")
         
         # Verify string constraints
         assert all(5 <= len(s[0]) <= 10 for s in samples)
@@ -402,7 +402,7 @@ class TestRealWorldScenarios:
         )
         
         # Generate test cases
-        samples = param.generate_samples(20, mode="all")
+        samples = param.generate_vectors(20, mode="all")
         
         # Should include directed vectors
         assert (1, 50, True) in samples
@@ -440,7 +440,7 @@ class TestRealWorldScenarios:
             vector_constraints=[lambda v: v[0] + v[1] <= 1000]
         )
         
-        samples = param.generate_samples(30, mode="all")
+        samples = param.generate_vectors(30, mode="all")
         
         # Verify constraint
         assert all(s[0] + s[1] <= 1000 for s in samples)
@@ -486,7 +486,7 @@ class TestRealWorldScenarios:
             }
         )
         
-        samples = param.generate_samples(25, mode="all")
+        samples = param.generate_vectors(25, mode="all")
         
         # Should include directed vectors
         assert (1000, 3, True, "WARNING") in samples
@@ -531,7 +531,7 @@ class TestModeIntegration:
             }
         )
         
-        samples = param.generate_samples(5, mode="all")
+        samples = param.generate_vectors(5, mode="all")
         
         # Should have directed vectors + random samples
         assert len(samples) == 7  # 2 directed + 5 random
@@ -550,7 +550,7 @@ class TestModeIntegration:
             directed_vectors={"zero": (0,), "max": (100,)},
             always_include_directed=True
         )
-        samples_true = param_true.generate_samples(5, mode="mixed")
+        samples_true = param_true.generate_vectors(5, mode="mixed")
         assert len(samples_true) == 7  # 2 directed + 5 random
         
         # With always_include_directed=False
@@ -559,7 +559,7 @@ class TestModeIntegration:
             directed_vectors={"zero": (0,), "max": (100,)},
             always_include_directed=False
         )
-        samples_false = param_false.generate_samples(5, mode="mixed")
+        samples_false = param_false.generate_vectors(5, mode="mixed")
         assert len(samples_false) == 5  # Only random
 
     def test_directed_only_mode_integration(self):
@@ -578,7 +578,7 @@ class TestModeIntegration:
             }
         )
         
-        samples = param.generate_samples(100, mode="directed_only")
+        samples = param.generate_vectors(100, mode="directed_only")
         
         # Should only have directed vectors, ignore n=100
         assert len(samples) == 3
@@ -610,7 +610,7 @@ class TestValidationIntegration:
         )
         
         param = Parameter(arg1, arg2)
-        samples = param.generate_samples(20, mode="random_only")
+        samples = param.generate_vectors(20, mode="random_only")
         
         # Validators should be satisfied
         assert all(s[0] > 0 for s in samples)
@@ -639,7 +639,7 @@ class TestValidationIntegration:
             vector_constraints=[lambda v: v[0] + v[1] <= 100]
         )
         
-        samples = param.generate_samples(15, mode="random_only")
+        samples = param.generate_vectors(15, mode="random_only")
         
         # All constraints should be satisfied
         assert all(s[0] % 5 == 0 for s in samples)  # RNG + TestArg

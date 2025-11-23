@@ -91,6 +91,35 @@ class TestArg:
         value = self._rng_type.generate()
         return self._validate(value)
 
+    def to_dict(self) -> dict[str, Any]:
+        """
+        Serialize the test argument metadata to a dictionary.
+        """
+        data = {
+            "name": self._name,
+            "description": self._description,
+            "has_static_value": self._value is not None,
+            "has_directed_values": bool(self._directed_values),
+            "always_include_directed": self._always_include_directed,
+        }
+        
+        if self._value is not None:
+            data["static_value"] = str(self._value)
+            
+        if self._rng_type:
+            data["rng_type"] = self._rng_type.__class__.__name__
+            # Add RNG specific details if available
+            if hasattr(self._rng_type, "__dict__"):
+                # Filter out private attributes and callables
+                rng_details = {
+                    k: str(v) for k, v in self._rng_type.__dict__.items() 
+                    if not k.startswith("_") and not callable(v)
+                }
+                if rng_details:
+                    data["rng_details"] = rng_details
+
+        return data
+
     def generate_samples(self, n: int) -> list[Any]:
         """
         Generate n samples, optionally including directed values.

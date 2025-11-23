@@ -208,7 +208,7 @@ class TestParameterSampleGeneration:
             directed_vectors={"zero": (0,), "five": (5,), "ten": (10,)}
         )
         
-        samples = param.generate_samples(5, mode="all")
+        samples = param.generate_vectors(5, mode="all")
         assert len(samples) == 8  # 3 directed + 5 random
 
     def test_generate_samples_random_only_mode(self):
@@ -219,7 +219,7 @@ class TestParameterSampleGeneration:
             directed_vectors={"zero": (0,), "ten": (10,)}
         )
         
-        samples = param.generate_samples(5, mode="random_only")
+        samples = param.generate_vectors(5, mode="random_only")
         assert len(samples) == 5  # Only random, no directed
 
     def test_generate_samples_directed_only_mode(self):
@@ -230,7 +230,7 @@ class TestParameterSampleGeneration:
             directed_vectors={"zero": (0,), "five": (5,), "ten": (10,)}
         )
         
-        samples = param.generate_samples(100, mode="directed_only")
+        samples = param.generate_vectors(100, mode="directed_only")
         assert len(samples) == 3  # Only directed, ignores n
 
     def test_generate_samples_mixed_mode_with_flag_true(self):
@@ -242,7 +242,7 @@ class TestParameterSampleGeneration:
             always_include_directed=True
         )
         
-        samples = param.generate_samples(5, mode="mixed")
+        samples = param.generate_vectors(5, mode="mixed")
         assert len(samples) == 7  # 2 directed + 5 random
 
     def test_generate_samples_mixed_mode_with_flag_false(self):
@@ -254,7 +254,7 @@ class TestParameterSampleGeneration:
             always_include_directed=False
         )
         
-        samples = param.generate_samples(5, mode="mixed")
+        samples = param.generate_vectors(5, mode="mixed")
         assert len(samples) == 5  # Only random, no directed
 
     def test_generate_samples_invalid_mode_raises_error(self):
@@ -263,14 +263,14 @@ class TestParameterSampleGeneration:
         param = Parameter(arg)
         
         with pytest.raises(ValueError, match="Invalid mode"):
-            param.generate_samples(5, mode="invalid_mode")
+            param.generate_vectors(5, mode="invalid_mode")
 
     def test_generate_samples_zero_count(self):
         """Test generating zero samples."""
         arg = TestArg("x", rng_type=RNGInteger(0, 10))
         param = Parameter(arg)
         
-        samples = param.generate_samples(0, mode="random_only")
+        samples = param.generate_vectors(0, mode="random_only")
         assert samples == []
 
 
@@ -293,7 +293,7 @@ class TestParameterCLISupport:
             }
         )
         
-        samples = param.generate_samples(100, filter_by_name="five")
+        samples = param.generate_vectors(100, filter_by_name="five")
         assert len(samples) == 1
         assert samples[0] == (5,)
 
@@ -306,7 +306,7 @@ class TestParameterCLISupport:
         )
         
         with pytest.raises(KeyError, match="No directed vector named"):
-            param.generate_samples(5, filter_by_name="nonexistent")
+            param.generate_vectors(5, filter_by_name="nonexistent")
 
     def test_filter_by_index(self):
         """Test filtering samples by vector index."""
@@ -320,7 +320,7 @@ class TestParameterCLISupport:
             }
         )
         
-        samples = param.generate_samples(100, filter_by_index=1)
+        samples = param.generate_vectors(100, filter_by_index=1)
         assert len(samples) == 1
         # Index 1 should be "five" (second in order)
         assert samples[0] == (5,)
@@ -334,7 +334,7 @@ class TestParameterCLISupport:
         )
         
         with pytest.raises(IndexError, match="out of range"):
-            param.generate_samples(5, filter_by_index=5)
+            param.generate_vectors(5, filter_by_index=5)
 
     def test_get_vector_by_name(self):
         """Test get_vector_by_name method."""
@@ -556,7 +556,7 @@ class TestParameterEdgeCases:
         assert param.num_directed_vectors == 0
         assert param.vector_names == []
         
-        samples = param.generate_samples(5, mode="directed_only")
+        samples = param.generate_vectors(5, mode="directed_only")
         assert samples == []
 
     def test_many_directed_vectors(self):
@@ -566,7 +566,7 @@ class TestParameterEdgeCases:
         param = Parameter(arg, directed_vectors=vectors)
         
         assert param.num_directed_vectors == 50
-        samples = param.generate_samples(0, mode="directed_only")
+        samples = param.generate_vectors(0, mode="directed_only")
         assert len(samples) == 50
 
     def test_complex_constraints(self):
@@ -611,7 +611,7 @@ class TestParameterIntegration:
         assert isinstance(vector[1], float)
         
         # Generate samples
-        samples = param.generate_samples(10, mode="random_only")
+        samples = param.generate_vectors(10, mode="random_only")
         assert len(samples) == 10
 
     def test_complete_workflow_with_directed_vectors(self):
@@ -629,15 +629,15 @@ class TestParameterIntegration:
         )
         
         # All mode
-        samples_all = param.generate_samples(5, mode="all")
+        samples_all = param.generate_vectors(5, mode="all")
         assert len(samples_all) == 8  # 3 directed + 5 random
         
         # Directed only
-        samples_directed = param.generate_samples(0, mode="directed_only")
+        samples_directed = param.generate_vectors(0, mode="directed_only")
         assert len(samples_directed) == 3
         
         # Random only
-        samples_random = param.generate_samples(5, mode="random_only")
+        samples_random = param.generate_vectors(5, mode="random_only")
         assert len(samples_random) == 5
 
     def test_complete_workflow_with_constraints(self):
@@ -650,7 +650,7 @@ class TestParameterIntegration:
             vector_constraints=[lambda v: v[0] < v[1]]
         )
         
-        samples = param.generate_samples(20, mode="random_only")
+        samples = param.generate_vectors(20, mode="random_only")
         assert len(samples) == 20
         assert all(s[0] < s[1] for s in samples)
 
@@ -669,12 +669,12 @@ class TestParameterIntegration:
         )
         
         # Filter by name
-        samples_name = param.generate_samples(0, filter_by_name="test2")
+        samples_name = param.generate_vectors(0, filter_by_name="test2")
         assert len(samples_name) == 1
         assert samples_name[0] == (2, 2)
         
         # Filter by index
-        samples_index = param.generate_samples(0, filter_by_index=0)
+        samples_index = param.generate_vectors(0, filter_by_index=0)
         assert len(samples_index) == 1
         assert samples_index[0] == (1, 1)
         

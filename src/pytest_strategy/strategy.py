@@ -28,6 +28,46 @@ class Strategy:
         'record_testsuite_property', 'record_xml_attribute'
     }
 
+    @staticmethod
+    def export_strategies(format: str = "json") -> str:
+        """
+        Export all registered strategies metadata.
+        
+        Args:
+            format: Export format (currently only "json" is supported)
+            
+        Returns:
+            Serialized string representation of all strategies
+        """
+        import json
+        
+        strategies_data = {}
+        
+        for name, factory in Strategy._registry.items():
+            try:
+                # Instantiate parameter with dummy count to get metadata
+                # We handle both tuple-returning and Parameter-returning factories
+                result = factory(1)
+                
+                if isinstance(result, Parameter):
+                    strategies_data[name] = result.to_dict()
+                else:
+                    # Legacy tuple support (argnames, values)
+                    argnames, _ = result
+                    strategies_data[name] = {
+                        "type": "legacy_tuple",
+                        "argnames": argnames
+                    }
+            except Exception as e:
+                strategies_data[name] = {
+                    "error": f"Failed to inspect strategy: {str(e)}"
+                }
+                
+        if format == "json":
+            return json.dumps(strategies_data, indent=2)
+        else:
+            raise ValueError(f"Unsupported format: {format}")
+
 
     @staticmethod
     def set_config(config: dict):
@@ -264,9 +304,9 @@ class Strategy:
                 # NEW MODE: Parameter-based strategy
                 param = result
 
-                # Generate samples using Parameter's generate_samples with CLI options
+                # Generate samples using Parameter's generate_vectors with CLI options
                 try:
-                    samples = param.generate_samples(
+                    samples = param.generate_vectors(
                         n=nsamples,
                         mode=vector_mode,
                         filter_by_name=vector_name,
