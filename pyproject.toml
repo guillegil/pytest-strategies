@@ -1,6 +1,6 @@
 [project]
 name = "pytest-strategies"
-version = "0.1.0"
+version = "1.0.0"
 description = "A pytest plugin for constrained-randomized test parametrization with directed testing support"
 authors = [{ name = "Guillermo Gil", email = "guillegil@proton.me" }]
 license = { text = "Apache-2.0" }
@@ -20,7 +20,7 @@ keywords = [
 ]
 
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Framework :: Pytest",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
