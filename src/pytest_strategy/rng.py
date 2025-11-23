@@ -171,18 +171,25 @@ class RNG:
 
         Args:
             length: Fixed length (if None, random between min_length and max_length)
-            min_length: Minimum length if length is None
-            max_length: Maximum length if length is None
-            charset: Characters to choose from
+            min_length: Minimum length if length is None (default: 1)
+            max_length: Maximum length if length is None (default: 20)
+            charset: Characters to choose from (default: lowercase letters)
 
         Returns:
-            Random string
+            Random string of specified length
+
+        Raises:
+            ValueError: If length is negative
 
         Example:
-            RNG.string(length=10)
-            RNG.string(min_length=5, max_length=15)
-            RNG.string(length=8, charset="0123456789")
+            RNG.string(length=10)  # Fixed length of 10
+            RNG.string(min_length=5, max_length=15)  # Variable length 5-15
+            RNG.string(length=8, charset="0123456789")  # Numeric string
+            RNG.string(length=6, charset="ABCDEF0123456789")  # Hex string
         """
+        if length is not None and length < 0:
+            raise ValueError("String length cannot be negative")
+        
         if length is None:
             length = random.randint(min_length, max_length)
         return ''.join(random.choice(charset) for _ in range(length))

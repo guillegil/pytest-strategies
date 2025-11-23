@@ -1,7 +1,7 @@
 # parameter.py
 
 from typing import Callable
-from test_args import TestArg
+from .test_args import TestArg
 
 
 class Parameter:

@@ -1,7 +1,7 @@
 # test_args.py
 
 from typing import Any, Callable
-from rng import RNGType
+from .rng import RNGType
 
 
 class TestArg:
