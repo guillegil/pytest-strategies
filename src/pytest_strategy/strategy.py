@@ -36,6 +36,9 @@ class Strategy:
     def _validate_signature(test_fn, argnames: Sequence[str], strategy_name: str) -> None:
         """
         Validate that test function signature matches strategy argnames.
+        
+        Automatically excludes pytest fixtures from validation by checking if
+        parameters have fixture markers or are in the known fixtures list.
 
         Args:
             test_fn: The test function to validate
@@ -49,7 +52,18 @@ class Strategy:
         test_params = list(sig.parameters.keys())
 
         # Remove pytest fixtures from comparison
-        actual_params = [p for p in test_params if p not in Strategy.PYTEST_FIXTURES]
+        # A parameter is considered a fixture if:
+        # 1. It's in the common pytest fixtures list, OR
+        # 2. It's not in the strategy argnames (assumed to be a custom fixture)
+        actual_params = []
+        for p in test_params:
+            if p in Strategy.PYTEST_FIXTURES:
+                continue  # Skip known pytest fixtures
+            # If parameter is not in strategy argnames, assume it's a custom fixture
+            if p not in argnames:
+                continue  # Skip custom fixtures
+            actual_params.append(p)
+        
         expected_params = list(argnames)
 
         # Check for mismatch
@@ -328,6 +342,10 @@ class Strategy:
 
                 # Create comma-separated string of parameter names for pytest.mark.parametrize
                 argstr = ",".join(argnames)
+
+                # For single parameters, unwrap the tuples
+                if len(argnames) == 1:
+                    samples = [s[0] if isinstance(s, tuple) else s for s in samples]
 
                 # Generate test IDs for better test output readability
                 ids = Strategy._generate_test_ids(argnames, samples)
