@@ -1,6 +1,6 @@
 # test_args.py
 
-from typing import Any, Callable, Optional, List
+from typing import Any, Callable
 
 
 class TestArg:
@@ -21,8 +21,8 @@ class TestArg:
         name: str,
         rng_type: Any = None,
         value: Any = None,
-        directed_values: Optional[List[Any]] = None,
-        validator: Optional[Callable[[Any], bool]] = None,
+        directed_values: list[Any] | None = None,
+        validator: Callable[[Any], bool] | None = None,
         # Control
         always_include_directed: bool = True,
         description: str = "", # Re-added description as it was removed in the instruction but not explicitly stated

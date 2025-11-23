@@ -1,6 +1,6 @@
 # parameter.py
 
-from typing import Callable, Optional, Dict, List, Tuple
+from typing import Callable
 from .test_args import TestArg
 
 
@@ -18,9 +18,9 @@ class Parameter:
     def __init__(
         self,
         *test_args: TestArg,
-        directed_vectors: Optional[Dict[str, Tuple]] = None,
+        directed_vectors: dict[str, tuple] | None = None,
         always_include_directed: bool = True,
-        vector_constraints: Optional[List[Callable[[Tuple], bool]]] = None,
+        vector_constraints: list[Callable[[tuple], bool]] | None = None,
         max_retries: int = 100,
     ):
         """
@@ -180,8 +180,8 @@ class Parameter:
         self, 
         n: int,
         mode: str = "all",
-        filter_by_name: Optional[str] = None,
-        filter_by_index: Optional[int] = None,
+        filter_by_name: str | None = None,
+        filter_by_index: int | None = None,
     ) -> list[tuple]:
         """
         Generate parameter vectors.

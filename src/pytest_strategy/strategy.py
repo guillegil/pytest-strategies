@@ -1,7 +1,7 @@
 import inspect
 import pytest
 from dataclasses import is_dataclass, fields
-from typing import Callable, Sequence, Any, Tuple, Dict, Optional, Union
+from typing import Callable, Sequence, Any, Tuple
 
 from .rng import RNG
 from .parameters import Parameter
@@ -14,7 +14,7 @@ class Strategy:
     Supports both Parameter-based and legacy tuple-based strategies.
     """
 
-    _registry: Dict[str, Callable[[int], Tuple[Sequence[str], Sequence[Any]]]] = {}
+    _registry: dict[str, Callable[[int], Tuple[Sequence[str], Sequence[Any]]]] = {}
 
     # Global placeholder for the pytest Config object
     # This will be set during pytest_configure hook to access CLI options
@@ -84,7 +84,7 @@ class Strategy:
             raise ValueError(error_msg)
 
     @staticmethod
-    def _is_dataclass_mode(test_fn, argnames: Sequence[str]) -> Tuple[bool, Optional[type]]:
+    def _is_dataclass_mode(test_fn, argnames: Sequence[str]) -> Tuple[bool, type | None]:
         """
         Detect if test function expects a single dataclass parameter.
 
