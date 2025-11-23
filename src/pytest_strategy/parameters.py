@@ -180,8 +180,8 @@ class Parameter:
         self, 
         n: int,
         mode: str = "all",
-        filter_by_name: str | None = None,
-        filter_by_index: int | None = None,
+        filter_by_name: Optional[str] = None,
+        filter_by_index: Optional[int] = None,
     ) -> list[tuple]:
         """
         Generate parameter vectors.

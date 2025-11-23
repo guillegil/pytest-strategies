@@ -22,7 +22,7 @@ class RNG:
     # ====
 
     @staticmethod
-    def seed(seed: int | None = None):
+    def seed(seed: Optional[int] = None):
         """Set the random seed and refresh the random state"""
         if seed is not None:
             RNG._seed = seed
@@ -48,7 +48,7 @@ class RNG:
     # ====
 
     @staticmethod
-    def _generate_with_constraint(generator: Callable, predicate: Callable | None = None):
+    def _generate_with_constraint(generator: Callable, predicate: Optional[Callable] = None):
         """
         Helper to generate values with optional predicate constraint.
 
@@ -79,7 +79,7 @@ class RNG:
     # ====
 
     @staticmethod
-    def integer(min: int = -2**31, max: int = 2**31-1, predicate: Callable | None = None) -> int:
+    def integer(min: int = -2**31, max: int = 2**31-1, predicate: Optional[Callable] = None) -> int:
         """
         Generate a random integer within the specified range.
 
@@ -101,7 +101,7 @@ class RNG:
         )
 
     @staticmethod
-    def float(min: float = 0.0, max: float = 1.0, predicate: Callable | None = None) -> float:
+    def float(min: float = 0.0, max: float = 1.0, predicate: Optional[Callable] = None) -> float:
         """
         Generate a random float within the specified range.
 
@@ -162,7 +162,7 @@ class RNG:
 
     @staticmethod
     def string(
-        length: int | None = None,
+        length: Optional[int] = None,
         min_length: int = 1,
         max_length: int = 20,
         charset: str = "abcdefghijklmnopqrstuvwxyz"
@@ -281,9 +281,9 @@ class RNGInteger(RNGType):
 
     def __init__(
         self,
-        min: int | None = None,
-        max: int | None = None,
-        predicate: Callable | None = None
+        min: Optional[int] = None,
+        max: Optional[int] = None,
+        predicate: Optional[Callable] = None
     ):
         self.min = min if min is not None else -2**31
         self.max = max if max is not None else 2**31 - 1
@@ -302,9 +302,9 @@ class RNGFloat(RNGType):
 
     def __init__(
         self,
-        min: float | None = None,
-        max: float | None = None,
-        predicate: Callable | None = None
+        min: Optional[float] = None,
+        max: Optional[float] = None,
+        predicate: Optional[Callable] = None
     ):
         self.min = min if min is not None else 0.0
         self.max = max if max is not None else 1.0
@@ -452,7 +452,7 @@ class RNGString(RNGType):
 
     def __init__(
         self,
-        length: int | None = None,
+        length: Optional[int] = None,
         min_length: int = 1,
         max_length: int = 20,
         charset: str = "abcdefghijklmnopqrstuvwxyz"

@@ -1,7 +1,7 @@
 import inspect
 import pytest
 from dataclasses import is_dataclass, fields
-from typing import Callable, Sequence, Any, Tuple, Dict
+from typing import Callable, Sequence, Any, Tuple, Dict, Optional, Union
 
 from .rng import RNG
 from .parameters import Parameter
@@ -84,7 +84,7 @@ class Strategy:
             raise ValueError(error_msg)
 
     @staticmethod
-    def _is_dataclass_mode(test_fn, argnames: Sequence[str]) -> Tuple[bool, type | None]:
+    def _is_dataclass_mode(test_fn, argnames: Sequence[str]) -> Tuple[bool, Optional[type]]:
         """
         Detect if test function expects a single dataclass parameter.
 
