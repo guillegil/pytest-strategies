@@ -5,6 +5,8 @@ import functools
 from dataclasses import is_dataclass, fields
 
 from .rng import RNG
+from .parameters import Parameter
+from .test_args import TestArg
 
 
 class Strategy:
@@ -126,13 +128,18 @@ class Strategy:
 
             raise ValueError(error_msg)
 
+        # Get field order from dataclass
+        dc_field_names = [f.name for f in fields(dataclass_type)]
+        
         # Convert samples to dataclass instances
-        # Need to create dict with correct field order
         dataclass_samples = []
         for sample in samples:
             # Create dict mapping argnames to values
-            kwargs = dict(zip(argnames, sample))
-            dataclass_samples.append(dataclass_type(**kwargs))
+            value_dict = dict(zip(argnames, sample))
+            # Reorder values to match dataclass field order
+            ordered_values = [value_dict[name] for name in dc_field_names]
+            # Create dataclass instance with ordered values
+            dataclass_samples.append(dataclass_type(*ordered_values))
 
         return dataclass_samples
 
@@ -164,7 +171,11 @@ class Strategy:
         Decorator to apply a registered strategy to a test function.
         Automatically parametrizes the test with generated samples.
 
-        Supports two modes:
+        Supports two factory return types:
+        1. Parameter instance (recommended): Enables full CLI support
+        2. Tuple (argnames, samples): Backward compatibility
+
+        Supports two test modes:
         1. Named parameters: test_fn(a, b, c)
         2. Dataclass parameter: test_fn(params: MyDataclass)
 
@@ -176,24 +187,43 @@ class Strategy:
             Decorator function that parametrizes the test
 
         Usage:
-            # Named parameters
+            # With Parameter (recommended)
+            @Strategy.register("my_strategy")
+            def create_strategy(nsamples):
+                return Parameter(
+                    TestArg("x", rng_type=RNGInteger(0, 100)),
+                    TestArg("y", rng_type=RNGInteger(0, 100)),
+                    directed_vectors={"origin": (0, 0)}
+                )
+
             @Strategy.strategy("my_strategy")
-            def test_function(param1, param2):
+            def test_function(x, y):
                 # Test implementation
 
-            # Dataclass parameter
-            @Strategy.strategy("my_strategy")
-            def test_function(params: MyDataclass):
-                # Test implementation using params.param1, params.param2
+            # With tuple (backward compatibility)
+            @Strategy.register("legacy_strategy")
+            def create_samples(nsamples):
+                return ("x", "y"), [(1, 2), (3, 4)]
+
+            @Strategy.strategy("legacy_strategy")
+            def test_function(x, y):
+                # Test implementation
         """
         def decorate(test_fn):
             # Validate that the strategy exists in the registry
             if name not in Strategy._registry:
-                raise ValueError(f"No strategy registered under {name!r}")
+                available = list(Strategy._registry.keys())
+                raise ValueError(
+                    f"Strategy '{name}' not found. "
+                    f"Available strategies: {available if available else 'none'}"
+                )
 
-            # Retrieve sample count from CLI options (default to 10 if no config available)
+            # Get CLI options
             cfg = Strategy._pytest_config
-            ns = cfg.getoption("nsamples") if cfg else 10
+            nsamples = cfg.getoption("nsamples") if cfg else 10
+            vector_mode = cfg.getoption("vector_mode") if cfg else "all"
+            vector_name = cfg.getoption("vector_name") if cfg else None
+            vector_index = cfg.getoption("vector_index") if cfg else None
 
             # Get the factory function for this strategy
             factory = Strategy._registry[name]
@@ -201,32 +231,77 @@ class Strategy:
             # Refresh the random number generator seed
             RNG.refresh_seed()
 
-            # Try to call factory with positional argument first
-            # If that fails (TypeError), try with keyword argument 'nsamples'
+            # Call factory function with keyword argument
             try:
-                result = factory(ns)
-            except TypeError:
-                result = factory(nsamples=ns)
+                result = factory(nsamples=nsamples)
+            except TypeError as e:
+                # Try positional for backward compatibility
+                try:
+                    result = factory(nsamples)
+                except Exception as inner_e:
+                    raise ValueError(
+                        f"Error calling strategy factory '{name}': {e}. "
+                        f"Factory should accept 'nsamples' parameter."
+                    ) from inner_e
 
-            # Validate that factory returns the expected tuple format
-            if not isinstance(result, tuple) or len(result) != 2:
-                raise ValueError(
-                    f"Strategy {name!r} must return a tuple (argnames, samples), got {result!r}"
-                )
+            # Detect if result is a Parameter instance or tuple
+            if isinstance(result, Parameter):
+                # NEW MODE: Parameter-based strategy
+                param = result
 
-            # Unpack the result into parameter names and sample values
-            argnames, samples = result
+                # Generate samples using Parameter's generate_samples with CLI options
+                try:
+                    samples = param.generate_samples(
+                        n=nsamples,
+                        mode=vector_mode,
+                        filter_by_name=vector_name,
+                        filter_by_index=vector_index
+                    )
+                except KeyError as e:
+                    # If filtering by name/index and vector doesn't exist, return empty samples
+                    # This allows CLI filtering to work gracefully across multiple strategies
+                    if vector_name or vector_index is not None:
+                        # Return empty list - pytest will skip this test
+                        samples = []
+                    else:
+                        raise ValueError(
+                            f"Error generating samples for strategy '{name}': {e}"
+                        ) from e
+                except Exception as e:
+                    raise ValueError(
+                        f"Error generating samples for strategy '{name}': {e}"
+                    ) from e
 
-            # Convert single string argname to tuple for consistency
-            if isinstance(argnames, str):
-                argnames = (argnames,)
+                # Get argument names from Parameter
+                argnames = param.arg_names
+
+            else:
+                # LEGACY MODE: Tuple-based strategy (backward compatibility)
+                # Validate that factory returns the expected tuple format
+                if not isinstance(result, tuple) or len(result) != 2:
+                    raise ValueError(
+                        f"Strategy '{name}' must return either a Parameter instance "
+                        f"or a tuple (argnames, samples), got {type(result).__name__}"
+                    )
+
+                # Unpack the result into parameter names and sample values
+                argnames, samples = result
+
+                # Convert single string argname to tuple for consistency
+                if isinstance(argnames, str):
+                    argnames = (argnames,)
 
             # Detect dataclass mode
             is_dc_mode, dc_type = Strategy._is_dataclass_mode(test_fn, argnames)
 
             if is_dc_mode:
                 # DATACLASS MODE: Convert samples to dataclass instances
-                dataclass_samples = Strategy._convert_to_dataclass(samples, argnames, dc_type)
+                try:
+                    dataclass_samples = Strategy._convert_to_dataclass(samples, argnames, dc_type)
+                except Exception as e:
+                    raise ValueError(
+                        f"Error converting samples to dataclass for strategy '{name}': {e}"
+                    ) from e
 
                 # Get the single parameter name
                 sig = inspect.signature(test_fn)
@@ -234,11 +309,7 @@ class Strategy:
                 param_name = test_params[0]
 
                 # Generate test IDs for dataclass mode
-                ids = []
-                for i, dc_instance in enumerate(dataclass_samples):
-                    # Create readable ID from dataclass fields
-                    field_strs = [f"{f.name}={getattr(dc_instance, f.name)!r}" for f in fields(dc_type)]
-                    ids.append(",".join(field_strs))
+                ids = Strategy._generate_dataclass_ids(dataclass_samples, dc_type)
 
                 # Apply pytest parametrize with single dataclass parameter
                 return pytest.mark.parametrize(param_name, dataclass_samples, ids=ids)(test_fn)
@@ -248,24 +319,93 @@ class Strategy:
 
                 # Validate signature if requested
                 if validate_signature:
-                    Strategy._validate_signature(test_fn, argnames, name)
+                    try:
+                        Strategy._validate_signature(test_fn, argnames, name)
+                    except ValueError as e:
+                        raise ValueError(
+                            f"Signature validation failed for strategy '{name}': {e}"
+                        ) from e
 
                 # Create comma-separated string of parameter names for pytest.mark.parametrize
                 argstr = ",".join(argnames)
 
                 # Generate test IDs for better test output readability
-                if len(argnames) == 1:
-                    # Single parameter: format as "param_name=value"
-                    ids = [f"{argnames[0]}={v!r}" for v in samples]
-                else:
-                    # Multiple parameters: format as "param1=value1,param2=value2"
-                    ids = [
-                        ",".join(f"{n}={v!r}" for n, v in zip(argnames, vals))
-                        for vals in samples
-                    ]
+                ids = Strategy._generate_test_ids(argnames, samples)
 
                 # Apply pytest parametrize decorator to the test function
                 # This will create multiple test instances, one for each sample
                 return pytest.mark.parametrize(argstr, samples, ids=ids)(test_fn)
 
         return decorate
+
+    @staticmethod
+    def _generate_test_ids(argnames: Sequence[str], samples: Sequence[Any], max_length: int = 80) -> list[str]:
+        """
+        Generate concise test IDs from argument names and sample values.
+
+        Args:
+            argnames: Sequence of argument names
+            samples: Sequence of sample values (tuples or single values)
+            max_length: Maximum length for test ID (default: 80)
+
+        Returns:
+            List of test ID strings
+        """
+        ids = []
+
+        for sample in samples:
+            if len(argnames) == 1:
+                # Single parameter: format as "param_name=value"
+                value = sample if not isinstance(sample, tuple) else sample[0]
+                val_str = repr(value)
+                if len(val_str) > max_length - len(argnames[0]) - 1:
+                    val_str = val_str[:max_length - len(argnames[0]) - 4] + "..."
+                ids.append(f"{argnames[0]}={val_str}")
+            else:
+                # Multiple parameters: format as "param1=value1,param2=value2"
+                parts = []
+                for arg_name, value in zip(argnames, sample):
+                    val_str = repr(value)
+                    # Limit individual value length
+                    if len(val_str) > 20:
+                        val_str = val_str[:17] + "..."
+                    parts.append(f"{arg_name}={val_str}")
+
+                full_id = ",".join(parts)
+                # Truncate if too long
+                if len(full_id) > max_length:
+                    full_id = full_id[:max_length - 3] + "..."
+                ids.append(full_id)
+
+        return ids
+
+    @staticmethod
+    def _generate_dataclass_ids(dataclass_samples: list, dc_type: type, max_length: int = 80) -> list[str]:
+        """
+        Generate test IDs for dataclass mode.
+
+        Args:
+            dataclass_samples: List of dataclass instances
+            dc_type: Dataclass type
+            max_length: Maximum length for test ID
+
+        Returns:
+            List of test ID strings
+        """
+        ids = []
+        for dc_instance in dataclass_samples:
+            # Create readable ID from dataclass fields
+            field_strs = []
+            for f in fields(dc_type):
+                val = getattr(dc_instance, f.name)
+                val_str = repr(val)
+                if len(val_str) > 20:
+                    val_str = val_str[:17] + "..."
+                field_strs.append(f"{f.name}={val_str}")
+
+            full_id = ",".join(field_strs)
+            if len(full_id) > max_length:
+                full_id = full_id[:max_length - 3] + "..."
+            ids.append(full_id)
+
+        return ids
