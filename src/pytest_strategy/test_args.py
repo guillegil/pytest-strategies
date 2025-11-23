@@ -13,6 +13,8 @@ class TestArg:
     2. Random generation: Uses RNGType to generate random values
     3. Mixed: Directed values + random generation
     """
+    
+    __test__ = False  # Tell pytest this is not a test class
 
     def __init__(
         self,
