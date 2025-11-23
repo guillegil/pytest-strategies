@@ -5,7 +5,7 @@
 `pytest-strategies` extends pytest with a robust framework for defining test strategies that combine **random generation**, **directed edge cases**, and **constraints**. It bridges the gap between simple parametrization and property-based testing, giving you full control over your test data.
 
 [![Tests](https://github.com/guillegil/pytest-strategies/actions/workflows/tests.yml/badge.svg)](https://github.com/guillegil/pytest-strategies/actions)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ---
@@ -84,15 +84,15 @@ def math_strategy(nsamples: int):
 ### 2. RNG Types
 `pytest-strategies` provides rich, type-safe generators:
 
-| Type | Description | Example |
-|------|-------------|---------|
-| `RNGInteger` | Integers in range | `RNGInteger(0, 10)` |
-| `RNGFloat` | Floats in range | `RNGFloat(0.0, 1.0)` |
-| `RNGBoolean` | Booleans with probability | `RNGBoolean(true_probability=0.8)` |
-| `RNGString` | Random strings | `RNGString(min_length=5, max_length=10)` |
-| `RNGChoice` | Choice from list | `RNGChoice(["a", "b", "c"])` |
-| `RNGEnum` | Python Enum members | `RNGEnum(MyEnum)` |
-| `RNGWeighted*` | Weighted ranges | `RNGWeightedInteger({(0,10): 0.9, (11,100): 0.1})` |
+| Type           | Description               | Example                                            |
+| -------------- | ------------------------- | -------------------------------------------------- |
+| `RNGInteger`   | Integers in range         | `RNGInteger(0, 10)`                                |
+| `RNGFloat`     | Floats in range           | `RNGFloat(0.0, 1.0)`                               |
+| `RNGBoolean`   | Booleans with probability | `RNGBoolean(true_probability=0.8)`                 |
+| `RNGString`    | Random strings            | `RNGString(min_length=5, max_length=10)`           |
+| `RNGChoice`    | Choice from list          | `RNGChoice(["a", "b", "c"])`                       |
+| `RNGEnum`      | Python Enum members       | `RNGEnum(MyEnum)`                                  |
+| `RNGWeighted*` | Weighted ranges           | `RNGWeightedInteger({(0,10): 0.9, (11,100): 0.1})` |
 
 ### 3. Enums & Weighted Generation
 The `RNGEnum` class supports standard Python Enums, including weighted selection and predicates.
@@ -153,13 +153,13 @@ def test_db_insert(username, age, database): # 'database' is a fixture
 
 Control test generation directly from the command line:
 
-| Option | Description | Example |
-|--------|-------------|---------|
-| `--nsamples` | Number of random samples to generate (default: 10) | `pytest --nsamples=50` |
-| `--vector-mode` | Generation mode: `all`, `random_only`, `directed_only` | `pytest --vector-mode=directed_only` |
-| `--vector-name` | Run only a specific directed vector by name | `pytest --vector-name=edge_case_1` |
-| `--vector-index` | Run only a specific sample by index | `pytest --vector-index=0` |
-| `--rng-seed` | Set seed for reproducibility | `pytest --rng-seed=42` |
+| Option           | Description                                            | Example                              |
+| ---------------- | ------------------------------------------------------ | ------------------------------------ |
+| `--nsamples`     | Number of random samples to generate (default: 10)     | `pytest --nsamples=50`               |
+| `--vector-mode`  | Generation mode: `all`, `random_only`, `directed_only` | `pytest --vector-mode=directed_only` |
+| `--vector-name`  | Run only a specific directed vector by name            | `pytest --vector-name=edge_case_1`   |
+| `--vector-index` | Run only a specific sample by index                    | `pytest --vector-index=0`            |
+| `--rng-seed`     | Set seed for reproducibility                           | `pytest --rng-seed=42`               |
 
 ## 🔄 Reproducibility
 
