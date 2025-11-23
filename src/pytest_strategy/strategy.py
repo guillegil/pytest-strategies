@@ -1,8 +1,7 @@
-from typing import Callable, Sequence, Any, Tuple
-import pytest
 import inspect
-import functools
+import pytest
 from dataclasses import is_dataclass, fields
+from typing import Callable, Sequence, Any, Tuple, Dict
 
 from .rng import RNG
 from .parameters import Parameter
@@ -10,10 +9,12 @@ from .test_args import TestArg
 
 
 class Strategy:
+    """
+    Decorator-based strategy system for pytest parametrization.
+    Supports both Parameter-based and legacy tuple-based strategies.
+    """
 
-    # Global registry to store strategy factory functions
-    # Key: strategy name (string), Value: factory function that takes sample count and returns (argnames, samples)
-    _registry: dict[str, Callable[[int], Tuple[Sequence[str], Sequence[Any]]]] = {}
+    _registry: Dict[str, Callable[[int], Tuple[Sequence[str], Sequence[Any]]]] = {}
 
     # Global placeholder for the pytest Config object
     # This will be set during pytest_configure hook to access CLI options

@@ -1,25 +1,27 @@
 # parameter.py
 
-from typing import Callable
+from typing import Callable, Optional, Dict, List, Tuple
 from .test_args import TestArg
 
 
 class Parameter:
     """
-    Container for multiple TestArg instances that define test parameters.
-    Handles generation of parameter vectors (tuples of values).
-
-    A parameter vector is a tuple of values, one for each TestArg.
-    Directed vectors are named, predefined test cases that can be
-    referenced by name or index via CLI arguments.
+    Manages a collection of TestArg instances and generates parameter vectors.
+    
+    Supports:
+    - Multiple test arguments
+    - Directed test vectors (named edge cases)
+    - Vector-level constraints
+    - CLI-based filtering
     """
 
     def __init__(
         self,
         *test_args: TestArg,
-        directed_vectors: dict[str, tuple] | None = None,
+        directed_vectors: Optional[Dict[str, Tuple]] = None,
         always_include_directed: bool = True,
-        vector_constraints: list[Callable[[tuple], bool]] | None = None,
+        vector_constraints: Optional[List[Callable[[Tuple], bool]]] = None,
+        max_retries: int = 100,
     ):
         """
         Initialize a Parameter container.

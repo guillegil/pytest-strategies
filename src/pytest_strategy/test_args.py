@@ -1,32 +1,31 @@
 # test_args.py
 
-from typing import Any, Callable
-from .rng import RNGType
+from typing import Any, Callable, Optional, List
 
 
 class TestArg:
     """
-    Define a single test argument for pytest parametrization.
-
-    TestArg supports three modes:
-    1. Static value: Fixed value for directed testing
-    2. Random generation: Uses RNGType to generate random values
-    3. Mixed: Directed values + random generation
+    Represents a single test argument with its generation strategy.
+    
+    A TestArg can be:
+    - Static (fixed value)
+    - Random (generated using an RNG type)
+    - Directed (from a predefined list of values)
     """
     
-    __test__ = False  # Tell pytest this is not a test class
+    # Prevent pytest from collecting this class as a test
+    __test__ = False
 
     def __init__(
         self,
         name: str,
-        rng_type: RNGType | None = None,
-        description: str = "",
-        # For directed testing
+        rng_type: Any = None,
         value: Any = None,
-        directed_values: list[Any] | None = None,
+        directed_values: Optional[List[Any]] = None,
+        validator: Optional[Callable[[Any], bool]] = None,
         # Control
         always_include_directed: bool = True,
-        validator: Callable[[Any], bool] | None = None,
+        description: str = "", # Re-added description as it was removed in the instruction but not explicitly stated
     ):
         """
         Initialize a test argument.

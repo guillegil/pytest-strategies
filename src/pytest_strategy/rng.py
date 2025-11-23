@@ -1,6 +1,6 @@
 # rng.py
 
-from typing import Callable, Type
+from typing import Callable, Type, Dict, Tuple, Optional
 from enum import Enum
 import random
 import time
@@ -201,8 +201,8 @@ class RNG:
 
     @staticmethod
     def winteger(
-        ranges: dict[tuple[int, int], float],
-        predicate: Callable | None = None
+        ranges: Dict[Tuple[int, int], float],
+        predicate: Optional[Callable] = None
     ) -> int:
         """
         Generate a weighted integer from multiple ranges.
@@ -231,8 +231,8 @@ class RNG:
 
     @staticmethod
     def wfloat(
-        ranges: dict[tuple[float, float], float],
-        predicate: Callable | None = None
+        ranges: Dict[Tuple[float, float], float],
+        predicate: Optional[Callable] = None
     ) -> float:
         """
         Generate a weighted float from multiple ranges.
@@ -374,8 +374,8 @@ class RNGEnum(RNGType):
     def __init__(
         self,
         enum_class: Type[Enum],
-        weights: dict[Enum, float] | None = None,
-        predicate: Callable[[Enum], bool] | None = None
+        weights: Optional[Dict[Enum, float]] = None,
+        predicate: Optional[Callable[[Enum], bool]] = None
     ):
         """
         Initialize RNGEnum.
@@ -475,8 +475,8 @@ class RNGWeightedInteger(RNGType):
 
     def __init__(
         self,
-        ranges: dict[tuple[int, int], float],
-        predicate: Callable | None = None
+        ranges: Dict[Tuple[int, int], float],
+        predicate: Optional[Callable] = None
     ):
         self.ranges = ranges
         self.predicate = predicate
@@ -494,8 +494,8 @@ class RNGWeightedFloat(RNGType):
 
     def __init__(
         self,
-        ranges: dict[tuple[float, float], float],
-        predicate: Callable | None = None
+        ranges: Dict[Tuple[float, float], float],
+        predicate: Optional[Callable] = None
     ):
         self.ranges = ranges
         self.predicate = predicate
