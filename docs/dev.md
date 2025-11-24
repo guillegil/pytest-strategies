@@ -1,10 +1,10 @@
-# pytest_strategies
+# pytest_strategy
 
 A pytest plugin for constrained-randomized test parametrization with directed testing support.
 
 ## Overview
 
-`pytest_strategies` enables you to write powerful parametrized tests that combine:
+`pytest_strategy` enables you to write powerful parametrized tests that combine:
 - **Constrained random generation** - Generate test inputs with specific constraints
 - **Directed testing** - Define specific test cases (edge cases, known bugs, etc.)
 - **Reproducibility** - Seed-based random generation for consistent test runs
@@ -24,8 +24,8 @@ The main goal is to make pytest tests more powerful by allowing you to:
 ### Basic Usage
 
 ```python
-from pytest_strategies import Strategy, Parameter, TestArg
-from pytest_strategies.rng import RNGInteger, RNGFloat, RNGChoice
+from pytest_strategy import Strategy, Parameter, TestArg
+from pytest_strategy.rng import RNGInteger, RNGFloat, RNGChoice
 
 # Define a strategy
 @Strategy.register("test_addition_strategy")
@@ -81,7 +81,7 @@ pytest test_example.py --seed 42
 ### File Structure
 
 ```
-pytest_strategies/
+pytest_strategy/
 ├── __init__.py          # Package initialization
 ├── plugin.py            # Pytest plugin hooks and CLI options
 ├── strategies.py        # Strategy decorator and registry
@@ -101,7 +101,7 @@ The foundation of randomized testing. Provides:
 Core random generation with seed management:
 
 ```python
-from pytest_strategies.rng import RNG
+from pytest_strategy.rng import RNG
 
 # Seed management
 RNG.seed(42)              # Set seed for reproducibility
@@ -134,7 +134,7 @@ RNG.wfloat({
 Object-oriented approach for defining argument types:
 
 ```python
-from pytest_strategies.rng import (
+from pytest_strategy.rng import (
     RNGInteger, RNGFloat, RNGBoolean, RNGChoice, 
     RNGString, RNGWeightedInteger, RNGWeightedFloat
 )
@@ -170,8 +170,8 @@ python_type = int_type.python_type  # Returns: int
 Defines a single test argument with its type and generation rules.
 
 ```python
-from pytest_strategies import TestArg
-from pytest_strategies.rng import RNGInteger, RNGChoice
+from pytest_strategy import TestArg
+from pytest_strategy.rng import RNGInteger, RNGChoice
 
 # Pure random generation
 arg1 = TestArg(
@@ -229,8 +229,8 @@ samples = arg3.generate_samples(10)        # 10 samples (+ directed if configure
 Groups multiple `TestArg` instances into parameter vectors (tuples).
 
 ```python
-from pytest_strategies import Parameter, TestArg
-from pytest_strategies.rng import RNGInteger, RNGFloat, RNGChoice
+from pytest_strategy import Parameter, TestArg
+from pytest_strategy.rng import RNGInteger, RNGFloat, RNGChoice
 
 # Create parameter with multiple arguments
 param = Parameter(
@@ -265,12 +265,12 @@ param.add_constraint(lambda v: v[0] < v[1])  # Ensure first < second
 
 **Sampling Modes:**
 
-| Mode | Directed Vectors | Random Samples | Use Case |
-|------|-----------------|----------------|----------|
-| `all` | ✅ All | ✅ n samples | Comprehensive testing (default) |
-| `random_only` | ❌ None | ✅ n samples | Pure randomized testing |
-| `directed_only` | ✅ All | ❌ None | Only known test cases |
-| `mixed` | ⚠️ Conditional* | ✅ n samples | Flexible (respects flag) |
+| Mode            | Directed Vectors | Random Samples | Use Case                        |
+| --------------- | ---------------- | -------------- | ------------------------------- |
+| `all`           | ✅ All            | ✅ n samples    | Comprehensive testing (default) |
+| `random_only`   | ❌ None           | ✅ n samples    | Pure randomized testing         |
+| `directed_only` | ✅ All            | ❌ None         | Only known test cases           |
+| `mixed`         | ⚠️ Conditional*   | ✅ n samples    | Flexible (respects flag)        |
 
 *Respects `always_include_directed` initialization flag
 
@@ -295,8 +295,8 @@ param.add_constraint(lambda v: v[0] < v[1])  # Ensure first < second
 Manages strategy registration and applies parametrization to tests.
 
 ```python
-from pytest_strategies import Strategy, Parameter, TestArg
-from pytest_strategies.rng import RNGInteger
+from pytest_strategy import Strategy, Parameter, TestArg
+from pytest_strategy.rng import RNGInteger
 
 # Register a strategy
 @Strategy.register("my_strategy")
@@ -364,8 +364,8 @@ Provides pytest hooks and CLI options.
 ```python
 # test_math_operations.py
 
-from pytest_strategies import Strategy, Parameter, TestArg
-from pytest_strategies.rng import RNGInteger, RNGWeightedInteger
+from pytest_strategy import Strategy, Parameter, TestArg
+from pytest_strategy.rng import RNGInteger, RNGWeightedInteger
 
 @Strategy.register("division_strategy")
 def create_division_samples(nsamples):
@@ -417,7 +417,7 @@ def test_division(dividend, divisor):
 
 @Strategy.register("string_concat_strategy")
 def create_string_samples(nsamples):
-    from pytest_strategies.rng import RNGString, RNGChoice
+    from pytest_strategy.rng import RNGString, RNGChoice
 
     param = Parameter(
         TestArg("str1", rng_type=RNGString(min_length=0, max_length=20)),
@@ -520,7 +520,7 @@ param.add_constraint(lambda v: v[0] + v[1] <= 100)
 
 ```python
 # Set seed in test or via CLI
-from pytest_strategies.rng import RNG
+from pytest_strategy.rng import RNG
 
 def test_something():
     RNG.seed(42)
@@ -632,4 +632,4 @@ Contributions welcome! Areas of interest:
 
 ---
 
-**pytest_strategies** - Making randomized testing easy and powerful! 🎲✨
+**pytest_strategy** - Making randomized testing easy and powerful! 🎲✨

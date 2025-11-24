@@ -15,8 +15,8 @@ Main Components:
 - RNGType classes: Type-safe random generators (RNGInteger, RNGFloat, etc.)
 
 Example Usage:
-    from pytest_strategies import Strategy, Parameter, TestArg
-    from pytest_strategies.rng import RNGInteger
+    from pytest_strategy import Strategy, Parameter, TestArg
+    from pytest_strategy.rng import RNGInteger
 
     @Strategy.register("addition_strategy")
     def create_samples(nsamples):
@@ -53,7 +53,7 @@ CLI Options:
     pytest --vector-name "zeros"      # Run specific directed vector
 """
 
-__version__ = "0.1.0"
+__version__ = "1.1.0a1"
 __author__ = "Guillermo Gil"
 __email__ = "guillegil@proton.me"
 

@@ -2,7 +2,7 @@
 name = "pytest-strategies"
 version = "1.1.0a1"
 description = "A pytest plugin for constrained-randomized test parametrization with directed testing support"
-authors = [{ name = "Guillermo Gil", email = "guillegil@proton.me" }]
+authors = [{ name = "Guillermo Gil", email = "guillegirod@gmail.com" }]
 license = { text = "Apache-2.0" }
 readme = "README.md"
 requires-python = ">=3.10"
@@ -68,11 +68,11 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["pytest_strategies*"]
+include = ["pytest_strategy*"]
 exclude = ["tests*", "docs*"]
 
 [tool.setuptools.package-data]
-pytest_strategies = ["py.typed"]
+pytest_strategy = ["py.typed"]
 
 # ============================================================================
 # BLACK - Code Formatting

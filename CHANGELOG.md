@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Exhaustive Generation**: Support for `nsamples="auto"` to generate the Cartesian product of all sequence arguments.
 - **Mixed Mode Generation**: Automatically handles mixing sequence arguments with random arguments (random values are regenerated for each sequence combination).
 - **CLI Update**: Updated `--nsamples` to accept "auto" or an integer.
+- **Test Values**: New `test_values` (TestArg) and `test_vectors` (Parameter) arguments for defining specific test scenarios.
+- **Test Vector Mode**: New `--vector-mode=test` CLI option to execute only test vectors.
 
 ## [1.0.0] - 2025-11-23
 
