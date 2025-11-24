@@ -455,10 +455,15 @@ class RNGSequence(RNGType):
     In exhaustive mode (nsamples="auto"), allows iterating through the sequence.
     """
 
-    def __init__(self, sequence: Sequence):
+    def __init__(self, sequence: Sequence, predicate: Callable | None = None):
         self.sequence = list(sequence)
+        
+        # Apply predicate if provided
+        if predicate:
+            self.sequence = [x for x in self.sequence if predicate(x)]
+            
         if not self.sequence:
-            raise RNGValueError("Sequence cannot be empty")
+            raise RNGValueError("Sequence cannot be empty (or all items were filtered by predicate)")
 
     def generate(self):
         """Generate a random value from the sequence (normal mode)"""

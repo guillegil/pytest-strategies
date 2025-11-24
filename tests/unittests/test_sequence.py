@@ -20,6 +20,16 @@ class TestRNGSequence:
         with pytest.raises(RNGValueError, match="Sequence cannot be empty"):
             RNGSequence([])
 
+    def test_initialization_with_predicate(self):
+        """Test initialization with predicate filtering."""
+        seq = RNGSequence([1, 2, 3, 4, 5], predicate=lambda x: x % 2 == 0)
+        assert seq.sequence == [2, 4]
+        
+    def test_initialization_all_filtered_raises_error(self):
+        """Test that error is raised if predicate filters all items."""
+        with pytest.raises(RNGValueError, match="filtered by predicate"):
+            RNGSequence([1, 3, 5], predicate=lambda x: x % 2 == 0)
+
     def test_generate_random(self):
         """Test random generation (normal mode)."""
         RNG.seed(42)
@@ -87,3 +97,16 @@ class TestParameterExhaustive:
         # Expected: (1,2), (1,3), (2,3)
         assert len(samples) == 3
         assert all(s[0] < s[1] for s in samples)
+
+    def test_exhaustive_with_predicate_sequence(self):
+        """Test exhaustive generation with filtered sequence."""
+        param = Parameter(
+            TestArg("x", rng_type=RNGSequence([1, 2, 3, 4], predicate=lambda x: x % 2 == 0)),
+            TestArg("y", rng_type=RNGSequence(["a", "b"]))
+        )
+        samples = param.generate_exhaustive()
+        # x should only be [2, 4]
+        # y is ["a", "b"]
+        # Expected: (2, "a"), (2, "b"), (4, "a"), (4, "b")
+        assert len(samples) == 4
+        assert set(s[0] for s in samples) == {2, 4}

@@ -81,3 +81,29 @@ def test_pairs(a, b):
     """
     print(f"Testing pair: {a} < {b}")
     assert a < b
+
+
+# 4. Filtered Sequence (Predicate Support)
+@Strategy.register("filtered_sequence")
+def filtered_sequence_strategy(nsamples):
+    return Parameter(
+        # Use a predicate to filter the sequence during initialization
+        # Here we take range(20) but keep only multiples of 3
+        TestArg("val", rng_type=RNGSequence(range(20), predicate=lambda x: x % 3 == 0)),
+        TestArg("label", rng_type=RNGSequence(["A", "B"]))
+    )
+
+@Strategy.strategy("filtered_sequence")
+def test_filtered(val, label):
+    """
+    Test with a filtered sequence.
+    
+    The sequence range(20) filtered by (x % 3 == 0) yields:
+    [0, 3, 6, 9, 12, 15, 18] (7 items)
+    
+    With --nsamples=auto, this generates 7 * 2 = 14 tests.
+    """
+    print(f"Testing filtered value: {val} with label {label}")
+    assert val % 3 == 0
+    assert val < 20
+    assert label in ["A", "B"]

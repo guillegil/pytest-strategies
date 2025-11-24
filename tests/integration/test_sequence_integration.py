@@ -110,3 +110,28 @@ class TestSequenceIntegration:
         
         # Should fail collection or execution
         result.stdout.fnmatch_lines(["*ValueError: No sequence arguments found*"])
+
+    def test_auto_mode_filtered_count(self, pytester):
+        """Verify the number of tests generated with filtered sequences."""
+        pytester.makepyfile("""
+            from pytest_strategy import Strategy, Parameter, TestArg
+            from pytest_strategy.rng import RNGSequence
+
+            @Strategy.register("filtered_strat")
+            def strat(nsamples):
+                return Parameter(
+                    # Range(10) filtered by even numbers: 0, 2, 4, 6, 8 (5 items)
+                    TestArg("val", rng_type=RNGSequence(range(10), predicate=lambda x: x % 2 == 0)),
+                    TestArg("label", rng_type=RNGSequence(["A", "B"]))
+                )
+
+            @Strategy.strategy("filtered_strat")
+            def test_gen(val, label):
+                pass
+        """)
+        
+        # Run with nsamples="auto"
+        result = pytester.runpytest("--nsamples=auto")
+        
+        # Should have 10 tests (5 * 2)
+        result.assert_outcomes(passed=10)
