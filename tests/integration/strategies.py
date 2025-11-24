@@ -28,7 +28,7 @@ from pytest_strategy import (
 # ============================================================================
 
 @Strategy.register("simple_integer_strategy")
-def create_simple_integer_strategy(nsamples: int) -> Parameter:
+def create_simple_integer_strategy(nsamples: int | str) -> Parameter:
     """Simple strategy with single integer parameter."""
     return Parameter(
         TestArg("value", rng_type=RNGInteger(0, 100)),
@@ -41,7 +41,7 @@ def create_simple_integer_strategy(nsamples: int) -> Parameter:
 
 
 @Strategy.register("multi_param_strategy")
-def create_multi_param_strategy(nsamples: int) -> Parameter:
+def create_multi_param_strategy(nsamples: int | str) -> Parameter:
     """Strategy with multiple parameters of different types."""
     return Parameter(
         TestArg("count", rng_type=RNGInteger(1, 100)),
@@ -60,7 +60,7 @@ def create_multi_param_strategy(nsamples: int) -> Parameter:
 # ============================================================================
 
 @Strategy.register("constrained_range_strategy")
-def create_constrained_range_strategy(nsamples: int) -> Parameter:
+def create_constrained_range_strategy(nsamples: int | str) -> Parameter:
     """Strategy with constraints ensuring min < max."""
     return Parameter(
         TestArg("min_val", rng_type=RNGInteger(0, 50)),
@@ -77,7 +77,7 @@ def create_constrained_range_strategy(nsamples: int) -> Parameter:
 
 
 @Strategy.register("complex_constraint_strategy")
-def create_complex_constraint_strategy(nsamples: int) -> Parameter:
+def create_complex_constraint_strategy(nsamples: int | str) -> Parameter:
     """Strategy with multiple constraints."""
     return Parameter(
         TestArg("x", rng_type=RNGInteger(0, 100, predicate=lambda x: x % 2 == 0)),
@@ -98,7 +98,7 @@ def create_complex_constraint_strategy(nsamples: int) -> Parameter:
 # ============================================================================
 
 @Strategy.register("api_request_strategy")
-def create_api_request_strategy(nsamples: int) -> Parameter:
+def create_api_request_strategy(nsamples: int | str) -> Parameter:
     """Strategy simulating API request parameters."""
     return Parameter(
         TestArg("user_id", rng_type=RNGInteger(1, 10000)),
@@ -123,7 +123,7 @@ def create_api_request_strategy(nsamples: int) -> Parameter:
 
 
 @Strategy.register("database_query_strategy")
-def create_database_query_strategy(nsamples: int) -> Parameter:
+def create_database_query_strategy(nsamples: int | str) -> Parameter:
     """Strategy simulating database query parameters."""
     return Parameter(
         TestArg("offset", rng_type=RNGInteger(0, 1000)),
@@ -146,7 +146,7 @@ def create_database_query_strategy(nsamples: int) -> Parameter:
 # ============================================================================
 
 @Strategy.register("validated_strategy")
-def create_validated_strategy(nsamples: int) -> Parameter:
+def create_validated_strategy(nsamples: int | str) -> Parameter:
     """Strategy with validators on TestArgs."""
     return Parameter(
         TestArg(
@@ -176,7 +176,7 @@ def create_validated_strategy(nsamples: int) -> Parameter:
 # ============================================================================
 
 @Strategy.register("string_strategy")
-def create_string_strategy(nsamples: int) -> Parameter:
+def create_string_strategy(nsamples: int | str) -> Parameter:
     """Strategy with string generation."""
     return Parameter(
         TestArg("username", rng_type=RNGString(min_length=5, max_length=15)),
@@ -194,7 +194,7 @@ def create_string_strategy(nsamples: int) -> Parameter:
 # ============================================================================
 
 @Strategy.register("mixed_static_random_strategy")
-def create_mixed_static_random_strategy(nsamples: int) -> Parameter:
+def create_mixed_static_random_strategy(nsamples: int | str) -> Parameter:
     """Strategy mixing static values, directed values, and random generation."""
     return Parameter(
         TestArg("static_val", value=42),  # Static value
@@ -216,11 +216,17 @@ def create_mixed_static_random_strategy(nsamples: int) -> Parameter:
 # ============================================================================
 
 @Strategy.register("legacy_tuple_strategy")
-def create_legacy_tuple_strategy(nsamples: int) -> Tuple[Tuple[str, ...], Sequence[Tuple[int, ...]]]:
+def create_legacy_tuple_strategy(nsamples: int | str) -> Tuple[Tuple[str, ...], Sequence[Tuple[int, ...]]]:
     """Legacy tuple-based strategy for backward compatibility testing."""
+    # Legacy strategies don't support "auto" mode, default to 10 if "auto" passed
+    if nsamples == "auto":
+        n = 10
+    else:
+        n = int(nsamples)
+        
     argnames = ("x", "y", "z")
     samples = [
         (i, i * 2, i * 3)
-        for i in range(nsamples)
+        for i in range(n)
     ]
     return argnames, samples

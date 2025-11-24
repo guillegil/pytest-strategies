@@ -14,7 +14,7 @@ class Strategy:
     Supports both Parameter-based and legacy tuple-based strategies.
     """
 
-    _registry: dict[str, Callable[[int], Tuple[Sequence[str], Sequence[Any]]]] = {}
+    _registry: dict[str, Callable[[int | str], Tuple[Sequence[str], Sequence[Any]]]] = {}
 
     # Global placeholder for the pytest Config object
     # This will be set during pytest_configure hook to access CLI options
@@ -214,7 +214,7 @@ class Strategy:
             def create_samples(nsamples):
                 return ("param_name",), [sample1, sample2, ...]
         """
-        def decorate(fn: Callable[[int], Tuple[Sequence[str], Sequence[Any]]]):
+        def decorate(fn: Callable[[int | str], Tuple[Sequence[str], Sequence[Any]]]):
             # Store the factory function in the global registry
             Strategy._registry[name] = fn
             return fn
@@ -306,12 +306,15 @@ class Strategy:
 
                 # Generate samples using Parameter's generate_vectors with CLI options
                 try:
-                    samples = param.generate_vectors(
-                        n=nsamples,
-                        mode=vector_mode,
-                        filter_by_name=vector_name,
-                        filter_by_index=vector_index
-                    )
+                    if nsamples == "auto":
+                        samples = param.generate_exhaustive()
+                    else:
+                        samples = param.generate_vectors(
+                            n=int(nsamples),
+                            mode=vector_mode,
+                            filter_by_name=vector_name,
+                            filter_by_index=vector_index
+                        )
                 except KeyError as e:
                     # If filtering by name/index and vector doesn't exist, return empty samples
                     # This allows CLI filtering to work gracefully across multiple strategies

@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0a1] - 2025-11-24
+
+### Added
+- **Sequence Testing**: New `RNGSequence` class for defining deterministic sequences of values.
+- **Exhaustive Generation**: Support for `nsamples="auto"` to generate the Cartesian product of all sequence arguments.
+- **Mixed Mode Generation**: Automatically handles mixing sequence arguments with random arguments (random values are regenerated for each sequence combination).
+- **CLI Update**: Updated `--nsamples` to accept "auto" or an integer.
+
 ## [1.0.0] - 2025-11-23
 
 ### Added

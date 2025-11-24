@@ -1,6 +1,6 @@
 # rng.py
 
-from typing import Callable, Type
+from typing import Callable, Type, Sequence
 from enum import Enum
 import random
 import time
@@ -446,6 +446,27 @@ class RNGEnum(RNGType):
         """Return the Enum class type"""
         return self.enum_class
 
+
+class RNGSequence(RNGType):
+    """
+    RNG type for sequences of values.
+    
+    In normal mode, acts like RNGChoice (picks random values).
+    In exhaustive mode (nsamples="auto"), allows iterating through the sequence.
+    """
+
+    def __init__(self, sequence: Sequence):
+        self.sequence = list(sequence)
+        if not self.sequence:
+            raise RNGValueError("Sequence cannot be empty")
+
+    def generate(self):
+        """Generate a random value from the sequence (normal mode)"""
+        return RNG.choice(self.sequence)
+
+    @property
+    def python_type(self):
+        return type(self.sequence[0]) if self.sequence else object
 
 class RNGString(RNGType):
     """RNG type for generating strings"""

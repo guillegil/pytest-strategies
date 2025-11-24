@@ -276,9 +276,9 @@ def pytest_addoption(parser) -> None:
     group.addoption(
         "--nsamples",
         action="store",
-        type=int,
-        default=10,
-        help="Number of random samples to generate per strategy"
+        type=str,
+        default="10",
+        help="Number of random samples to generate per strategy (or 'auto' for exhaustive)"
     )
 
     group.addoption(

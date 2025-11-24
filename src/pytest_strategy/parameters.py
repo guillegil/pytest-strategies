@@ -1,7 +1,9 @@
 # parameter.py
 
 from typing import Callable, Any
+import itertools
 from .test_args import TestArg
+from .rng import RNGSequence
 
 
 class Parameter:
@@ -264,6 +266,58 @@ class Parameter:
             for _ in range(n):
                 samples.append(self.generate_vector())
 
+        return samples
+
+    def generate_exhaustive(self) -> list[tuple]:
+        """
+        Generate all combinations of sequence arguments (Cartesian product).
+        For non-sequence arguments, generate a random value for each combination.
+        
+        Returns:
+            List of parameter vectors
+            
+        Raises:
+            ValueError: If no sequence arguments are present
+        """
+        # Identify sequence args and their indices
+        sequence_indices = []
+        sequences = []
+        
+        for i, arg in enumerate(self.test_args):
+            if arg.rng_type and isinstance(arg.rng_type, RNGSequence):
+                sequence_indices.append(i)
+                sequences.append(arg.rng_type.sequence)
+                
+        if not sequences:
+            # If no sequences, fallback to a single random sample? 
+            # Or raise error? The plan implies this is for "auto" mode with sequences.
+            # If "auto" is used without sequences, maybe default to 10 random samples?
+            # For now, let's raise error or return empty, but strategy should handle fallback.
+            # Let's return a single random sample to be safe if called directly,
+            # but Strategy should probably check this.
+            # Actually, let's raise ValueError as per docstring.
+            raise ValueError("No sequence arguments found for exhaustive generation")
+            
+        # Generate Cartesian product
+        samples = []
+        for combination in itertools.product(*sequences):
+            # Create a mutable vector (list) to fill in
+            vector = [None] * len(self.test_args)
+            
+            # Fill in sequence values
+            for idx, value in zip(sequence_indices, combination):
+                vector[idx] = value
+                
+            # Fill in non-sequence values with random generation
+            for i, arg in enumerate(self.test_args):
+                if i not in sequence_indices:
+                    vector[i] = arg.generate()
+            
+            # Convert to tuple and validate
+            vector_tuple = tuple(vector)
+            if self._validate_vector(vector_tuple):
+                samples.append(vector_tuple)
+                
         return samples
 
     # ====
