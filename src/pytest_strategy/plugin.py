@@ -286,8 +286,8 @@ def pytest_addoption(parser) -> None:
         action="store",
         type=str,
         default="all",
-        choices=["all", "random_only", "directed_only", "mixed"],
-        help="Vector generation mode: all, random_only, directed_only, or mixed"
+        choices=["all", "random_only", "directed_only", "mixed", "test"],
+        help="Vector generation mode: all, random_only, directed_only, mixed, or test"
     )
 
     group.addoption(

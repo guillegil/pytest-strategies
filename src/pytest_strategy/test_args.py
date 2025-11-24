@@ -22,6 +22,7 @@ class TestArg:
         rng_type: Any = None,
         value: Any = None,
         directed_values: list[Any] | None = None,
+        test_values: list[Any] | None = None,
         validator: Callable[[Any], bool] | None = None,
         # Control
         always_include_directed: bool = True,
@@ -36,6 +37,7 @@ class TestArg:
             description: Human-readable description of the argument
             value: Single static value (for directed tests)
             directed_values: List of specific values to always test
+            test_values: List of specific values for test mode only
             always_include_directed: If True, directed values are always included in samples
             validator: Optional function to validate generated values
 
@@ -57,13 +59,14 @@ class TestArg:
         self._description = description
         self._value = value
         self._directed_values = directed_values or []
+        self._test_values = test_values or []
         self._always_include_directed = always_include_directed
         self._validator = validator
 
         # Validation: must have at least one way to produce values
-        if value is None and rng_type is None and not directed_values:
+        if value is None and rng_type is None and not directed_values and not test_values:
             raise ValueError(
-                f"TestArg '{name}' must have either a value, rng_type, or directed_values"
+                f"TestArg '{name}' must have either a value, rng_type, directed_values, or test_values"
             )
 
     def generate(self) -> Any:
@@ -100,6 +103,7 @@ class TestArg:
             "description": self._description,
             "has_static_value": self._value is not None,
             "has_directed_values": bool(self._directed_values),
+            "has_test_values": bool(self._test_values),
             "always_include_directed": self._always_include_directed,
         }
         
@@ -225,9 +229,14 @@ class TestArg:
         return self._rng_type
 
     @property
-    def directed_values(self):
-        """Get the list of directed values"""
+    def directed_values(self) -> list[Any]:
+        """Get list of directed values."""
         return self._directed_values
+
+    @property
+    def test_values(self) -> list[Any]:
+        """Get list of test values."""
+        return self._test_values
 
     # ====
     # String Representation

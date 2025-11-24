@@ -55,6 +55,14 @@ def main():
     if not run_command("pytest examples/sequence_example.py --nsamples=5 -v", "Example: Sequence (Random)"):
         failures.append("Example: Sequence (Random)")
 
+    # 6. Test Values Examples
+    # Verify test mode runs only test vectors
+    if not run_command("pytest examples/test_values_example.py --vector-mode=test -v", "Example: Test Values (Test Mode)"):
+        failures.append("Example: Test Values (Test Mode)")
+        
+    if not run_command("pytest examples/test_values_example.py --nsamples=5 -v", "Example: Test Values (All Mode)"):
+        failures.append("Example: Test Values (All Mode)")
+
     # Summary
     print("========================================================")
     if not failures:

@@ -191,6 +191,27 @@ json_data = Strategy.export_strategies(format="json")
 print(json_data)
 ```
 
+### 7. Test Values (New in v1.1.0)
+
+You can define test-specific vectors that only run when using `--vector-mode=test`. This is useful for defining specific test scenarios that you want to verify independently from random or directed vectors.
+
+```python
+from pytest_strategy import Strategy, Parameter, TestArg, RNGInteger
+
+@Strategy.register("api_test")
+def api_test_strategy(nsamples):
+    return Parameter(
+        TestArg("status_code", rng_type=RNGInteger(200, 500)),
+        # Test vectors: specific scenarios to verify
+        test_vectors={
+            "success": (200,),
+            "not_found": (404,),
+            "server_error": (500,)
+        }
+    )
+```
+Running with `pytest --vector-mode=test` runs only the test vectors, ignoring random and directed vectors.
+
 ## 🔌 Fixture Integration
 
 Strategies work seamlessly with standard pytest fixtures. You don't need any special configuration; just add the fixture to your test signature.
@@ -211,13 +232,13 @@ def test_db_insert(username, age, database): # 'database' is a fixture
 
 Control test generation directly from the command line:
 
-| Option           | Description                                            | Example                                     |
-| ---------------- | ------------------------------------------------------ | ------------------------------------------- |
-| `--nsamples`     | Number of samples or "auto" for exhaustive generation  | `pytest --nsamples=50` or `--nsamples=auto` |
-| `--vector-mode`  | Generation mode: `all`, `random_only`, `directed_only` | `pytest --vector-mode=directed_only`        |
-| `--vector-name`  | Run only a specific directed vector by name            | `pytest --vector-name=edge_case_1`          |
-| `--vector-index` | Run only a specific sample by index                    | `pytest --vector-index=0`                   |
-| `--rng-seed`     | Set seed for reproducibility                           | `pytest --rng-seed=42`                      |
+| Option           | Description                                                             | Example                                     |
+| ---------------- | ----------------------------------------------------------------------- | ------------------------------------------- |
+| `--nsamples`     | Number of samples or "auto" for exhaustive generation                   | `pytest --nsamples=50` or `--nsamples=auto` |
+| `--vector-mode`  | Generation mode: `all`, `random_only`, `directed_only`, `mixed`, `test` | `pytest --vector-mode=test`                 |  |
+| `--vector-name`  | Run only a specific directed vector by name                             | `pytest --vector-name=edge_case_1`          |
+| `--vector-index` | Run only a specific sample by index                                     | `pytest --vector-index=0`                   |
+| `--rng-seed`     | Set seed for reproducibility                                            | `pytest --rng-seed=42`                      |
 
 ## 🔄 Reproducibility
 

@@ -64,9 +64,10 @@ class TestTestArgInitialization:
         assert arg._validator is validator
 
     def test_initialization_no_value_raises_error(self):
-        """Test that initialization without value, rng_type, or directed_values raises error."""
-        with pytest.raises(ValueError, match="must have either a value, rng_type, or directed_values"):
+        """Test that initialization without value, rng_type, directed_values, or test_values raises error."""
+        with pytest.raises(ValueError, match="must have either a value, rng_type, directed_values, or test_values"):
             TestArg("invalid")
+
 
     def test_initialization_with_description(self):
         """Test initialization with description."""

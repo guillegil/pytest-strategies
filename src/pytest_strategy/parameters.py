@@ -21,6 +21,7 @@ class Parameter:
         self,
         *test_args: TestArg,
         directed_vectors: dict[str, tuple] | None = None,
+        test_vectors: dict[str, tuple] | None = None,
         always_include_directed: bool = True,
         vector_constraints: list[Callable[[tuple], bool]] | None = None,
         max_retries: int = 100,
@@ -31,6 +32,7 @@ class Parameter:
         Args:
             *test_args: Variable number of TestArg instances
             directed_vectors: Dictionary mapping vector names to value tuples
+            test_vectors: Dictionary mapping test vector names to value tuples (for test mode)
             always_include_directed: If True, directed vectors are included in "mixed" mode
             vector_constraints: List of functions that validate entire parameter vectors
 
@@ -56,11 +58,13 @@ class Parameter:
         """
         self.test_args = list(test_args)
         self.directed_vectors = directed_vectors or {}
+        self.test_vectors = test_vectors or {}
         self.always_include_directed = always_include_directed
         self.vector_constraints = vector_constraints or []
 
         # Validate directed vectors on initialization
         self._validate_directed_vectors()
+        self._validate_test_vectors()
 
     def _validate_directed_vectors(self):
         """
@@ -74,6 +78,21 @@ class Parameter:
             if len(vector) != expected_len:
                 raise ValueError(
                     f"Directed vector '{name}' has {len(vector)} values, "
+                    f"expected {expected_len}"
+                )
+
+    def _validate_test_vectors(self):
+        """
+        Ensure all test vectors match the number of test args.
+
+        Raises:
+            ValueError: If any test vector has wrong number of values
+        """
+        expected_len = len(self.test_args)
+        for name, vector in self.test_vectors.items():
+            if len(vector) != expected_len:
+                raise ValueError(
+                    f"Test vector '{name}' has {len(vector)} values, "
                     f"expected {expected_len}"
                 )
 
@@ -129,6 +148,57 @@ class Parameter:
         if name not in self.directed_vectors:
             raise KeyError(f"No directed vector named '{name}'")
         del self.directed_vectors[name]
+
+    def add_test_vector(self, name: str, values: tuple):
+        """
+        Add a named test vector.
+
+        Args:
+            name: Unique name for the vector
+            values: Tuple of values matching test_args length
+
+        Raises:
+            ValueError: If vector length doesn't match test_args
+
+        Example:
+            param.add_test_vector("test_case_1", (0, 100, "fast"))
+        """
+        if len(values) != len(self.test_args):
+            raise ValueError(
+                f"Vector must have {len(self.test_args)} values, got {len(values)}"
+            )
+        self.test_vectors[name] = values
+
+    def remove_test_vector(self, name: str):
+        """
+        Remove a test vector by name.
+
+        Args:
+            name: Name of the vector to remove
+
+        Raises:
+            KeyError: If vector name doesn't exist
+        """
+        if name not in self.test_vectors:
+            raise KeyError(f"No test vector named '{name}'")
+        del self.test_vectors[name]
+
+    def get_test_vector(self, name: str) -> tuple:
+        """
+        Get a specific test vector by name.
+
+        Args:
+            name: Name of the vector
+
+        Returns:
+            The test vector tuple
+
+        Raises:
+            KeyError: If vector name doesn't exist
+        """
+        if name not in self.test_vectors:
+            raise KeyError(f"No test vector named '{name}'")
+        return self.test_vectors[name]
 
     def get_directed_vector(self, name: str) -> tuple:
         """
@@ -188,6 +258,10 @@ class Parameter:
                 name: [str(v) for v in vector] 
                 for name, vector in self.directed_vectors.items()
             },
+            "test_vectors": {
+                name: [str(v) for v in vector] 
+                for name, vector in self.test_vectors.items()
+            },
             "always_include_directed": self.always_include_directed,
             "has_constraints": bool(self.vector_constraints)
         }
@@ -209,6 +283,7 @@ class Parameter:
                 - "random_only": Only n random samples, no directed
                 - "directed_only": Only directed vectors, ignore n
                 - "mixed": Directed (if always_include_directed=True) + n random
+                - "test": Only test vectors, ignore n and directed
             filter_by_name: Only return this directed vector (for -vn CLI)
             filter_by_index: Only return directed vector at index (for -vi CLI)
 
@@ -241,9 +316,13 @@ class Parameter:
             return [self.get_vector_by_index(filter_by_index)]
 
         # Validate mode
-        valid_modes = ["all", "random_only", "directed_only", "mixed"]
+        valid_modes = ["all", "random_only", "directed_only", "mixed", "test"]
         if mode not in valid_modes:
             raise ValueError(f"Invalid mode '{mode}'. Must be one of {valid_modes}")
+
+        # Mode: test - only test vectors
+        if mode == "test":
+            return list(self.test_vectors.values())
 
         # Mode: directed_only
         if mode == "directed_only":
