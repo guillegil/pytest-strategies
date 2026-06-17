@@ -20,6 +20,7 @@
 - **Fixture Integration**: Works out-of-the-box with standard pytest fixtures (custom, parametrized, or built-in).
 - **Reproducibility**: Deterministic generation via seed control for debugging failures.
 - **CLI Control**: Filter strategies, change generation modes, or increase sample sizes directly from the command line.
+- **Per-Strategy Sample Count**: Let a strategy declare its own vector count as a soft default that `--nsamples` can still override.
 
 ## 📦 Installation
 
@@ -212,6 +213,28 @@ def api_test_strategy(nsamples):
 ```
 Running with `pytest --vector-mode=test` runs only the test vectors, ignoring random and directed vectors.
 
+### 8. Per-Strategy Sample Count (New in v1.1.0)
+
+By default the number of generated vectors is controlled globally by `--nsamples` (10 when unset). A strategy can declare its own count by passing `nsamples` to its `Parameter`:
+
+```python
+@Strategy.register("edge_heavy")
+def edge_heavy_strategy(nsamples):
+    return Parameter(
+        TestArg("x", rng_type=RNGInteger(0, 100)),
+        nsamples=25,  # this strategy generates 25 vectors by default
+    )
+```
+
+This is a **soft default**: an explicit `--nsamples` on the command line still wins, so you can always scale a whole run from the CLI.
+
+| `--nsamples` (CLI) | `Parameter(nsamples=...)` | Vectors generated              |
+| ------------------ | ------------------------- | ------------------------------ |
+| not passed         | `25`                      | 25 (strategy value)            |
+| not passed         | unset                     | 10 (global default)            |
+| `--nsamples=5`     | `25`                      | 5 (CLI overrides)              |
+| `--nsamples=auto`  | any                       | exhaustive (auto always wins)  |
+
 ## 🔌 Fixture Integration
 
 Strategies work seamlessly with standard pytest fixtures. You don't need any special configuration; just add the fixture to your test signature.
@@ -234,7 +257,7 @@ Control test generation directly from the command line:
 
 | Option           | Description                                                             | Example                                     |
 | ---------------- | ----------------------------------------------------------------------- | ------------------------------------------- |
-| `--nsamples`     | Number of samples or "auto" for exhaustive generation                   | `pytest --nsamples=50` or `--nsamples=auto` |
+| `--nsamples`     | Number of samples (default 10), or "auto" for exhaustive. Overrides a strategy's own `nsamples`. | `pytest --nsamples=50` or `--nsamples=auto` |
 | `--vector-mode`  | Generation mode: `all`, `random_only`, `directed_only`, `mixed`, `test` | `pytest --vector-mode=test`                 |  |
 | `--vector-name`  | Run only a specific directed vector by name                             | `pytest --vector-name=edge_case_1`          |
 | `--vector-index` | Run only a specific sample by index                                     | `pytest --vector-index=0`                   |
