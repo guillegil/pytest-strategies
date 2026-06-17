@@ -9,23 +9,24 @@ This file demonstrates the complete pytest-strategies workflow:
 - Constraints for valid parameter combinations
 """
 
-from typing import Tuple, Sequence, Any
+from collections.abc import Sequence
+
 from pytest_strategy import (
-    Strategy,
     Parameter,
-    TestArg,
-    RNGInteger,
-    RNGFloat,
     RNGBoolean,
     RNGChoice,
+    RNGFloat,
+    RNGInteger,
     RNGString,
     RNGWeightedInteger,
+    Strategy,
+    TestArg,
 )
-
 
 # ============================================================================
 # BASIC STRATEGIES
 # ============================================================================
+
 
 @Strategy.register("simple_integer_strategy")
 def create_simple_integer_strategy(nsamples: int | str) -> Parameter:
@@ -36,7 +37,7 @@ def create_simple_integer_strategy(nsamples: int | str) -> Parameter:
             "zero": (0,),
             "fifty": (50,),
             "max": (100,),
-        }
+        },
     )
 
 
@@ -51,13 +52,14 @@ def create_multi_param_strategy(nsamples: int | str) -> Parameter:
             "baseline": (10, 0.5, True),
             "disabled": (1, 0.0, False),
             "max": (100, 1.0, True),
-        }
+        },
     )
 
 
 # ============================================================================
 # STRATEGIES WITH CONSTRAINTS
 # ============================================================================
+
 
 @Strategy.register("constrained_range_strategy")
 def create_constrained_range_strategy(nsamples: int | str) -> Parameter:
@@ -72,7 +74,7 @@ def create_constrained_range_strategy(nsamples: int | str) -> Parameter:
             "full_range": (0, 100),
             "narrow": (49, 51),
             "mid_range": (25, 75),
-        }
+        },
     )
 
 
@@ -84,12 +86,12 @@ def create_complex_constraint_strategy(nsamples: int | str) -> Parameter:
         TestArg("y", rng_type=RNGInteger(0, 100, predicate=lambda y: y % 5 == 0)),
         vector_constraints=[
             lambda v: v[0] + v[1] <= 100,  # sum <= 100
-            lambda v: v[0] >= v[1] // 2,   # x >= y/2
+            lambda v: v[0] >= v[1] // 2,  # x >= y/2
         ],
         directed_vectors={
             "zeros": (0, 0),
             "balanced": (50, 50),
-        }
+        },
     )
 
 
@@ -97,17 +99,21 @@ def create_complex_constraint_strategy(nsamples: int | str) -> Parameter:
 # REAL-WORLD SIMULATION STRATEGIES
 # ============================================================================
 
+
 @Strategy.register("api_request_strategy")
 def create_api_request_strategy(nsamples: int | str) -> Parameter:
     """Strategy simulating API request parameters."""
     return Parameter(
         TestArg("user_id", rng_type=RNGInteger(1, 10000)),
-        TestArg("page_size", rng_type=RNGWeightedInteger(
-            ranges={
-                (10, 50): 0.7,    # Common page sizes
-                (100, 500): 0.3,  # Large pages
-            }
-        )),
+        TestArg(
+            "page_size",
+            rng_type=RNGWeightedInteger(
+                ranges={
+                    (10, 50): 0.7,  # Common page sizes
+                    (100, 500): 0.3,  # Large pages
+                }
+            ),
+        ),
         TestArg("timeout", rng_type=RNGFloat(0.1, 5.0)),
         TestArg("method", rng_type=RNGChoice(["GET", "POST", "PUT", "DELETE"])),
         TestArg("include_metadata", rng_type=RNGBoolean(0.3)),
@@ -118,7 +124,7 @@ def create_api_request_strategy(nsamples: int | str) -> Parameter:
             "admin_request": (1, 50, 1.0, "GET", True),
             "user_request": (5000, 25, 2.0, "POST", False),
             "bulk_request": (100, 500, 5.0, "GET", True),
-        }
+        },
     )
 
 
@@ -137,13 +143,14 @@ def create_database_query_strategy(nsamples: int | str) -> Parameter:
             "first_page": (0, 10, "id", "asc"),
             "last_page": (990, 10, "id", "desc"),
             "large_page": (0, 100, "created_at", "desc"),
-        }
+        },
     )
 
 
 # ============================================================================
 # VALIDATION STRATEGIES
 # ============================================================================
+
 
 @Strategy.register("validated_strategy")
 def create_validated_strategy(nsamples: int | str) -> Parameter:
@@ -152,28 +159,25 @@ def create_validated_strategy(nsamples: int | str) -> Parameter:
         TestArg(
             "positive",
             rng_type=RNGInteger(1, 100, predicate=lambda x: x > 0),
-            validator=lambda x: x > 0
+            validator=lambda x: x > 0,
         ),
         TestArg(
             "even",
             rng_type=RNGInteger(0, 100, predicate=lambda x: x % 2 == 0),
-            validator=lambda x: x % 2 == 0
+            validator=lambda x: x % 2 == 0,
         ),
-        TestArg(
-            "in_range",
-            rng_type=RNGFloat(0.0, 1.0),
-            validator=lambda x: 0.0 <= x <= 1.0
-        ),
+        TestArg("in_range", rng_type=RNGFloat(0.0, 1.0), validator=lambda x: 0.0 <= x <= 1.0),
         directed_vectors={
             "valid_case": (10, 20, 0.5),
             "edge_case": (1, 0, 0.0),
-        }
+        },
     )
 
 
 # ============================================================================
 # STRING GENERATION STRATEGIES
 # ============================================================================
+
 
 @Strategy.register("string_strategy")
 def create_string_strategy(nsamples: int | str) -> Parameter:
@@ -185,7 +189,7 @@ def create_string_strategy(nsamples: int | str) -> Parameter:
         directed_vectors={
             "admin_user": ("admin_user", "ABC123", "admin"),
             "guest_user": ("guest", "000000", "guest"),
-        }
+        },
     )
 
 
@@ -193,21 +197,26 @@ def create_string_strategy(nsamples: int | str) -> Parameter:
 # MIXED MODE STRATEGIES
 # ============================================================================
 
+
 @Strategy.register("mixed_static_random_strategy")
 def create_mixed_static_random_strategy(nsamples: int | str) -> Parameter:
     """Strategy mixing static values, directed values, and random generation."""
     return Parameter(
         TestArg("static_val", value=42),  # Static value
         TestArg("random_val", rng_type=RNGInteger(0, 100)),  # Random
-        TestArg("directed_val", rng_type=RNGChoice([1, 2, 3])),  # Use RNGChoice for directed-like behavior
-        TestArg("mixed_val", 
-                rng_type=RNGInteger(0, 100),
-                directed_values=[0, 50, 100],
-                always_include_directed=True),  # Mixed
+        TestArg(
+            "directed_val", rng_type=RNGChoice([1, 2, 3])
+        ),  # Use RNGChoice for directed-like behavior
+        TestArg(
+            "mixed_val",
+            rng_type=RNGInteger(0, 100),
+            directed_values=[0, 50, 100],
+            always_include_directed=True,
+        ),  # Mixed
         directed_vectors={
             "all_zeros": (42, 0, 1, 0),
             "all_max": (42, 100, 3, 100),
-        }
+        },
     )
 
 
@@ -215,18 +224,15 @@ def create_mixed_static_random_strategy(nsamples: int | str) -> Parameter:
 # LEGACY TUPLE-BASED STRATEGY (BACKWARD COMPATIBILITY)
 # ============================================================================
 
+
 @Strategy.register("legacy_tuple_strategy")
-def create_legacy_tuple_strategy(nsamples: int | str) -> Tuple[Tuple[str, ...], Sequence[Tuple[int, ...]]]:
+def create_legacy_tuple_strategy(
+    nsamples: int | str,
+) -> tuple[tuple[str, ...], Sequence[tuple[int, ...]]]:
     """Legacy tuple-based strategy for backward compatibility testing."""
     # Legacy strategies don't support "auto" mode, default to 10 if "auto" passed
-    if nsamples == "auto":
-        n = 10
-    else:
-        n = int(nsamples)
-        
+    n = 10 if nsamples == "auto" else int(nsamples)
+
     argnames = ("x", "y", "z")
-    samples = [
-        (i, i * 2, i * 3)
-        for i in range(n)
-    ]
+    samples = [(i, i * 2, i * 3) for i in range(n)]
     return argnames, samples

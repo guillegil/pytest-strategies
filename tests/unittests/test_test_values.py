@@ -3,8 +3,9 @@ Unit tests for test_values feature.
 """
 
 import pytest
-from pytest_strategy import Parameter, TestArg, RNGInteger
-from pytest_strategy.rng import RNG
+
+from pytest_strategy import Parameter, RNGInteger, TestArg
+
 
 class TestTestArgWithTestValues:
     """Test TestArg with test_values parameter."""
@@ -41,10 +42,7 @@ class TestParameterWithTestVectors:
         param = Parameter(
             TestArg("x", rng_type=RNGInteger(0, 10)),
             TestArg("y", rng_type=RNGInteger(0, 10)),
-            test_vectors={
-                "test1": (5, 5),
-                "test2": (10, 10)
-            }
+            test_vectors={"test1": (5, 5), "test2": (10, 10)},
         )
         assert len(param.test_vectors) == 2
         assert param.test_vectors["test1"] == (5, 5)
@@ -55,7 +53,7 @@ class TestParameterWithTestVectors:
             Parameter(
                 TestArg("x", rng_type=RNGInteger(0, 10)),
                 TestArg("y", rng_type=RNGInteger(0, 10)),
-                test_vectors={"bad": (5,)}
+                test_vectors={"bad": (5,)},
             )
 
     def test_generate_vectors_test_mode(self):
@@ -63,10 +61,7 @@ class TestParameterWithTestVectors:
         param = Parameter(
             TestArg("x", rng_type=RNGInteger(0, 10)),
             TestArg("y", rng_type=RNGInteger(0, 10)),
-            test_vectors={
-                "test1": (5, 5),
-                "test2": (10, 10)
-            }
+            test_vectors={"test1": (5, 5), "test2": (10, 10)},
         )
         vectors = param.generate_vectors(n=100, mode="test")
         assert len(vectors) == 2
@@ -79,7 +74,7 @@ class TestParameterWithTestVectors:
             TestArg("x", rng_type=RNGInteger(0, 10)),
             TestArg("y", rng_type=RNGInteger(0, 10)),
             directed_vectors={"dir1": (1, 1)},
-            test_vectors={"test1": (5, 5)}
+            test_vectors={"test1": (5, 5)},
         )
         vectors = param.generate_vectors(n=100, mode="test")
         assert len(vectors) == 1
@@ -89,8 +84,7 @@ class TestParameterWithTestVectors:
     def test_add_test_vector(self):
         """Test adding a test vector."""
         param = Parameter(
-            TestArg("x", rng_type=RNGInteger(0, 10)),
-            TestArg("y", rng_type=RNGInteger(0, 10))
+            TestArg("x", rng_type=RNGInteger(0, 10)), TestArg("y", rng_type=RNGInteger(0, 10))
         )
         param.add_test_vector("test1", (5, 5))
         assert param.test_vectors["test1"] == (5, 5)
@@ -98,52 +92,38 @@ class TestParameterWithTestVectors:
     def test_add_test_vector_wrong_length(self):
         """Test that adding wrong length test vector raises error."""
         param = Parameter(
-            TestArg("x", rng_type=RNGInteger(0, 10)),
-            TestArg("y", rng_type=RNGInteger(0, 10))
+            TestArg("x", rng_type=RNGInteger(0, 10)), TestArg("y", rng_type=RNGInteger(0, 10))
         )
         with pytest.raises(ValueError, match="Vector must have 2 values, got 1"):
             param.add_test_vector("bad", (5,))
 
     def test_remove_test_vector(self):
         """Test removing a test vector."""
-        param = Parameter(
-            TestArg("x", rng_type=RNGInteger(0, 10)),
-            test_vectors={"test1": (5,)}
-        )
+        param = Parameter(TestArg("x", rng_type=RNGInteger(0, 10)), test_vectors={"test1": (5,)})
         param.remove_test_vector("test1")
         assert "test1" not in param.test_vectors
 
     def test_remove_test_vector_not_found(self):
         """Test removing non-existent test vector raises error."""
-        param = Parameter(
-            TestArg("x", rng_type=RNGInteger(0, 10))
-        )
+        param = Parameter(TestArg("x", rng_type=RNGInteger(0, 10)))
         with pytest.raises(KeyError, match="No test vector named 'missing'"):
             param.remove_test_vector("missing")
 
     def test_get_test_vector(self):
         """Test getting a test vector."""
-        param = Parameter(
-            TestArg("x", rng_type=RNGInteger(0, 10)),
-            test_vectors={"test1": (5,)}
-        )
+        param = Parameter(TestArg("x", rng_type=RNGInteger(0, 10)), test_vectors={"test1": (5,)})
         vector = param.get_test_vector("test1")
         assert vector == (5,)
 
     def test_get_test_vector_not_found(self):
         """Test getting non-existent test vector raises error."""
-        param = Parameter(
-            TestArg("x", rng_type=RNGInteger(0, 10))
-        )
+        param = Parameter(TestArg("x", rng_type=RNGInteger(0, 10)))
         with pytest.raises(KeyError, match="No test vector named 'missing'"):
             param.get_test_vector("missing")
 
     def test_to_dict_includes_test_vectors(self):
         """Test that to_dict includes test vectors."""
-        param = Parameter(
-            TestArg("x", rng_type=RNGInteger(0, 10)),
-            test_vectors={"test1": (5,)}
-        )
+        param = Parameter(TestArg("x", rng_type=RNGInteger(0, 10)), test_vectors={"test1": (5,)})
         data = param.to_dict()
         assert "test_vectors" in data
         assert "test1" in data["test_vectors"]

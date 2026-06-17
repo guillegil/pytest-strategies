@@ -6,19 +6,20 @@ validation, and handling of static, random, and mixed test argument modes.
 """
 
 import pytest
+
 from pytest_strategy import (
-    RNGInteger,
-    RNGFloat,
     RNGBoolean,
     RNGChoice,
+    RNGFloat,
+    RNGInteger,
     RNGString,
 )
 from pytest_strategy.test_args import TestArg
 
-
 # ============================================================================
 # INITIALIZATION TESTS
 # ============================================================================
+
 
 class TestTestArgInitialization:
     """Test TestArg initialization in various modes."""
@@ -47,10 +48,7 @@ class TestTestArgInitialization:
     def test_mixed_mode_initialization(self):
         """Test creating TestArg with both directed values and RNG type."""
         arg = TestArg(
-            "count",
-            rng_type=RNGInteger(0, 100),
-            directed_values=[0, 1],
-            description="Test count"
+            "count", rng_type=RNGInteger(0, 100), directed_values=[0, 1], description="Test count"
         )
         assert arg.name == "count"
         assert arg.has_directed_values
@@ -59,15 +57,19 @@ class TestTestArgInitialization:
 
     def test_initialization_with_validator(self):
         """Test creating TestArg with validator function."""
-        validator = lambda x: x > 0
+
+        def validator(x):
+            return x > 0
+
         arg = TestArg("positive", rng_type=RNGInteger(1, 100), validator=validator)
         assert arg._validator is validator
 
     def test_initialization_no_value_raises_error(self):
         """Test that initialization without value, rng_type, directed_values, or test_values raises error."""
-        with pytest.raises(ValueError, match="must have either a value, rng_type, directed_values, or test_values"):
+        with pytest.raises(
+            ValueError, match="must have either a value, rng_type, directed_values, or test_values"
+        ):
             TestArg("invalid")
-
 
     def test_initialization_with_description(self):
         """Test initialization with description."""
@@ -78,6 +80,7 @@ class TestTestArgInitialization:
 # ============================================================================
 # VALUE GENERATION TESTS
 # ============================================================================
+
 
 class TestTestArgGeneration:
     """Test TestArg value generation methods."""
@@ -101,7 +104,7 @@ class TestTestArgGeneration:
         arg = TestArg(
             "even",
             rng_type=RNGInteger(0, 100, predicate=lambda x: x % 2 == 0),
-            validator=lambda x: x % 2 == 0
+            validator=lambda x: x % 2 == 0,
         )
         # Generate should produce even numbers that pass validation
         for _ in range(10):
@@ -134,7 +137,7 @@ class TestTestArgGeneration:
             "count",
             rng_type=RNGInteger(0, 100),
             directed_values=[0, 1, 99],
-            always_include_directed=True
+            always_include_directed=True,
         )
         samples = arg.generate_samples(5)
         # Should have 3 directed + 5 random = 8 total
@@ -149,7 +152,7 @@ class TestTestArgGeneration:
             "count",
             rng_type=RNGInteger(0, 100),
             directed_values=[0, 1, 99],
-            always_include_directed=False
+            always_include_directed=False,
         )
         samples = arg.generate_samples(5)
         # Should have only 5 random samples
@@ -157,12 +160,7 @@ class TestTestArgGeneration:
 
     def test_generate_samples_static_with_directed(self):
         """Test static value with directed values."""
-        arg = TestArg(
-            "count",
-            value=42,
-            directed_values=[0, 1],
-            always_include_directed=True
-        )
+        arg = TestArg("count", value=42, directed_values=[0, 1], always_include_directed=True)
         samples = arg.generate_samples(10)
         # Should return only directed values, not the static value
         assert samples == [0, 1]
@@ -178,35 +176,24 @@ class TestTestArgGeneration:
 # VALIDATION TESTS
 # ============================================================================
 
+
 class TestTestArgValidation:
     """Test TestArg validation functionality."""
 
     def test_validator_passes(self):
         """Test that valid values pass validation."""
-        arg = TestArg(
-            "positive",
-            value=10,
-            validator=lambda x: x > 0
-        )
+        arg = TestArg("positive", value=10, validator=lambda x: x > 0)
         assert arg.generate() == 10
 
     def test_validator_fails(self):
         """Test that invalid values fail validation."""
-        arg = TestArg(
-            "positive",
-            value=-5,
-            validator=lambda x: x > 0
-        )
+        arg = TestArg("positive", value=-5, validator=lambda x: x > 0)
         with pytest.raises(ValueError, match="failed validation"):
             arg.generate()
 
     def test_validator_with_custom_message(self):
         """Test validation error message includes argument name."""
-        arg = TestArg(
-            "my_arg",
-            value=0,
-            validator=lambda x: x > 0
-        )
+        arg = TestArg("my_arg", value=0, validator=lambda x: x > 0)
         with pytest.raises(ValueError, match="my_arg"):
             arg.generate()
 
@@ -219,6 +206,7 @@ class TestTestArgValidation:
 # ============================================================================
 # PROPERTY TESTS
 # ============================================================================
+
 
 class TestTestArgProperties:
     """Test TestArg properties and introspection."""
@@ -236,20 +224,20 @@ class TestTestArgProperties:
     def test_type_property_from_rng(self):
         """Test type property from RNG type."""
         arg = TestArg("count", rng_type=RNGInteger(0, 100))
-        assert arg.type == int
+        assert arg.type is int
 
     def test_type_property_from_value(self):
         """Test type property from static value."""
         arg = TestArg("count", value=42)
-        assert arg.type == int
+        assert arg.type is int
 
         arg_float = TestArg("ratio", value=3.14)
-        assert arg_float.type == float
+        assert arg_float.type is float
 
     def test_type_property_from_directed_values(self):
         """Test type property from directed values."""
         arg = TestArg("count", directed_values=[1, 2, 3])
-        assert arg.type == int
+        assert arg.type is int
 
     def test_is_static_property(self):
         """Test is_static property."""
@@ -283,6 +271,7 @@ class TestTestArgProperties:
 # ============================================================================
 # STRING REPRESENTATION TESTS
 # ============================================================================
+
 
 class TestTestArgStringRepresentation:
     """Test TestArg string representations."""
@@ -326,6 +315,7 @@ class TestTestArgStringRepresentation:
 # EDGE CASES AND ERROR HANDLING
 # ============================================================================
 
+
 class TestTestArgEdgeCases:
     """Test edge cases and error handling."""
 
@@ -340,23 +330,23 @@ class TestTestArgEdgeCases:
         """Test with different RNG types."""
         # Integer
         arg_int = TestArg("count", rng_type=RNGInteger(0, 10))
-        assert arg_int.type == int
+        assert arg_int.type is int
 
         # Float
         arg_float = TestArg("ratio", rng_type=RNGFloat(0.0, 1.0))
-        assert arg_float.type == float
+        assert arg_float.type is float
 
         # Boolean
         arg_bool = TestArg("flag", rng_type=RNGBoolean())
-        assert arg_bool.type == bool
+        assert arg_bool.type is bool
 
         # Choice
         arg_choice = TestArg("mode", rng_type=RNGChoice(["fast", "slow"]))
-        assert arg_choice.type == str
+        assert arg_choice.type is str
 
         # String
         arg_string = TestArg("name", rng_type=RNGString(length=10))
-        assert arg_string.type == str
+        assert arg_string.type is str
 
     def test_none_value_with_directed_values(self):
         """Test that None value with directed values works."""
@@ -369,7 +359,7 @@ class TestTestArgEdgeCases:
         """Test directed values with mixed types."""
         arg = TestArg("value", directed_values=[1, 2.5, "three"])
         # Type should be from first element
-        assert arg.type == int
+        assert arg.type is int
 
     def test_large_sample_generation(self):
         """Test generating large number of samples."""
@@ -383,38 +373,31 @@ class TestTestArgEdgeCases:
 # INTEGRATION TESTS
 # ============================================================================
 
+
 class TestTestArgIntegration:
     """Integration tests for TestArg with various scenarios."""
 
     def test_complete_workflow_static(self):
         """Test complete workflow with static value."""
-        arg = TestArg(
-            "timeout",
-            value=30,
-            description="Connection timeout in seconds"
-        )
-        
+        arg = TestArg("timeout", value=30, description="Connection timeout in seconds")
+
         assert arg.name == "timeout"
         assert arg.is_static
-        assert arg.type == int
+        assert arg.type is int
         assert arg.generate() == 30
         assert arg.generate_samples(10) == [30]
 
     def test_complete_workflow_random(self):
         """Test complete workflow with random generation."""
-        arg = TestArg(
-            "port",
-            rng_type=RNGInteger(1024, 65535),
-            description="Network port"
-        )
-        
+        arg = TestArg("port", rng_type=RNGInteger(1024, 65535), description="Network port")
+
         assert arg.name == "port"
         assert not arg.is_static
-        assert arg.type == int
-        
+        assert arg.type is int
+
         value = arg.generate()
         assert 1024 <= value <= 65535
-        
+
         samples = arg.generate_samples(10)
         assert len(samples) == 10
         assert all(1024 <= v <= 65535 for v in samples)
@@ -426,14 +409,14 @@ class TestTestArgIntegration:
             rng_type=RNGInteger(1, 100),
             directed_values=[0, 1, 100],
             description="Item count with edge cases",
-            always_include_directed=True
+            always_include_directed=True,
         )
-        
+
         assert arg.name == "count"
         assert not arg.is_static
         assert arg.has_directed_values
-        assert arg.type == int
-        
+        assert arg.type is int
+
         samples = arg.generate_samples(5)
         assert len(samples) == 8  # 3 directed + 5 random
         assert samples[0] == 0
@@ -446,13 +429,13 @@ class TestTestArgIntegration:
             "even_number",
             rng_type=RNGInteger(0, 100, predicate=lambda x: x % 2 == 0),
             validator=lambda x: x % 2 == 0,
-            description="Even numbers only"
+            description="Even numbers only",
         )
-        
+
         # Generate should produce even numbers
         for _ in range(10):
             value = arg.generate()
             assert value % 2 == 0
-        
+
         samples = arg.generate_samples(10)
         assert all(v % 2 == 0 for v in samples)

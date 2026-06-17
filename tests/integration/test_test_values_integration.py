@@ -2,8 +2,6 @@
 Integration tests for test_values feature with --vector-mode=test.
 """
 
-import pytest
-
 pytest_plugins = ["pytester"]
 
 
@@ -32,10 +30,10 @@ class TestTestModeIntegration:
                 # In test mode, should only see (10, 10) and (20, 20)
                 assert (x, y) in [(10, 10), (20, 20)]
         """)
-        
+
         # Run with --vector-mode=test
         result = pytester.runpytest("--vector-mode=test")
-        
+
         # Should have 2 tests (only test vectors)
         result.assert_outcomes(passed=2)
 
@@ -57,10 +55,10 @@ class TestTestModeIntegration:
                 # In test mode, should only see 99
                 assert val == 99
         """)
-        
+
         # Run with --vector-mode=test and nsamples=10
         result = pytester.runpytest("--vector-mode=test", "--nsamples=10")
-        
+
         # Should have 1 test (only test vector, ignoring directed and random)
         result.assert_outcomes(passed=1)
 
@@ -80,10 +78,9 @@ class TestTestModeIntegration:
             def test_gen(x):
                 pass
         """)
-        
+
         # Run with --vector-mode=test
         result = pytester.runpytest("--vector-mode=test")
-        
+
         # Should have 0 passed tests and 1 skipped (no test vectors defined)
         result.assert_outcomes(skipped=1)
-

@@ -6,24 +6,24 @@ proper random value generation, seed management, and constraint handling.
 """
 
 import pytest
-import random
+
 from pytest_strategy import (
     RNG,
-    RNGValueError,
-    RNGType,
-    RNGInteger,
-    RNGFloat,
     RNGBoolean,
     RNGChoice,
+    RNGFloat,
+    RNGInteger,
     RNGString,
-    RNGWeightedInteger,
+    RNGType,
+    RNGValueError,
     RNGWeightedFloat,
+    RNGWeightedInteger,
 )
-
 
 # ============================================================================
 # SEED MANAGEMENT TESTS
 # ============================================================================
+
 
 class TestRNGSeedManagement:
     """Test RNG seed management functionality."""
@@ -90,6 +90,7 @@ class TestRNGSeedManagement:
 # INTEGER GENERATION TESTS
 # ============================================================================
 
+
 class TestRNGInteger:
     """Test RNG.integer() method."""
 
@@ -98,7 +99,7 @@ class TestRNGInteger:
         RNG.seed(42)
         value = RNG.integer()
         assert isinstance(value, int)
-        assert -2**31 <= value <= 2**31 - 1
+        assert -(2**31) <= value <= 2**31 - 1
 
     def test_integer_custom_range(self):
         """Test integer generation with custom range."""
@@ -158,6 +159,7 @@ class TestRNGInteger:
 # ============================================================================
 # FLOAT GENERATION TESTS
 # ============================================================================
+
 
 class TestRNGFloat:
     """Test RNG.float() method."""
@@ -223,6 +225,7 @@ class TestRNGFloat:
 # BOOLEAN GENERATION TESTS
 # ============================================================================
 
+
 class TestRNGBoolean:
     """Test RNG.boolean() method."""
 
@@ -271,20 +274,21 @@ class TestRNGBoolean:
 # CHOICE GENERATION TESTS
 # ============================================================================
 
+
 class TestRNGChoice:
     """Test RNG.choice() method."""
 
     def test_choice_from_list(self):
         """Test choosing from a list of items."""
         RNG.seed(42)
-        choices = ['a', 'b', 'c', 'd']
+        choices = ["a", "b", "c", "d"]
         value = RNG.choice(choices)
         assert value in choices
 
     def test_choice_all_items_possible(self):
         """Test that all items can be chosen."""
         RNG.seed(42)
-        choices = ['a', 'b', 'c']
+        choices = ["a", "b", "c"]
         values = [RNG.choice(choices) for _ in range(100)]
 
         # All choices should appear at least once
@@ -292,8 +296,8 @@ class TestRNGChoice:
 
     def test_choice_single_item(self):
         """Test choosing from single-item list."""
-        value = RNG.choice(['only'])
-        assert value == 'only'
+        value = RNG.choice(["only"])
+        assert value == "only"
 
     def test_choice_empty_list_raises_error(self):
         """Test that empty list raises RNGValueError."""
@@ -303,14 +307,14 @@ class TestRNGChoice:
     def test_choice_different_types(self):
         """Test choosing from list with different types."""
         RNG.seed(42)
-        choices = [1, 'two', 3.0, True, None]
+        choices = [1, "two", 3.0, True, None]
         value = RNG.choice(choices)
         assert value in choices
 
     def test_choice_distribution(self):
         """Test that choice has reasonable distribution."""
         RNG.seed(42)
-        choices = ['a', 'b', 'c']
+        choices = ["a", "b", "c"]
         values = [RNG.choice(choices) for _ in range(300)]
 
         # Each choice should appear roughly 1/3 of the time (allow variance)
@@ -323,6 +327,7 @@ class TestRNGChoice:
 # ============================================================================
 # STRING GENERATION TESTS
 # ============================================================================
+
 
 class TestRNGString:
     """Test RNG.string() method."""
@@ -377,6 +382,7 @@ class TestRNGString:
 # WEIGHTED INTEGER TESTS
 # ============================================================================
 
+
 class TestRNGWeightedInteger:
     """Test RNG.winteger() method."""
 
@@ -403,14 +409,14 @@ class TestRNGWeightedInteger:
         """Test that weights affect distribution."""
         RNG.seed(42)
         ranges = {
-            (0, 10): 0.9,    # 90% weight
-            (20, 30): 0.1,   # 10% weight
+            (0, 10): 0.9,  # 90% weight
+            (20, 30): 0.1,  # 10% weight
         }
 
         values = [RNG.winteger(ranges) for _ in range(1000)]
 
         low_range_count = sum(1 for v in values if 0 <= v <= 10)
-        high_range_count = sum(1 for v in values if 20 <= v <= 30)
+        sum(1 for v in values if 20 <= v <= 30)
 
         # Low range should have ~90% of values
         low_ratio = low_range_count / len(values)
@@ -427,8 +433,8 @@ class TestRNGWeightedInteger:
         """Test that weights don't need to sum to 1.0."""
         RNG.seed(42)
         ranges = {
-            (0, 10): 8,    # 80%
-            (20, 30): 2,   # 20%
+            (0, 10): 8,  # 80%
+            (20, 30): 2,  # 20%
         }
 
         # Should work without error
@@ -439,6 +445,7 @@ class TestRNGWeightedInteger:
 # ============================================================================
 # WEIGHTED FLOAT TESTS
 # ============================================================================
+
 
 class TestRNGWeightedFloat:
     """Test RNG.wfloat() method."""
@@ -466,14 +473,14 @@ class TestRNGWeightedFloat:
         """Test that weights affect distribution."""
         RNG.seed(42)
         ranges = {
-            (0.0, 1.0): 0.9,     # 90% weight
-            (10.0, 20.0): 0.1,   # 10% weight
+            (0.0, 1.0): 0.9,  # 90% weight
+            (10.0, 20.0): 0.1,  # 10% weight
         }
 
         values = [RNG.wfloat(ranges) for _ in range(1000)]
 
         low_range_count = sum(1 for v in values if 0.0 <= v <= 1.0)
-        high_range_count = sum(1 for v in values if 10.0 <= v <= 20.0)
+        sum(1 for v in values if 10.0 <= v <= 20.0)
 
         # Low range should have ~90% of values
         low_ratio = low_range_count / len(values)
@@ -491,6 +498,7 @@ class TestRNGWeightedFloat:
 # RNG TYPE CLASS TESTS
 # ============================================================================
 
+
 class TestRNGIntegerType:
     """Test RNGInteger type class."""
 
@@ -503,7 +511,7 @@ class TestRNGIntegerType:
     def test_rng_integer_type_default_range(self):
         """Test RNGInteger with default range."""
         rng_type = RNGInteger()
-        assert rng_type.min == -2**31
+        assert rng_type.min == -(2**31)
         assert rng_type.max == 2**31 - 1
 
     def test_rng_integer_type_generate(self):
@@ -517,7 +525,7 @@ class TestRNGIntegerType:
     def test_rng_integer_type_python_type(self):
         """Test RNGInteger.python_type property."""
         rng_type = RNGInteger(0, 100)
-        assert rng_type.python_type == int
+        assert rng_type.python_type is int
 
     def test_rng_integer_type_with_predicate(self):
         """Test RNGInteger with predicate."""
@@ -553,7 +561,7 @@ class TestRNGFloatType:
     def test_rng_float_type_python_type(self):
         """Test RNGFloat.python_type property."""
         rng_type = RNGFloat(0.0, 1.0)
-        assert rng_type.python_type == float
+        assert rng_type.python_type is float
 
     def test_rng_float_type_with_predicate(self):
         """Test RNGFloat with predicate."""
@@ -588,7 +596,7 @@ class TestRNGBooleanType:
     def test_rng_boolean_type_python_type(self):
         """Test RNGBoolean.python_type property."""
         rng_type = RNGBoolean()
-        assert rng_type.python_type == bool
+        assert rng_type.python_type is bool
 
 
 class TestRNGChoiceType:
@@ -596,7 +604,7 @@ class TestRNGChoiceType:
 
     def test_rng_choice_type_creation(self):
         """Test creating RNGChoice type."""
-        choices = ['a', 'b', 'c']
+        choices = ["a", "b", "c"]
         rng_type = RNGChoice(choices)
         assert rng_type.choices == choices
 
@@ -608,7 +616,7 @@ class TestRNGChoiceType:
     def test_rng_choice_type_generate(self):
         """Test RNGChoice.generate() method."""
         RNG.seed(42)
-        choices = ['a', 'b', 'c']
+        choices = ["a", "b", "c"]
         rng_type = RNGChoice(choices)
 
         for _ in range(20):
@@ -617,11 +625,11 @@ class TestRNGChoiceType:
 
     def test_rng_choice_type_python_type(self):
         """Test RNGChoice.python_type property."""
-        rng_type = RNGChoice(['a', 'b', 'c'])
-        assert rng_type.python_type == str
+        rng_type = RNGChoice(["a", "b", "c"])
+        assert rng_type.python_type is str
 
         rng_type_int = RNGChoice([1, 2, 3])
-        assert rng_type_int.python_type == int
+        assert rng_type_int.python_type is int
 
 
 class TestRNGStringType:
@@ -658,7 +666,7 @@ class TestRNGStringType:
     def test_rng_string_type_python_type(self):
         """Test RNGString.python_type property."""
         rng_type = RNGString()
-        assert rng_type.python_type == str
+        assert rng_type.python_type is str
 
 
 class TestRNGWeightedIntegerType:
@@ -684,7 +692,7 @@ class TestRNGWeightedIntegerType:
         """Test RNGWeightedInteger.python_type property."""
         ranges = {(0, 10): 1.0}
         rng_type = RNGWeightedInteger(ranges)
-        assert rng_type.python_type == int
+        assert rng_type.python_type is int
 
 
 class TestRNGWeightedFloatType:
@@ -710,12 +718,13 @@ class TestRNGWeightedFloatType:
         """Test RNGWeightedFloat.python_type property."""
         ranges = {(0.0, 1.0): 1.0}
         rng_type = RNGWeightedFloat(ranges)
-        assert rng_type.python_type == float
+        assert rng_type.python_type is float
 
 
 # ============================================================================
 # BASE CLASS TESTS
 # ============================================================================
+
 
 class TestRNGTypeBase:
     """Test RNGType base class."""
@@ -734,6 +743,7 @@ class TestRNGTypeBase:
 # ============================================================================
 # EDGE CASES AND ERROR HANDLING
 # ============================================================================
+
 
 class TestRNGEdgeCases:
     """Test edge cases and error handling."""
@@ -800,6 +810,7 @@ class TestRNGEdgeCases:
 # INTEGRATION TESTS
 # ============================================================================
 
+
 class TestRNGIntegration:
     """Integration tests combining multiple RNG features."""
 
@@ -810,7 +821,7 @@ class TestRNGIntegration:
         int_val = RNG.integer(0, 100)
         float_val = RNG.float(0.0, 1.0)
         bool_val = RNG.boolean()
-        choice_val = RNG.choice(['a', 'b', 'c'])
+        choice_val = RNG.choice(["a", "b", "c"])
         string_val = RNG.string(length=10)
 
         assert isinstance(int_val, int)
@@ -827,7 +838,7 @@ class TestRNGIntegration:
             RNGInteger(0, 100),
             RNGFloat(0.0, 1.0),
             RNGBoolean(),
-            RNGChoice(['x', 'y', 'z']),
+            RNGChoice(["x", "y", "z"]),
             RNGString(length=5),
         ]
 
@@ -858,10 +869,7 @@ class TestRNGIntegration:
         RNG.seed(42)
 
         # Generate even number divisible by 5
-        value = RNG.integer(
-            0, 100,
-            predicate=lambda x: x % 2 == 0 and x % 5 == 0
-        )
+        value = RNG.integer(0, 100, predicate=lambda x: x % 2 == 0 and x % 5 == 0)
 
         assert value % 2 == 0
         assert value % 5 == 0
@@ -881,15 +889,13 @@ class TestRNGIntegration:
 
         # All values should be in one of the ranges
         for value in values:
-            assert any(
-                low <= value <= high
-                for (low, high) in ranges.keys()
-            )
+            assert any(low <= value <= high for (low, high) in ranges)
 
 
 # ============================================================================
 # PERFORMANCE TESTS (Optional)
 # ============================================================================
+
 
 class TestRNGPerformance:
     """Performance tests to ensure RNG is reasonably fast."""
@@ -914,8 +920,7 @@ class TestRNGPerformance:
 
         start = time.time()
         # Generate 1000 even numbers (should be fast)
-        values = [RNG.integer(0, 1000, predicate=lambda x: x % 2 == 0) 
-                  for _ in range(1000)]
+        values = [RNG.integer(0, 1000, predicate=lambda x: x % 2 == 0) for _ in range(1000)]
         elapsed = time.time() - start
 
         # Should complete in reasonable time (< 1 second)

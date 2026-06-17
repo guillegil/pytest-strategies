@@ -2,32 +2,31 @@
 Integration tests for Sequence Testing feature.
 """
 
-import pytest
-from pytest_strategy import Strategy, Parameter, TestArg, RNGInteger
+from pytest_strategy import Parameter, RNGInteger, Strategy, TestArg
 from pytest_strategy.rng import RNGSequence
 
 pytest_plugins = ["pytester"]
+
 
 # Register strategies for testing
 @Strategy.register("sequence_strategy")
 def create_sequence_strategy(nsamples):
     return Parameter(
-        TestArg("a", rng_type=RNGSequence([1, 2])),
-        TestArg("b", rng_type=RNGSequence(["x", "y"]))
+        TestArg("a", rng_type=RNGSequence([1, 2])), TestArg("b", rng_type=RNGSequence(["x", "y"]))
     )
+
 
 @Strategy.register("mixed_sequence_strategy")
 def create_mixed_strategy(nsamples):
     return Parameter(
-        TestArg("seq", rng_type=RNGSequence([1, 2])),
-        TestArg("rnd", rng_type=RNGInteger(10, 20))
+        TestArg("seq", rng_type=RNGSequence([1, 2])), TestArg("rnd", rng_type=RNGInteger(10, 20))
     )
+
 
 @Strategy.register("no_sequence_strategy")
 def create_no_sequence_strategy(nsamples):
-    return Parameter(
-        TestArg("rnd", rng_type=RNGInteger(0, 10))
-    )
+    return Parameter(TestArg("rnd", rng_type=RNGInteger(0, 10)))
+
 
 class TestSequenceIntegration:
     """Integration tests for nsamples='auto'."""
@@ -58,10 +57,10 @@ class TestSequenceIntegration:
             def test_gen(a, b):
                 pass
         """)
-        
+
         # Run with nsamples="auto"
         result = pytester.runpytest("--nsamples=auto")
-        
+
         # Should have 4 tests (2 * 2)
         result.assert_outcomes(passed=4)
 
@@ -82,10 +81,10 @@ class TestSequenceIntegration:
             def test_gen(seq, rnd):
                 pass
         """)
-        
+
         # Run with nsamples="auto"
         result = pytester.runpytest("--nsamples=auto")
-        
+
         # Should have 3 tests (length of sequence)
         result.assert_outcomes(passed=3)
 
@@ -104,10 +103,10 @@ class TestSequenceIntegration:
             def test_gen(rnd):
                 pass
         """)
-        
+
         # Run with nsamples="auto"
         result = pytester.runpytest("--nsamples=auto")
-        
+
         # Should fail collection or execution
         result.stdout.fnmatch_lines(["*ValueError: No sequence arguments found*"])
 
@@ -129,9 +128,9 @@ class TestSequenceIntegration:
             def test_gen(val, label):
                 pass
         """)
-        
+
         # Run with nsamples="auto"
         result = pytester.runpytest("--nsamples=auto")
-        
+
         # Should have 10 tests (5 * 2)
         result.assert_outcomes(passed=10)

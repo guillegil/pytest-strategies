@@ -13,14 +13,12 @@ These tests demonstrate the complete workflow integrating:
 The strategies are defined in strategies.py and auto-discovered by the plugin.
 """
 
-import pytest
-from typing import Tuple
-from pytest_strategy import Strategy, RNG
-
+from pytest_strategy import RNG, Strategy
 
 # ============================================================================
 # BASIC STRATEGY TESTS
 # ============================================================================
+
 
 @Strategy.strategy("simple_integer_strategy")
 def test_simple_integer(value):
@@ -43,6 +41,7 @@ def test_multi_param(count, ratio, enabled):
 # CONSTRAINT TESTS
 # ============================================================================
 
+
 @Strategy.strategy("constrained_range_strategy")
 def test_constrained_range(min_val, max_val):
     """Test that constraints are enforced."""
@@ -59,15 +58,16 @@ def test_complex_constraints(x, y):
     # RNG predicates
     assert x % 2 == 0  # x is even
     assert y % 5 == 0  # y is multiple of 5
-    
+
     # Parameter constraints
     assert x + y <= 100  # sum <= 100
-    assert x >= y // 2   # x >= y/2
+    assert x >= y // 2  # x >= y/2
 
 
 # ============================================================================
 # REAL-WORLD SIMULATION TESTS
 # ============================================================================
+
 
 @Strategy.strategy("api_request_strategy")
 def test_api_request(user_id, page_size, timeout, method, include_metadata):
@@ -93,6 +93,7 @@ def test_database_query(offset, limit, sort_field, sort_order):
 # VALIDATION TESTS
 # ============================================================================
 
+
 @Strategy.strategy("validated_strategy")
 def test_validated_params(positive, even, in_range):
     """Test that validators are enforced."""
@@ -105,22 +106,24 @@ def test_validated_params(positive, even, in_range):
 # STRING GENERATION TESTS
 # ============================================================================
 
+
 @Strategy.strategy("string_strategy")
 def test_string_generation(username, code, category):
     """Test string parameter generation."""
     assert isinstance(username, str)
     assert 5 <= len(username) <= 15
-    
+
     assert isinstance(code, str)
     assert len(code) == 6
     assert all(c in "0123456789ABCDEF" for c in code)
-    
+
     assert category in ["admin", "user", "guest"]
 
 
 # ============================================================================
 # MIXED MODE TESTS
 # ============================================================================
+
 
 @Strategy.strategy("mixed_static_random_strategy")
 def test_mixed_mode(static_val, random_val, directed_val, mixed_val):
@@ -134,6 +137,7 @@ def test_mixed_mode(static_val, random_val, directed_val, mixed_val):
 # ============================================================================
 # BACKWARD COMPATIBILITY TESTS
 # ============================================================================
+
 
 @Strategy.strategy("legacy_tuple_strategy")
 def test_legacy_tuple(x, y, z):
@@ -149,46 +153,44 @@ def test_legacy_tuple(x, y, z):
 # RNG SEED REPRODUCIBILITY TESTS
 # ============================================================================
 
+
 class TestReproducibility:
     """Test RNG seed reproducibility across strategies."""
 
     def test_seed_reproducibility(self):
         """Test that same seed produces same results."""
-        from pytest_strategy import Parameter, TestArg, RNGInteger
-        
+        from pytest_strategy import Parameter, RNGInteger, TestArg
+
         # Create parameter
         param = Parameter(
-            TestArg("x", rng_type=RNGInteger(0, 1000)),
-            TestArg("y", rng_type=RNGInteger(0, 1000))
+            TestArg("x", rng_type=RNGInteger(0, 1000)), TestArg("y", rng_type=RNGInteger(0, 1000))
         )
-        
+
         # Generate with seed 42
         RNG.seed(42)
         samples1 = param.generate_vectors(10, mode="random_only")
-        
+
         # Generate with same seed
         RNG.seed(42)
         samples2 = param.generate_vectors(10, mode="random_only")
-        
+
         # Should be identical
         assert samples1 == samples2
 
     def test_different_seeds_different_results(self):
         """Test that different seeds produce different results."""
-        from pytest_strategy import Parameter, TestArg, RNGInteger
-        
-        param = Parameter(
-            TestArg("value", rng_type=RNGInteger(0, 1000))
-        )
-        
+        from pytest_strategy import Parameter, RNGInteger, TestArg
+
+        param = Parameter(TestArg("value", rng_type=RNGInteger(0, 1000)))
+
         # Generate with seed 42
         RNG.seed(42)
         samples1 = param.generate_vectors(20, mode="random_only")
-        
+
         # Generate with different seed
         RNG.seed(99)
         samples2 = param.generate_vectors(20, mode="random_only")
-        
+
         # Should be different
         assert samples1 != samples2
 
@@ -197,25 +199,26 @@ class TestReproducibility:
 # DIRECTED VECTOR TESTS
 # ============================================================================
 
+
 class TestDirectedVectors:
     """Test directed vector functionality."""
 
     def test_directed_vectors_included(self):
         """Test that directed vectors are included in samples."""
-        from pytest_strategy import Parameter, TestArg, RNGInteger
-        
+        from pytest_strategy import Parameter, RNGInteger, TestArg
+
         param = Parameter(
             TestArg("x", rng_type=RNGInteger(0, 100)),
             TestArg("y", rng_type=RNGInteger(0, 100)),
             directed_vectors={
                 "origin": (0, 0),
                 "max": (100, 100),
-            }
+            },
         )
-        
+
         # Generate in 'all' mode
         samples = param.generate_vectors(5, mode="all")
-        
+
         # Should include directed vectors
         assert (0, 0) in samples
         assert (100, 100) in samples
@@ -223,19 +226,19 @@ class TestDirectedVectors:
 
     def test_directed_only_mode(self):
         """Test directed_only mode."""
-        from pytest_strategy import Parameter, TestArg, RNGInteger
-        
+        from pytest_strategy import Parameter, RNGInteger, TestArg
+
         param = Parameter(
             TestArg("value", rng_type=RNGInteger(0, 100)),
             directed_vectors={
                 "zero": (0,),
                 "fifty": (50,),
                 "max": (100,),
-            }
+            },
         )
-        
+
         samples = param.generate_vectors(100, mode="directed_only")
-        
+
         # Should only have directed vectors
         assert len(samples) == 3
         assert (0,) in samples
@@ -247,28 +250,28 @@ class TestDirectedVectors:
 # CLI OPTIONS INTEGRATION TESTS
 # ============================================================================
 
+
 class TestCLIIntegration:
     """Test CLI options integration (these test the underlying functionality)."""
 
     def test_vector_mode_random_only(self):
         """Test random_only mode."""
-        from pytest_strategy import Parameter, TestArg, RNGInteger
-        
+        from pytest_strategy import Parameter, RNGInteger, TestArg
+
         param = Parameter(
-            TestArg("value", rng_type=RNGInteger(0, 100)),
-            directed_vectors={"zero": (0,)}
+            TestArg("value", rng_type=RNGInteger(0, 100)), directed_vectors={"zero": (0,)}
         )
-        
+
         samples = param.generate_vectors(10, mode="random_only")
-        
+
         # Should not include directed vector
         assert (0,) not in samples
         assert len(samples) == 10
 
     def test_filter_by_name(self):
         """Test filtering by vector name."""
-        from pytest_strategy import Parameter, TestArg, RNGInteger
-        
+        from pytest_strategy import Parameter, RNGInteger, TestArg
+
         param = Parameter(
             TestArg("x", rng_type=RNGInteger(0, 100)),
             TestArg("y", rng_type=RNGInteger(0, 100)),
@@ -276,30 +279,30 @@ class TestCLIIntegration:
                 "origin": (0, 0),
                 "center": (50, 50),
                 "max": (100, 100),
-            }
+            },
         )
-        
+
         samples = param.generate_vectors(0, filter_by_name="center")
-        
+
         # Should only have the named vector
         assert len(samples) == 1
         assert samples[0] == (50, 50)
 
     def test_filter_by_index(self):
         """Test filtering by vector index."""
-        from pytest_strategy import Parameter, TestArg, RNGInteger
-        
+        from pytest_strategy import Parameter, RNGInteger, TestArg
+
         param = Parameter(
             TestArg("value", rng_type=RNGInteger(0, 100)),
             directed_vectors={
                 "first": (10,),
                 "second": (20,),
                 "third": (30,),
-            }
+            },
         )
-        
+
         samples = param.generate_vectors(0, filter_by_index=1)
-        
+
         # Should only have the indexed vector
         assert len(samples) == 1
         assert samples[0] == (20,)
@@ -308,6 +311,7 @@ class TestCLIIntegration:
 # ============================================================================
 # COMPLETE WORKFLOW TEST
 # ============================================================================
+
 
 class TestCompleteWorkflow:
     """Test the complete pytest-strategies workflow."""
@@ -324,36 +328,31 @@ class TestCompleteWorkflow:
         7. Verify all features work together
         """
         from pytest_strategy import (
-            Parameter,
-            TestArg,
             RNG,
-            RNGInteger,
-            RNGFloat,
+            Parameter,
             RNGChoice,
+            RNGFloat,
+            RNGInteger,
+            TestArg,
         )
-        
+
         # Set seed for reproducibility
         RNG.seed(42)
-        
+
         # Create TestArgs with various RNG types
         arg1 = TestArg(
             "count",
             rng_type=RNGInteger(1, 100, predicate=lambda x: x > 0),
-            validator=lambda x: x > 0
+            validator=lambda x: x > 0,
         )
-        arg2 = TestArg(
-            "ratio",
-            rng_type=RNGFloat(0.0, 1.0),
-            validator=lambda x: 0.0 <= x <= 1.0
-        )
-        arg3 = TestArg(
-            "mode",
-            rng_type=RNGChoice(["fast", "slow", "medium"])
-        )
-        
+        arg2 = TestArg("ratio", rng_type=RNGFloat(0.0, 1.0), validator=lambda x: 0.0 <= x <= 1.0)
+        arg3 = TestArg("mode", rng_type=RNGChoice(["fast", "slow", "medium"]))
+
         # Create Parameter with constraints
         param = Parameter(
-            arg1, arg2, arg3,
+            arg1,
+            arg2,
+            arg3,
             vector_constraints=[
                 lambda v: v[0] <= 100,  # count <= 100
                 lambda v: v[1] >= 0.0,  # ratio >= 0
@@ -362,30 +361,30 @@ class TestCompleteWorkflow:
                 "baseline": (10, 0.5, "medium"),
                 "fast_mode": (1, 0.1, "fast"),
                 "slow_mode": (100, 1.0, "slow"),
-            }
+            },
         )
-        
+
         # Test different generation modes
         all_samples = param.generate_vectors(5, mode="all")
         assert len(all_samples) == 8  # 3 directed + 5 random
-        
+
         random_samples = param.generate_vectors(10, mode="random_only")
         assert len(random_samples) == 10
-        
+
         directed_samples = param.generate_vectors(0, mode="directed_only")
         assert len(directed_samples) == 3
-        
+
         # Verify all samples satisfy constraints
         for sample in all_samples:
             assert 1 <= sample[0] <= 100
             assert 0.0 <= sample[1] <= 1.0
             assert sample[2] in ["fast", "slow", "medium"]
-        
+
         # Test CLI filtering
         filtered = param.generate_vectors(0, filter_by_name="baseline")
         assert len(filtered) == 1
         assert filtered[0] == (10, 0.5, "medium")
-        
+
         # Test introspection
         assert param.arg_names == ("count", "ratio", "mode")
         assert param.num_args == 3

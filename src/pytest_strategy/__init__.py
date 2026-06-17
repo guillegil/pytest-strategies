@@ -58,24 +58,24 @@ __author__ = "Guillermo Gil"
 __email__ = "guillegil@proton.me"
 
 # Core components
-from .strategy import Strategy
 from .parameters import Parameter
-from .test_args import TestArg
 
 # RNG components
 from .rng import (
     RNG,
-    RNGValueError,
-    RNGType,
-    RNGInteger,
-    RNGFloat,
     RNGBoolean,
     RNGChoice,
     RNGEnum,
+    RNGFloat,
+    RNGInteger,
     RNGString,
-    RNGWeightedInteger,
+    RNGType,
+    RNGValueError,
     RNGWeightedFloat,
+    RNGWeightedInteger,
 )
+from .strategy import Strategy
+from .test_args import TestArg
 
 # Plugin is automatically loaded via entry point
 # No need to import plugin module directly
@@ -85,12 +85,10 @@ __all__ = [
     "__version__",
     "__author__",
     "__email__",
-
     # Core classes
     "Strategy",
     "Parameter",
     "TestArg",
-
     # RNG classes
     "RNG",
     "RNGType",
@@ -168,7 +166,8 @@ def configure(
 def _print_import_message():
     """Print helpful message when module is imported (for debugging)."""
     import sys
-    if '--help' not in sys.argv and '-h' not in sys.argv:
+
+    if "--help" not in sys.argv and "-h" not in sys.argv:
         # Only print in verbose mode or when explicitly requested
         pass
 

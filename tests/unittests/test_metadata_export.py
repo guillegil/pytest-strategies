@@ -1,11 +1,13 @@
-import pytest
 import json
 from enum import Enum
-from pytest_strategy import Strategy, Parameter, TestArg, RNGInteger, RNGEnum
+
+from pytest_strategy import Parameter, RNGEnum, RNGInteger, Strategy, TestArg
+
 
 class Status(Enum):
     ACTIVE = "active"
     INACTIVE = "inactive"
+
 
 class TestMetadataExport:
     def test_test_arg_to_dict(self):
@@ -17,7 +19,7 @@ class TestMetadataExport:
         assert data1["description"] == "A static value"
         assert data1["has_static_value"] is True
         assert data1["static_value"] == "42"
-        
+
         # RNG arg
         arg2 = TestArg("rng", rng_type=RNGInteger(0, 10))
         data2 = arg2.to_dict()
@@ -32,9 +34,9 @@ class TestMetadataExport:
         param = Parameter(
             TestArg("x", rng_type=RNGInteger(0, 10)),
             TestArg("y", value=5),
-            directed_vectors={"edge": (0, 5)}
+            directed_vectors={"edge": (0, 5)},
         )
-        
+
         data = param.to_dict()
         assert len(data["arguments"]) == 2
         assert data["arguments"][0]["name"] == "x"
@@ -44,18 +46,19 @@ class TestMetadataExport:
 
     def test_strategy_export(self):
         """Test Strategy.export_strategies()"""
+
         # Register a test strategy
         @Strategy.register("export_test_strategy")
         def strategy_factory(n):
             return Parameter(
                 TestArg("status", rng_type=RNGEnum(Status)),
-                TestArg("count", rng_type=RNGInteger(1, 100))
+                TestArg("count", rng_type=RNGInteger(1, 100)),
             )
-            
+
         # Export
         json_str = Strategy.export_strategies()
         data = json.loads(json_str)
-        
+
         assert "export_test_strategy" in data
         strategy_data = data["export_test_strategy"]
         assert len(strategy_data["arguments"]) == 2

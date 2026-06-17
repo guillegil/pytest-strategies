@@ -3,8 +3,10 @@ Unit tests for Sequence Testing feature.
 """
 
 import pytest
-from pytest_strategy import Parameter, TestArg, RNGInteger
-from pytest_strategy.rng import RNGSequence, RNGValueError, RNG
+
+from pytest_strategy import Parameter, RNGInteger, TestArg
+from pytest_strategy.rng import RNG, RNGSequence, RNGValueError
+
 
 class TestRNGSequence:
     """Test RNGSequence class."""
@@ -13,7 +15,7 @@ class TestRNGSequence:
         """Test initialization with sequence."""
         seq = RNGSequence([1, 2, 3])
         assert seq.sequence == [1, 2, 3]
-        assert seq.python_type == int
+        assert seq.python_type is int
 
     def test_initialization_empty_raises_error(self):
         """Test that empty sequence raises error."""
@@ -24,7 +26,7 @@ class TestRNGSequence:
         """Test initialization with predicate filtering."""
         seq = RNGSequence([1, 2, 3, 4, 5], predicate=lambda x: x % 2 == 0)
         assert seq.sequence == [2, 4]
-        
+
     def test_initialization_all_filtered_raises_error(self):
         """Test that error is raised if predicate filters all items."""
         with pytest.raises(RNGValueError, match="filtered by predicate"):
@@ -37,14 +39,13 @@ class TestRNGSequence:
         value = seq.generate()
         assert value in [1, 2, 3]
 
+
 class TestParameterExhaustive:
     """Test Parameter.generate_exhaustive method."""
 
     def test_single_sequence(self):
         """Test exhaustive generation with single sequence."""
-        param = Parameter(
-            TestArg("item", rng_type=RNGSequence([1, 2, 3]))
-        )
+        param = Parameter(TestArg("item", rng_type=RNGSequence([1, 2, 3])))
         samples = param.generate_exhaustive()
         assert len(samples) == 3
         assert samples == [(1,), (2,), (3,)]
@@ -53,7 +54,7 @@ class TestParameterExhaustive:
         """Test Cartesian product of multiple sequences."""
         param = Parameter(
             TestArg("a", rng_type=RNGSequence([1, 2])),
-            TestArg("b", rng_type=RNGSequence(["x", "y"]))
+            TestArg("b", rng_type=RNGSequence(["x", "y"])),
         )
         samples = param.generate_exhaustive()
         assert len(samples) == 4
@@ -65,24 +66,22 @@ class TestParameterExhaustive:
         RNG.seed(42)
         param = Parameter(
             TestArg("seq", rng_type=RNGSequence([1, 2])),
-            TestArg("rnd", rng_type=RNGInteger(10, 20))
+            TestArg("rnd", rng_type=RNGInteger(10, 20)),
         )
         samples = param.generate_exhaustive()
         assert len(samples) == 2
-        
+
         # Check sequence values
         assert samples[0][0] == 1
         assert samples[1][0] == 2
-        
+
         # Check random values
         assert 10 <= samples[0][1] <= 20
         assert 10 <= samples[1][1] <= 20
 
     def test_no_sequence_raises_error(self):
         """Test that exhaustive generation raises error if no sequence args."""
-        param = Parameter(
-            TestArg("x", rng_type=RNGInteger(0, 10))
-        )
+        param = Parameter(TestArg("x", rng_type=RNGInteger(0, 10)))
         with pytest.raises(ValueError, match="No sequence arguments found"):
             param.generate_exhaustive()
 
@@ -91,7 +90,7 @@ class TestParameterExhaustive:
         param = Parameter(
             TestArg("a", rng_type=RNGSequence([1, 2, 3])),
             TestArg("b", rng_type=RNGSequence([1, 2, 3])),
-            vector_constraints=[lambda v: v[0] < v[1]]
+            vector_constraints=[lambda v: v[0] < v[1]],
         )
         samples = param.generate_exhaustive()
         # Expected: (1,2), (1,3), (2,3)
@@ -102,11 +101,11 @@ class TestParameterExhaustive:
         """Test exhaustive generation with filtered sequence."""
         param = Parameter(
             TestArg("x", rng_type=RNGSequence([1, 2, 3, 4], predicate=lambda x: x % 2 == 0)),
-            TestArg("y", rng_type=RNGSequence(["a", "b"]))
+            TestArg("y", rng_type=RNGSequence(["a", "b"])),
         )
         samples = param.generate_exhaustive()
         # x should only be [2, 4]
         # y is ["a", "b"]
         # Expected: (2, "a"), (2, "b"), (4, "a"), (4, "b")
         assert len(samples) == 4
-        assert set(s[0] for s in samples) == {2, 4}
+        assert {s[0] for s in samples} == {2, 4}
