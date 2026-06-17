@@ -33,10 +33,26 @@ def resolve_and_parametrize(
 ) -> Callable:
     """Build and apply the pytest parametrization for a registered strategy."""
     # Get CLI options
-    nsamples = config.getoption("nsamples") if config else 10
+    cli_nsamples = config.getoption("nsamples") if config else None
     vector_mode = config.getoption("vector_mode") if config else "all"
     vector_name = config.getoption("vector_name") if config else None
     vector_index = config.getoption("vector_index") if config else None
+
+    # Compute the legacy-safe nsamples to pass to the factory.
+    # The factory must always receive an int (FR-8: never None).
+    # At this point we don't yet know whether the factory returns a Parameter
+    # or a legacy tuple, so we use the CLI value if explicit, otherwise 10 as
+    # a safe sentinel. The real per-strategy override is applied AFTER the
+    # factory returns and we confirm it's a Parameter instance.
+    if cli_nsamples == "auto":
+        factory_nsamples: int | str = "auto"
+    elif cli_nsamples is not None:
+        factory_nsamples = int(cli_nsamples)
+    else:
+        # CLI absent: pass 10 to the factory so legacy paths never see None.
+        # For Parameter-based strategies the true effective count is resolved
+        # below once we have access to param.nsamples.
+        factory_nsamples = 10
 
     factory = registry[name]
 
@@ -45,11 +61,11 @@ def resolve_and_parametrize(
 
     # Call factory function with keyword argument
     try:
-        result = factory(nsamples=nsamples)
+        result = factory(nsamples=factory_nsamples)
     except TypeError as e:
         # Try positional for backward compatibility
         try:
-            result = factory(nsamples)
+            result = factory(factory_nsamples)
         except Exception as inner_e:
             raise ValueError(
                 f"Error calling strategy factory '{name}': {e}. "
@@ -61,13 +77,28 @@ def resolve_and_parametrize(
         # NEW MODE: Parameter-based strategy
         param = result
 
+        # Resolve the effective nsamples with full precedence (FR-3):
+        #   1. CLI "auto" → exhaustive (already handled below)
+        #   2. CLI explicit int → use it
+        #   3. param.nsamples set → use it
+        #   4. fallback → 10
+        if cli_nsamples == "auto":
+            effective_nsamples: int | str = "auto"
+        elif cli_nsamples is not None:
+            effective_nsamples = int(cli_nsamples)
+        elif param.nsamples is not None:
+            effective_nsamples = param.nsamples
+        else:
+            effective_nsamples = 10
+
         # Generate samples using Parameter's generate_vectors with CLI options
         try:
-            if nsamples == "auto":
+            if effective_nsamples == "auto":
                 samples = param.generate_exhaustive()
             else:
+                assert isinstance(effective_nsamples, int)
                 samples = param.generate_vectors(
-                    n=int(nsamples),
+                    n=effective_nsamples,
                     mode=vector_mode,
                     filter_by_name=vector_name,
                     filter_by_index=vector_index,

@@ -517,6 +517,43 @@ class TestParameterEdgeCases:
         samples = param.generate_vectors(0, mode="directed_only")
         assert len(samples) == 50
 
+
+# ============================================================================
+# NSAMPLES TESTS (FR-1, FR-2)
+# ============================================================================
+
+
+class TestParameterNsamples:
+    """Test Parameter.nsamples attribute storage and to_dict serialization (FR-1, FR-2)."""
+
+    def test_nsamples_stored_when_set(self):
+        """FR-1: When nsamples=15 is passed, self.nsamples must equal 15."""
+        arg = TestArg("x", rng_type=RNGInteger(0, 10))
+        param = Parameter(arg, nsamples=15)
+        assert param.nsamples == 15
+
+    def test_nsamples_defaults_to_none(self):
+        """FR-1: When nsamples is omitted, self.nsamples must be None."""
+        arg = TestArg("x", rng_type=RNGInteger(0, 10))
+        param = Parameter(arg)
+        assert param.nsamples is None
+
+    def test_to_dict_includes_nsamples_when_set(self):
+        """FR-2: to_dict() must include 'nsamples' key with the integer value."""
+        arg = TestArg("x", rng_type=RNGInteger(0, 10))
+        param = Parameter(arg, nsamples=15)
+        result = param.to_dict()
+        assert "nsamples" in result
+        assert result["nsamples"] == 15
+
+    def test_to_dict_includes_nsamples_none_when_omitted(self):
+        """FR-2: to_dict() must include 'nsamples' key with None when not set."""
+        arg = TestArg("x", rng_type=RNGInteger(0, 10))
+        param = Parameter(arg)
+        result = param.to_dict()
+        assert "nsamples" in result
+        assert result["nsamples"] is None
+
     def test_complex_constraints(self):
         """Test complex constraint scenarios."""
         arg1 = TestArg("x", rng_type=RNGInteger(0, 10))

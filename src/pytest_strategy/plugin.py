@@ -286,7 +286,7 @@ def pytest_addoption(parser) -> None:
         "--nsamples",
         action="store",
         type=str,
-        default="10",
+        default=None,
         help="Number of random samples to generate per strategy (or 'auto' for exhaustive)",
     )
 

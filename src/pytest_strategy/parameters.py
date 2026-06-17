@@ -26,6 +26,7 @@ class Parameter:
         always_include_directed: bool = True,
         vector_constraints: list[Callable[[tuple], bool]] | None = None,
         max_retries: int = 100,
+        nsamples: int | None = None,
     ):
         """
         Initialize a Parameter container.
@@ -64,6 +65,7 @@ class Parameter:
         self.always_include_directed = always_include_directed
         self.vector_constraints = vector_constraints or []
         self.max_retries = max_retries
+        self.nsamples = nsamples
 
         # Validate directed vectors on initialization
         self._validate_directed_vectors()
@@ -255,6 +257,7 @@ class Parameter:
             },
             "always_include_directed": self.always_include_directed,
             "has_constraints": bool(self.vector_constraints),
+            "nsamples": self.nsamples,
         }
 
     def generate_vectors(
