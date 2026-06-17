@@ -1,12 +1,13 @@
 """
 Pytest plugin for pytest-strategies with auto-discovery of strategy definitions.
 """
-import pytest
-from pytest import Config, Session
-from pathlib import Path
+
 import importlib.util
 import sys
-from typing import List
+from pathlib import Path
+
+import pytest
+from pytest import Config, Session
 
 
 class PytestStrategyPlugin:
@@ -28,8 +29,8 @@ class PytestStrategyPlugin:
         """
         Configure the plugin and set up Strategy class with config.
         """
-        from .strategy import Strategy
         from .rng import RNG
+        from .strategy import Strategy
 
         # Get CLI options
         rng_seed = config.getoption("--rng-seed", None)
@@ -39,10 +40,7 @@ class PytestStrategyPlugin:
         RNG.seed(rng_seed)
 
         # Register custom markers
-        config.addinivalue_line(
-            "markers",
-            "strategy(name): mark test to use a specific strategy"
-        )
+        config.addinivalue_line("markers", "strategy(name): mark test to use a specific strategy")
 
     @pytest.hookimpl
     def pytest_unconfigure(self, config: Config) -> None:
@@ -69,10 +67,7 @@ class PytestStrategyPlugin:
         testpaths = config.getini("testpaths")
 
         # Determine search paths
-        if testpaths:
-            search_paths = [rootdir / path for path in testpaths]
-        else:
-            search_paths = [rootdir]
+        search_paths = [rootdir / path for path in testpaths] if testpaths else [rootdir]
 
         # Discover and load strategy files
         strategy_files = self._discover_strategy_files(search_paths)
@@ -89,14 +84,14 @@ class PytestStrategyPlugin:
     # ==== COLLECTION HOOKS ====
 
     @pytest.hookimpl
-    def pytest_collection_modifyitems(self, config: Config, items: List) -> None:
+    def pytest_collection_modifyitems(self, config: Config, items: list) -> None:
         """Modify collected test items if needed."""
         pass
 
     # ==== REPORTING HOOKS ====
 
     @pytest.hookimpl
-    def pytest_report_header(self, config: Config, start_path: Path) -> List[str]:
+    def pytest_report_header(self, config: Config, start_path: Path) -> list[str]:
         """Add information to the test report header."""
         from .strategy import Strategy
 
@@ -104,6 +99,7 @@ class PytestStrategyPlugin:
 
         # Show RNG seed
         from .rng import RNG
+
         seed = RNG.get_seed()
         lines.append(f"pytest-strategies: RNG seed = {seed}")
 
@@ -114,7 +110,9 @@ class PytestStrategyPlugin:
 
             # Show discovered strategy files
             if self.discovered_files:
-                lines.append(f"pytest-strategies: Loaded {len(self.discovered_files)} strategy file(s)")
+                lines.append(
+                    f"pytest-strategies: Loaded {len(self.discovered_files)} strategy file(s)"
+                )
 
         return lines
 
@@ -139,7 +137,7 @@ class PytestStrategyPlugin:
 
     # ==== HELPER METHODS ====
 
-    def _discover_strategy_files(self, search_paths: List[Path]) -> List[Path]:
+    def _discover_strategy_files(self, search_paths: list[Path]) -> list[Path]:
         """
         Discover strategy definition files in the test directory.
 
@@ -172,8 +170,9 @@ class PytestStrategyPlugin:
             for pattern in patterns:
                 for file_path in search_path.glob(pattern):
                     # Skip __pycache__ and hidden directories
-                    if any(part.startswith('.') or part == '__pycache__' 
-                           for part in file_path.parts):
+                    if any(
+                        part.startswith(".") or part == "__pycache__" for part in file_path.parts
+                    ):
                         continue
 
                     # Skip if already found
@@ -197,13 +196,13 @@ class PytestStrategyPlugin:
             True if file contains strategy registrations
         """
         try:
-            content = file_path.read_text(encoding='utf-8')
+            content = file_path.read_text(encoding="utf-8")
             # Look for @Strategy.register pattern
-            return '@Strategy.register' in content or '@strategy.register' in content
+            return "@Strategy.register" in content or "@strategy.register" in content
         except Exception:
             return False
 
-    def _load_strategy_files(self, strategy_files: List[Path], config: Config) -> None:
+    def _load_strategy_files(self, strategy_files: list[Path], config: Config) -> None:
         """
         Load strategy definition files by importing them.
 
@@ -211,7 +210,6 @@ class PytestStrategyPlugin:
             strategy_files: List of strategy file paths to load
             config: Pytest config object
         """
-        from .strategy import Strategy
 
         for file_path in strategy_files:
             try:
@@ -251,7 +249,7 @@ class PytestStrategyPlugin:
             # Try to create relative path from rootpath
             rel_path = file_path.relative_to(config.rootpath)
             # Convert path to module name
-            module_name = str(rel_path.with_suffix('')).replace('/', '.').replace('\\', '.')
+            module_name = str(rel_path.with_suffix("")).replace("/", ".").replace("\\", ".")
             return f"pytest_strategies_discovered.{module_name}"
         except ValueError:
             # If relative path fails, use absolute path hash
@@ -270,7 +268,7 @@ def pytest_addoption(parser) -> None:
         "--rng-seed",
         type=int,
         default=None,
-        help="Set the random seed for reproducible test generation"
+        help="Set the random seed for reproducible test generation",
     )
 
     group.addoption(
@@ -278,7 +276,7 @@ def pytest_addoption(parser) -> None:
         action="store",
         type=str,
         default="10",
-        help="Number of random samples to generate per strategy (or 'auto' for exhaustive)"
+        help="Number of random samples to generate per strategy (or 'auto' for exhaustive)",
     )
 
     group.addoption(
@@ -287,7 +285,7 @@ def pytest_addoption(parser) -> None:
         type=str,
         default="all",
         choices=["all", "random_only", "directed_only", "mixed", "test"],
-        help="Vector generation mode: all, random_only, directed_only, mixed, or test"
+        help="Vector generation mode: all, random_only, directed_only, mixed, or test",
     )
 
     group.addoption(
@@ -295,7 +293,7 @@ def pytest_addoption(parser) -> None:
         action="store",
         type=str,
         default=None,
-        help="Run only the directed vector with this name"
+        help="Run only the directed vector with this name",
     )
 
     group.addoption(
@@ -303,29 +301,29 @@ def pytest_addoption(parser) -> None:
         action="store",
         type=int,
         default=None,
-        help="Run only the directed vector at this index"
+        help="Run only the directed vector at this index",
     )
 
     group.addoption(
         "--list-strategies",
         action="store_true",
         default=False,
-        help="List all registered strategies and exit"
+        help="List all registered strategies and exit",
     )
 
 
 def pytest_configure(config):
     """Register the plugin instance."""
-    if not hasattr(config, '_strategy_plugin_instance'):
+    if not hasattr(config, "_strategy_plugin_instance"):
         config._strategy_plugin_instance = _plugin_instance
         config.pluginmanager.register(_plugin_instance, "pytest-strategies")
 
 
 def pytest_unconfigure(config):
     """Unregister the plugin instance."""
-    if hasattr(config, '_strategy_plugin_instance'):
+    if hasattr(config, "_strategy_plugin_instance"):
         config.pluginmanager.unregister(_plugin_instance, "pytest-strategies")
-        delattr(config, '_strategy_plugin_instance')
+        delattr(config, "_strategy_plugin_instance")
 
 
 @pytest.hookimpl(trylast=True)
@@ -336,7 +334,7 @@ def pytest_collection_finish(session: Session) -> None:
     config = session.config
 
     if config.option.list_strategies:
-        from .strategies import Strategy
+        from .strategy import Strategy
 
         terminalreporter = config.pluginmanager.get_plugin("terminalreporter")
 
@@ -344,7 +342,9 @@ def pytest_collection_finish(session: Session) -> None:
             terminalreporter.section("Registered Strategies")
 
             if Strategy._registry:
-                terminalreporter.write_line(f"\nFound {len(Strategy._registry)} registered strategies:\n")
+                terminalreporter.write_line(
+                    f"\nFound {len(Strategy._registry)} registered strategies:\n"
+                )
 
                 for name in sorted(Strategy._registry.keys()):
                     terminalreporter.write_line(f"  ✓ {name}")

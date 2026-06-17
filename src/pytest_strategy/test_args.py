@@ -6,13 +6,13 @@ from typing import Any, Callable
 class TestArg:
     """
     Represents a single test argument with its generation strategy.
-    
+
     A TestArg can be:
     - Static (fixed value)
     - Random (generated using an RNG type)
     - Directed (from a predefined list of values)
     """
-    
+
     # Prevent pytest from collecting this class as a test
     __test__ = False
 
@@ -26,7 +26,7 @@ class TestArg:
         validator: Callable[[Any], bool] | None = None,
         # Control
         always_include_directed: bool = True,
-        description: str = "", # Re-added description as it was removed in the instruction but not explicitly stated
+        description: str = "",  # Re-added description as it was removed in the instruction but not explicitly stated
     ):
         """
         Initialize a test argument.
@@ -86,9 +86,7 @@ class TestArg:
 
         # If no RNG type, can't generate
         if self._rng_type is None:
-            raise ValueError(
-                f"Cannot generate value for '{self._name}' without rng_type"
-            )
+            raise ValueError(f"Cannot generate value for '{self._name}' without rng_type")
 
         # Generate and validate
         value = self._rng_type.generate()
@@ -106,17 +104,18 @@ class TestArg:
             "has_test_values": bool(self._test_values),
             "always_include_directed": self._always_include_directed,
         }
-        
+
         if self._value is not None:
             data["static_value"] = str(self._value)
-            
+
         if self._rng_type:
             data["rng_type"] = self._rng_type.__class__.__name__
             # Add RNG specific details if available
             if hasattr(self._rng_type, "__dict__"):
                 # Filter out private attributes and callables
                 rng_details = {
-                    k: str(v) for k, v in self._rng_type.__dict__.items() 
+                    k: str(v)
+                    for k, v in self._rng_type.__dict__.items()
                     if not k.startswith("_") and not callable(v)
                 }
                 if rng_details:
@@ -178,9 +177,7 @@ class TestArg:
             ValueError: If validation fails
         """
         if self._validator and not self._validator(value):
-            raise ValueError(
-                f"Value {value!r} failed validation for argument '{self._name}'"
-            )
+            raise ValueError(f"Value {value!r} failed validation for argument '{self._name}'")
         return value
 
     # ====
@@ -262,101 +259,3 @@ class TestArg:
         if self._description:
             return f"{self._name}: {self._description}"
         return self._name
-
-
-# ====
-# Example Usage
-# ====
-
-if __name__ == "__main__":
-    from rng import RNGInteger, RNGChoice, RNGWeightedInteger, RNGFloat
-
-    print("=== TestArg Examples ===\n")
-
-    # Example 1: Pure random
-    print("1. Pure Random Generation:")
-    arg1 = TestArg(
-        name="count",
-        rng_type=RNGInteger(min=1, max=100),
-        description="Random count between 1-100"
-    )
-    print(f"   {arg1}")
-    print(f"   Type: {arg1.type.__name__}")
-    print(f"   Sample: {arg1.generate()}")
-    print(f"   5 Samples: {arg1.generate_samples(5)}\n")
-
-    # Example 2: Static value (directed test)
-    print("2. Static Value (Directed Test):")
-    arg2 = TestArg(
-        name="count",
-        value=0,
-        description="Edge case: zero"
-    )
-    print(f"   {arg2}")
-    print(f"   Is static: {arg2.is_static}")
-    print(f"   Samples: {arg2.generate_samples(10)}\n")
-
-    # Example 3: Mix of directed + random
-    print("3. Mixed (Directed + Random):")
-    arg3 = TestArg(
-        name="count",
-        rng_type=RNGInteger(min=1, max=100),
-        directed_values=[0, 1, 99, 100],
-        description="Count with edge cases"
-    )
-    print(f"   {arg3}")
-    print(f"   Has directed: {arg3.has_directed_values}")
-    print(f"   10 Samples (includes 4 directed): {arg3.generate_samples(10)}\n")
-
-    # Example 4: Weighted with validation
-    print("4. Weighted with Validation:")
-    arg4 = TestArg(
-        name="port",
-        rng_type=RNGWeightedInteger(
-            ranges={
-                (1024, 49151): 0.9,   # User ports (90%)
-                (49152, 65535): 0.1   # Dynamic ports (10%)
-            }
-        ),
-        validator=lambda x: 1024 <= x <= 65535,
-        description="Network port number"
-    )
-    print(f"   {arg4}")
-    print(f"   5 Samples: {arg4.generate_samples(5)}\n")
-
-    # Example 5: Choice type
-    print("5. Choice Type:")
-    arg5 = TestArg(
-        name="mode",
-        rng_type=RNGChoice(choices=["fast", "slow", "medium"]),
-        directed_values=["fast"],  # Always test fast mode
-        description="Processing mode"
-    )
-    print(f"   {arg5}")
-    print(f"   5 Samples: {arg5.generate_samples(5)}\n")
-
-    # Example 6: Float with directed values
-    print("6. Float with Directed Values:")
-    arg6 = TestArg(
-        name="threshold",
-        rng_type=RNGFloat(min=0.0, max=1.0),
-        directed_values=[0.0, 0.5, 1.0],
-        description="Threshold value"
-    )
-    print(f"   {arg6}")
-    print(f"   7 Samples: {arg6.generate_samples(7)}\n")
-
-    # Example 7: Validation failure
-    print("7. Validation Example:")
-    arg7 = TestArg(
-        name="positive",
-        rng_type=RNGInteger(min=-10, max=10),
-        validator=lambda x: x > 0,
-        description="Must be positive"
-    )
-    print(f"   {arg7}")
-    try:
-        # This will retry until it gets a positive number
-        print(f"   Valid sample: {arg7.generate()}")
-    except ValueError as e:
-        print(f"   Error: {e}")

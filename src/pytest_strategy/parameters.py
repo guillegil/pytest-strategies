@@ -1,15 +1,16 @@
 # parameter.py
 
-from typing import Callable, Any
 import itertools
-from .test_args import TestArg
+from typing import Any, Callable
+
 from .rng import RNGSequence
+from .test_args import TestArg
 
 
 class Parameter:
     """
     Manages a collection of TestArg instances and generates parameter vectors.
-    
+
     Supports:
     - Multiple test arguments
     - Directed test vectors (named edge cases)
@@ -35,6 +36,7 @@ class Parameter:
             test_vectors: Dictionary mapping test vector names to value tuples (for test mode)
             always_include_directed: If True, directed vectors are included in "mixed" mode
             vector_constraints: List of functions that validate entire parameter vectors
+            max_retries: Maximum attempts to satisfy vector_constraints before raising
 
         Raises:
             ValueError: If directed vectors don't match the number of test args
@@ -61,6 +63,7 @@ class Parameter:
         self.test_vectors = test_vectors or {}
         self.always_include_directed = always_include_directed
         self.vector_constraints = vector_constraints or []
+        self.max_retries = max_retries
 
         # Validate directed vectors on initialization
         self._validate_directed_vectors()
@@ -92,8 +95,7 @@ class Parameter:
         for name, vector in self.test_vectors.items():
             if len(vector) != expected_len:
                 raise ValueError(
-                    f"Test vector '{name}' has {len(vector)} values, "
-                    f"expected {expected_len}"
+                    f"Test vector '{name}' has {len(vector)} values, " f"expected {expected_len}"
                 )
 
     def _validate_vector(self, vector: tuple) -> bool:
@@ -106,10 +108,7 @@ class Parameter:
         Returns:
             True if all constraints pass, False otherwise
         """
-        for constraint in self.vector_constraints:
-            if not constraint(vector):
-                return False
-        return True
+        return all(constraint(vector) for constraint in self.vector_constraints)
 
     # ====
     # Vector Management
@@ -130,9 +129,7 @@ class Parameter:
             param.add_directed_vector("edge_case", (0, 100, "fast"))
         """
         if len(values) != len(self.test_args):
-            raise ValueError(
-                f"Vector must have {len(self.test_args)} values, got {len(values)}"
-            )
+            raise ValueError(f"Vector must have {len(self.test_args)} values, got {len(values)}")
         self.directed_vectors[name] = values
 
     def remove_directed_vector(self, name: str):
@@ -164,9 +161,7 @@ class Parameter:
             param.add_test_vector("test_case_1", (0, 100, "fast"))
         """
         if len(values) != len(self.test_args):
-            raise ValueError(
-                f"Vector must have {len(self.test_args)} values, got {len(values)}"
-            )
+            raise ValueError(f"Vector must have {len(self.test_args)} values, got {len(values)}")
         self.test_vectors[name] = values
 
     def remove_test_vector(self, name: str):
@@ -234,9 +229,7 @@ class Parameter:
         Example:
             vector = param.generate_vector()  # e.g., (5, 3.14, "fast")
         """
-        max_retries = 100
-
-        for _ in range(max_retries):
+        for _ in range(self.max_retries):
             vector = tuple(arg.generate() for arg in self.test_args)
 
             # Check constraints
@@ -244,7 +237,7 @@ class Parameter:
                 return vector
 
         raise ValueError(
-            f"Could not generate valid vector after {max_retries} attempts. "
+            f"Could not generate valid vector after {self.max_retries} attempts. "
             "Check your constraints."
         )
 
@@ -255,19 +248,17 @@ class Parameter:
         return {
             "arguments": [arg.to_dict() for arg in self.test_args],
             "directed_vectors": {
-                name: [str(v) for v in vector] 
-                for name, vector in self.directed_vectors.items()
+                name: [str(v) for v in vector] for name, vector in self.directed_vectors.items()
             },
             "test_vectors": {
-                name: [str(v) for v in vector] 
-                for name, vector in self.test_vectors.items()
+                name: [str(v) for v in vector] for name, vector in self.test_vectors.items()
             },
             "always_include_directed": self.always_include_directed,
-            "has_constraints": bool(self.vector_constraints)
+            "has_constraints": bool(self.vector_constraints),
         }
 
     def generate_vectors(
-        self, 
+        self,
         n: int,
         mode: str = "all",
         filter_by_name: str | None = None,
@@ -292,21 +283,21 @@ class Parameter:
 
         Examples:
             # All directed + 10 random
-            samples = param.generate_samples(10, mode="all")
+            samples = param.generate_vectors(10, mode="all")
 
             # Only random
-            samples = param.generate_samples(10, mode="random_only")
+            samples = param.generate_vectors(10, mode="random_only")
 
             # Only directed
-            samples = param.generate_samples(0, mode="directed_only")
+            samples = param.generate_vectors(0, mode="directed_only")
 
             # Get specific vector by name
-            samples = param.generate_samples(0, filter_by_name="edge_case")
+            samples = param.generate_vectors(0, filter_by_name="edge_case")
 
             # Get specific vector by index
-            samples = param.generate_samples(0, filter_by_index=0)
+            samples = param.generate_vectors(0, filter_by_index=0)
         """
-        samples = []
+        samples: list[tuple] = []
 
         # Handle CLI filters first (override mode)
         if filter_by_name:
@@ -329,13 +320,8 @@ class Parameter:
             return list(self.directed_vectors.values())
 
         # Mode: all - always include all directed vectors
-        if mode == "all":
+        if mode == "all" or mode == "mixed" and self.always_include_directed:
             samples.extend(self.directed_vectors.values())
-
-        # Mode: mixed - respect always_include_directed flag
-        elif mode == "mixed":
-            if self.always_include_directed:
-                samples.extend(self.directed_vectors.values())
 
         # Mode: random_only - skip directed vectors entirely
         # (no action needed, samples stays empty)
@@ -351,24 +337,24 @@ class Parameter:
         """
         Generate all combinations of sequence arguments (Cartesian product).
         For non-sequence arguments, generate a random value for each combination.
-        
+
         Returns:
             List of parameter vectors
-            
+
         Raises:
             ValueError: If no sequence arguments are present
         """
         # Identify sequence args and their indices
         sequence_indices = []
         sequences = []
-        
+
         for i, arg in enumerate(self.test_args):
             if arg.rng_type and isinstance(arg.rng_type, RNGSequence):
                 sequence_indices.append(i)
                 sequences.append(arg.rng_type.sequence)
-                
+
         if not sequences:
-            # If no sequences, fallback to a single random sample? 
+            # If no sequences, fallback to a single random sample?
             # Or raise error? The plan implies this is for "auto" mode with sequences.
             # If "auto" is used without sequences, maybe default to 10 random samples?
             # For now, let's raise error or return empty, but strategy should handle fallback.
@@ -376,27 +362,27 @@ class Parameter:
             # but Strategy should probably check this.
             # Actually, let's raise ValueError as per docstring.
             raise ValueError("No sequence arguments found for exhaustive generation")
-            
+
         # Generate Cartesian product
         samples = []
         for combination in itertools.product(*sequences):
             # Create a mutable vector (list) to fill in
             vector = [None] * len(self.test_args)
-            
+
             # Fill in sequence values
             for idx, value in zip(sequence_indices, combination):
                 vector[idx] = value
-                
+
             # Fill in non-sequence values with random generation
             for i, arg in enumerate(self.test_args):
                 if i not in sequence_indices:
                     vector[i] = arg.generate()
-            
+
             # Convert to tuple and validate
             vector_tuple = tuple(vector)
             if self._validate_vector(vector_tuple):
                 samples.append(vector_tuple)
-                
+
         return samples
 
     # ====
@@ -417,11 +403,8 @@ class Parameter:
             KeyError: If vector name doesn't exist
         """
         if name not in self.directed_vectors:
-            available = ', '.join(self.directed_vectors.keys())
-            raise KeyError(
-                f"No directed vector named '{name}'. "
-                f"Available: {available}"
-            )
+            available = ", ".join(self.directed_vectors.keys())
+            raise KeyError(f"No directed vector named '{name}'. " f"Available: {available}")
         return self.directed_vectors[name]
 
     def get_vector_by_index(self, index: int) -> tuple:
@@ -440,8 +423,7 @@ class Parameter:
         names = list(self.directed_vectors.keys())
         if index < 0 or index >= len(names):
             raise IndexError(
-                f"Vector index {index} out of range. "
-                f"Valid range: 0-{len(names)-1}"
+                f"Vector index {index} out of range. " f"Valid range: 0-{len(names)-1}"
             )
         return self.directed_vectors[names[index]]
 
@@ -528,131 +510,10 @@ class Parameter:
 
     def __repr__(self):
         """String representation for debugging."""
-        return (
-            f"Parameter(args={self.num_args}, "
-            f"directed_vectors={self.num_directed_vectors})"
-        )
+        return f"Parameter(args={self.num_args}, " f"directed_vectors={self.num_directed_vectors})"
 
     def __str__(self):
         """Human-readable string representation."""
         args_str = ", ".join(self.arg_names)
         vectors_str = ", ".join(self.vector_names) if self.vector_names else "none"
-        return (
-            f"Parameter({args_str})\n"
-            f"  Directed vectors: {vectors_str}"
-        )
-
-
-# ====
-# Example Usage
-# ====
-
-if __name__ == "__main__":
-    from rng import RNGInteger, RNGFloat, RNGChoice
-
-    print("=== Parameter Class Examples ===\n")
-
-    # Example 1: Basic parameter with directed vectors
-    print("1. Basic Parameter with Directed Vectors:")
-    param1 = Parameter(
-        TestArg("count", rng_type=RNGInteger(0, 100)),
-        TestArg("timeout", rng_type=RNGFloat(0.1, 10.0)),
-        TestArg("mode", rng_type=RNGChoice(["fast", "slow"])),
-        directed_vectors={
-            "edge_zero": (0, 0.1, "fast"),
-            "edge_max": (100, 10.0, "slow"),
-            "typical": (50, 5.0, "fast"),
-        }
-    )
-    print(f"   {param1}")
-    print(f"   Arg names: {param1.arg_names}")
-    print(f"   Arg types: {param1.arg_types}\n")
-
-    # Example 2: Generate samples - all mode
-    print("2. Generate Samples - 'all' mode (3 directed + 5 random):")
-    samples = param1.generate_samples(5, mode="all")
-    print(f"   Total samples: {len(samples)}")
-    for i, sample in enumerate(samples[:3]):
-        print(f"   Sample {i}: {sample}")
-    print(f"   ... and {len(samples) - 3} more random samples\n")
-
-    # Example 3: Generate samples - random_only mode
-    print("3. Generate Samples - 'random_only' mode:")
-    samples = param1.generate_samples(5, mode="random_only")
-    print(f"   Total samples: {len(samples)}")
-    for i, sample in enumerate(samples):
-        print(f"   Sample {i}: {sample}")
-    print()
-
-    # Example 4: Generate samples - directed_only mode
-    print("4. Generate Samples - 'directed_only' mode:")
-    samples = param1.generate_samples(0, mode="directed_only")
-    print(f"   Total samples: {len(samples)}")
-    for i, sample in enumerate(samples):
-        print(f"   Sample {i}: {sample}")
-    print()
-
-    # Example 5: CLI filter by name
-    print("5. CLI Filter - Get vector by name:")
-    sample = param1.generate_samples(0, filter_by_name="edge_zero")
-    print(f"   Vector 'edge_zero': {sample[0]}\n")
-
-    # Example 6: CLI filter by index
-    print("6. CLI Filter - Get vector by index:")
-    sample = param1.generate_samples(0, filter_by_index=1)
-    print(f"   Vector at index 1: {sample[0]}\n")
-
-    # Example 7: Add directed vector dynamically
-    print("7. Add Directed Vector Dynamically:")
-    param1.add_directed_vector("custom", (25, 2.5, "slow"))
-    print(f"   Vector names: {param1.vector_names}")
-    print(f"   New vector: {param1.get_directed_vector('custom')}\n")
-
-    # Example 8: Parameter with constraints
-    print("8. Parameter with Vector Constraints:")
-    param2 = Parameter(
-        TestArg("min_val", rng_type=RNGInteger(0, 100)),
-        TestArg("max_val", rng_type=RNGInteger(0, 100)),
-        vector_constraints=[
-            lambda v: v[0] < v[1],  # min < max
-        ]
-    )
-    samples = param2.generate_samples(5, mode="random_only")
-    print(f"   Samples (min < max constraint):")
-    for i, sample in enumerate(samples):
-        print(f"   Sample {i}: min={sample[0]}, max={sample[1]}")
-    print()
-
-    # Example 9: Add constraint dynamically
-    print("9. Add Constraint Dynamically:")
-    param3 = Parameter(
-        TestArg("x", rng_type=RNGInteger(0, 10)),
-        TestArg("y", rng_type=RNGInteger(0, 10)),
-    )
-    param3.add_constraint(lambda v: v[0] + v[1] <= 10)  # x + y <= 10
-    samples = param3.generate_samples(5, mode="random_only")
-    print(f"   Samples (x + y <= 10 constraint):")
-    for i, sample in enumerate(samples):
-        print(f"   Sample {i}: x={sample[0]}, y={sample[1]}, sum={sample[0]+sample[1]}")
-    print()
-
-    # Example 10: Mixed mode with always_include_directed
-    print("10. Mixed Mode - always_include_directed=True:")
-    param4 = Parameter(
-        TestArg("value", rng_type=RNGInteger(0, 100)),
-        directed_vectors={"zero": (0,), "max": (100,)},
-        always_include_directed=True
-    )
-    samples = param4.generate_samples(3, mode="mixed")
-    print(f"   Total samples: {len(samples)} (2 directed + 3 random)")
-    print(f"   Samples: {samples}\n")
-
-    print("11. Mixed Mode - always_include_directed=False:")
-    param5 = Parameter(
-        TestArg("value", rng_type=RNGInteger(0, 100)),
-        directed_vectors={"zero": (0,), "max": (100,)},
-        always_include_directed=False
-    )
-    samples = param5.generate_samples(3, mode="mixed")
-    print(f"   Total samples: {len(samples)} (only 3 random)")
-    print(f"   Samples: {samples}")
+        return f"Parameter({args_str})\n" f"  Directed vectors: {vectors_str}"
