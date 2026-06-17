@@ -118,14 +118,15 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"__init__.py" = ["F401"]  # Allow unused imports in __init__.py
-"tests/**/*.py" = ["ARG"] # Allow unused arguments in tests
+"__init__.py" = ["F401"]            # Allow unused imports in __init__.py
+"tests/**/*.py" = ["ARG"]           # Allow unused arguments in tests
+"src/pytest_strategy/plugin.py" = ["ARG002"] # pytest hooks declare contract args even when unused
 
 # ============================================================================
 # MYPY - Type Checking
 # ============================================================================
 [tool.mypy]
-python_version = "3.9"
+python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false    # Set to true for stricter typing
@@ -157,7 +158,7 @@ addopts = [
     # "--strict-config",        # Raise error on unknown config options
     # "--showlocals",           # Show local variables in tracebacks
     # "--tb=short",             # Shorter traceback format
-    # "--cov=pytest_strategies", # Coverage for our package
+    # "--cov=pytest_strategy", # Coverage for our package
     # "--cov-report=term-missing", # Show missing lines in coverage
     # "--cov-report=html",      # Generate HTML coverage report
     # "--cov-report=xml",       # Generate XML coverage report (for CI)
@@ -173,7 +174,7 @@ markers = [
 # COVERAGE - Code Coverage
 # ============================================================================
 [tool.coverage.run]
-source = ["pytest_strategies"]
+source = ["pytest_strategy"]
 branch = true
 omit = ["*/tests/*", "*/test_*.py", "*/__pycache__/*", "*/site-packages/*"]
 

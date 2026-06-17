@@ -4,3 +4,13 @@
 __pycache__
 
 *.pytest_cache
+
+# Coverage artifacts
+.coverage
+coverage.xml
+htmlcov/
+
+# Tooling caches / lockfiles
+.mypy_cache/
+.ruff_cache/
+uv.lock

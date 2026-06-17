@@ -1,11 +1,12 @@
 import inspect
-import pytest
-from dataclasses import is_dataclass, fields
-from typing import Callable, Sequence, Any, Tuple
+from collections.abc import Sequence
+from dataclasses import fields, is_dataclass
+from typing import Any, Callable, cast
 
-from .rng import RNG
+import pytest
+
 from .parameters import Parameter
-from .test_args import TestArg
+from .rng import RNG
 
 
 class Strategy:
@@ -14,70 +15,78 @@ class Strategy:
     Supports both Parameter-based and legacy tuple-based strategies.
     """
 
-    _registry: dict[str, Callable[[int | str], Tuple[Sequence[str], Sequence[Any]]]] = {}
+    # Factories are user functions called as factory(nsamples=...) and may return
+    # a Parameter or a legacy (argnames, samples) tuple — kept as Any by design.
+    _registry: dict[str, Callable[..., Any]] = {}
 
     # Global placeholder for the pytest Config object
     # This will be set during pytest_configure hook to access CLI options
-    _pytest_config = None
+    _pytest_config: "pytest.Config | None" = None
 
     # Common pytest fixtures to exclude from signature validation
     PYTEST_FIXTURES = {
-        'request', 'tmp_path', 'tmp_path_factory', 'tmpdir', 'tmpdir_factory',
-        'capsys', 'capfd', 'caplog', 'monkeypatch', 'pytestconfig',
-        'cache', 'doctest_namespace', 'recwarn', 'record_property',
-        'record_testsuite_property', 'record_xml_attribute'
+        "request",
+        "tmp_path",
+        "tmp_path_factory",
+        "tmpdir",
+        "tmpdir_factory",
+        "capsys",
+        "capfd",
+        "caplog",
+        "monkeypatch",
+        "pytestconfig",
+        "cache",
+        "doctest_namespace",
+        "recwarn",
+        "record_property",
+        "record_testsuite_property",
+        "record_xml_attribute",
     }
 
     @staticmethod
     def export_strategies(format: str = "json") -> str:
         """
         Export all registered strategies metadata.
-        
+
         Args:
             format: Export format (currently only "json" is supported)
-            
+
         Returns:
             Serialized string representation of all strategies
         """
         import json
-        
+
         strategies_data = {}
-        
+
         for name, factory in Strategy._registry.items():
             try:
                 # Instantiate parameter with dummy count to get metadata
                 # We handle both tuple-returning and Parameter-returning factories
                 result = factory(1)
-                
+
                 if isinstance(result, Parameter):
                     strategies_data[name] = result.to_dict()
                 else:
                     # Legacy tuple support (argnames, values)
                     argnames, _ = result
-                    strategies_data[name] = {
-                        "type": "legacy_tuple",
-                        "argnames": argnames
-                    }
+                    strategies_data[name] = {"type": "legacy_tuple", "argnames": argnames}
             except Exception as e:
-                strategies_data[name] = {
-                    "error": f"Failed to inspect strategy: {str(e)}"
-                }
-                
+                strategies_data[name] = {"error": f"Failed to inspect strategy: {str(e)}"}
+
         if format == "json":
             return json.dumps(strategies_data, indent=2)
         else:
             raise ValueError(f"Unsupported format: {format}")
 
-
     @staticmethod
-    def set_config(config: dict):
+    def set_config(config: "pytest.Config") -> None:
         Strategy._pytest_config = config
 
     @staticmethod
     def _validate_signature(test_fn, argnames: Sequence[str], strategy_name: str) -> None:
         """
         Validate that test function signature matches strategy argnames.
-        
+
         Automatically excludes pytest fixtures from validation by checking if
         parameters have fixture markers or are in the known fixtures list.
 
@@ -104,7 +113,7 @@ class Strategy:
             if p not in argnames:
                 continue  # Skip custom fixtures
             actual_params.append(p)
-        
+
         expected_params = list(argnames)
 
         # Check for mismatch
@@ -124,7 +133,7 @@ class Strategy:
             raise ValueError(error_msg)
 
     @staticmethod
-    def _is_dataclass_mode(test_fn, argnames: Sequence[str]) -> Tuple[bool, type | None]:
+    def _is_dataclass_mode(test_fn, argnames: Sequence[str]) -> tuple[bool, type | None]:
         """
         Detect if test function expects a single dataclass parameter.
 
@@ -141,14 +150,15 @@ class Strategy:
         if len(actual_params) == 1 and len(argnames) > 1:
             # Check if parameter has dataclass type hint
             param = sig.parameters[actual_params[0]]
-            if param.annotation != inspect.Parameter.empty:
-                if is_dataclass(param.annotation):
-                    return True, param.annotation
+            if param.annotation != inspect.Parameter.empty and is_dataclass(param.annotation):
+                return True, cast(type, param.annotation)
 
         return False, None
 
     @staticmethod
-    def _convert_to_dataclass(samples: Sequence[tuple], argnames: Sequence[str], dataclass_type: type) -> list:
+    def _convert_to_dataclass(
+        samples: Sequence[tuple], argnames: Sequence[str], dataclass_type: type
+    ) -> list:
         """
         Convert tuple samples to dataclass instances.
 
@@ -172,7 +182,7 @@ class Strategy:
             missing = strategy_fields - dc_fields
             extra = dc_fields - strategy_fields
 
-            error_msg = f"Dataclass fields don't match strategy parameters!\n"
+            error_msg = "Dataclass fields don't match strategy parameters!\n"
             error_msg += f"  Strategy provides: {list(argnames)}\n"
             error_msg += f"  Dataclass expects: {list(dc_fields)}\n"
 
@@ -185,7 +195,7 @@ class Strategy:
 
         # Get field order from dataclass
         dc_field_names = [f.name for f in fields(dataclass_type)]
-        
+
         # Convert samples to dataclass instances
         dataclass_samples = []
         for sample in samples:
@@ -214,10 +224,12 @@ class Strategy:
             def create_samples(nsamples):
                 return ("param_name",), [sample1, sample2, ...]
         """
-        def decorate(fn: Callable[[int | str], Tuple[Sequence[str], Sequence[Any]]]):
+
+        def decorate(fn: Callable[[int | str], tuple[Sequence[str], Sequence[Any]]]):
             # Store the factory function in the global registry
             Strategy._registry[name] = fn
             return fn
+
         return decorate
 
     @staticmethod
@@ -264,6 +276,7 @@ class Strategy:
             def test_function(x, y):
                 # Test implementation
         """
+
         def decorate(test_fn):
             # Validate that the strategy exists in the registry
             if name not in Strategy._registry:
@@ -313,7 +326,7 @@ class Strategy:
                             n=int(nsamples),
                             mode=vector_mode,
                             filter_by_name=vector_name,
-                            filter_by_index=vector_index
+                            filter_by_index=vector_index,
                         )
                 except KeyError as e:
                     # If filtering by name/index and vector doesn't exist, return empty samples
@@ -326,9 +339,7 @@ class Strategy:
                             f"Error generating samples for strategy '{name}': {e}"
                         ) from e
                 except Exception as e:
-                    raise ValueError(
-                        f"Error generating samples for strategy '{name}': {e}"
-                    ) from e
+                    raise ValueError(f"Error generating samples for strategy '{name}': {e}") from e
 
                 # Get argument names from Parameter
                 argnames = param.arg_names
@@ -354,6 +365,7 @@ class Strategy:
 
             if is_dc_mode:
                 # DATACLASS MODE: Convert samples to dataclass instances
+                assert dc_type is not None  # guaranteed when is_dc_mode is True
                 try:
                     dataclass_samples = Strategy._convert_to_dataclass(samples, argnames, dc_type)
                 except Exception as e:
@@ -363,7 +375,7 @@ class Strategy:
 
                 # Get the single parameter name
                 sig = inspect.signature(test_fn)
-                test_params = [p for p in sig.parameters.keys() if p not in Strategy.PYTEST_FIXTURES]
+                test_params = [p for p in sig.parameters if p not in Strategy.PYTEST_FIXTURES]
                 param_name = test_params[0]
 
                 # Generate test IDs for dataclass mode
@@ -401,7 +413,9 @@ class Strategy:
         return decorate
 
     @staticmethod
-    def _generate_test_ids(argnames: Sequence[str], samples: Sequence[Any], max_length: int = 80) -> list[str]:
+    def _generate_test_ids(
+        argnames: Sequence[str], samples: Sequence[Any], max_length: int = 80
+    ) -> list[str]:
         """
         Generate concise test IDs from argument names and sample values.
 
@@ -421,7 +435,7 @@ class Strategy:
                 value = sample if not isinstance(sample, tuple) else sample[0]
                 val_str = repr(value)
                 if len(val_str) > max_length - len(argnames[0]) - 1:
-                    val_str = val_str[:max_length - len(argnames[0]) - 4] + "..."
+                    val_str = val_str[: max_length - len(argnames[0]) - 4] + "..."
                 ids.append(f"{argnames[0]}={val_str}")
             else:
                 # Multiple parameters: format as "param1=value1,param2=value2"
@@ -436,13 +450,15 @@ class Strategy:
                 full_id = ",".join(parts)
                 # Truncate if too long
                 if len(full_id) > max_length:
-                    full_id = full_id[:max_length - 3] + "..."
+                    full_id = full_id[: max_length - 3] + "..."
                 ids.append(full_id)
 
         return ids
 
     @staticmethod
-    def _generate_dataclass_ids(dataclass_samples: list, dc_type: type, max_length: int = 80) -> list[str]:
+    def _generate_dataclass_ids(
+        dataclass_samples: list, dc_type: type, max_length: int = 80
+    ) -> list[str]:
         """
         Generate test IDs for dataclass mode.
 
@@ -467,7 +483,7 @@ class Strategy:
 
             full_id = ",".join(field_strs)
             if len(full_id) > max_length:
-                full_id = full_id[:max_length - 3] + "..."
+                full_id = full_id[: max_length - 3] + "..."
             ids.append(full_id)
 
         return ids
