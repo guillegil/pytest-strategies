@@ -53,7 +53,7 @@ CLI Options:
     pytest --vector-name "zeros"      # Run specific directed vector
 """
 
-__version__ = "1.1.0a1"
+__version__ = "1.1.0a2"
 __author__ = "Guillermo Gil"
 __email__ = "guillegil@proton.me"
 
@@ -68,11 +68,14 @@ from .rng import (
     RNGEnum,
     RNGFloat,
     RNGInteger,
+    RNGSequence,
     RNGString,
     RNGType,
     RNGValueError,
     RNGWeightedFloat,
     RNGWeightedInteger,
+    SequenceLike,
+    Series,
 )
 from .strategy import Strategy
 from .test_args import TestArg
@@ -100,6 +103,9 @@ __all__ = [
     "RNGString",
     "RNGWeightedInteger",
     "RNGWeightedFloat",
+    "RNGSequence",
+    "SequenceLike",
+    "Series",
 ]
 
 

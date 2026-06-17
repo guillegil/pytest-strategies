@@ -447,12 +447,13 @@ class RNGEnum(RNGType):
         return self.enum_class
 
 
-class RNGSequence(RNGType):
+class SequenceLike(RNGType):
     """
-    RNG type for sequences of values.
+    Abstract base class for sequence-based RNG types.
 
-    In normal mode, acts like RNGChoice (picks random values).
-    In exhaustive mode (nsamples="auto"), allows iterating through the sequence.
+    Subclasses differ in how they produce an ordered sequence for exhaustive
+    (auto) mode via ``_get_auto_sequence()``.  In finite / normal mode both
+    subclasses fall back to a random element draw via ``generate()``.
     """
 
     def __init__(self, sequence: Sequence, predicate: Callable | None = None):
@@ -467,13 +468,49 @@ class RNGSequence(RNGType):
                 "Sequence cannot be empty (or all items were filtered by predicate)"
             )
 
+    def _get_auto_sequence(self) -> list:
+        """Return the ordered list to use for exhaustive (auto) mode.
+
+        Subclasses MUST override this method.
+        """
+        raise NotImplementedError
+
     def generate(self):
-        """Generate a random value from the sequence (normal mode)"""
+        """Generate a random value from the sequence (normal / finite mode)."""
         return RNG.choice(self.sequence)
 
     @property
     def python_type(self):
         return type(self.sequence[0]) if self.sequence else object
+
+
+class RNGSequence(SequenceLike):
+    """
+    RNG type for sequences of values.
+
+    In normal mode, acts like RNGChoice (picks random values).
+    In exhaustive mode (nsamples="auto"), produces a permutation of the
+    sequence (each value exactly once, random order).
+    """
+
+    def _get_auto_sequence(self) -> list:
+        """Return a random permutation of the sequence for exhaustive mode."""
+        return random.sample(self.sequence, len(self.sequence))
+
+
+class Series(SequenceLike):
+    """
+    Deterministic ordered sequence type.
+
+    In auto mode, produces values in their original declaration order.
+    In finite mode, cycles (K >= len) or truncates to the first K (K < len).
+    Multiple Series args produce the full Cartesian product in
+    itertools.product order (leftmost arg is the slowest counter).
+    """
+
+    def _get_auto_sequence(self) -> list:
+        """Return sequence in original order for exhaustive mode."""
+        return list(self.sequence)
 
 
 class RNGString(RNGType):

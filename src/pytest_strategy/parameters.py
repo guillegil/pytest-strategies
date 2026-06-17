@@ -3,7 +3,7 @@
 import itertools
 from typing import Any, Callable
 
-from .rng import RNGSequence
+from .rng import SequenceLike, Series
 from .test_args import TestArg
 
 
@@ -329,10 +329,46 @@ class Parameter:
         # Mode: random_only - skip directed vectors entirely
         # (no action needed, samples stays empty)
 
-        # Generate random samples (for all modes except directed_only)
+        # Generate samples (for all modes except directed_only)
         if mode != "directed_only":
-            for _ in range(n):
-                samples.append(self.generate_vector())
+            # Series-aware branch: if any arg uses Series, produce ordered/cycling rows
+            series_indices = [
+                i
+                for i, a in enumerate(self.test_args)
+                if a.rng_type and isinstance(a.rng_type, Series)
+            ]
+            if series_indices:
+                series_seqs = [self.test_args[i].rng_type.sequence for i in series_indices]
+                for combo in itertools.islice(itertools.cycle(itertools.product(*series_seqs)), n):
+                    vec: list = [None] * len(self.test_args)
+                    for pos, idx in enumerate(series_indices):
+                        vec[idx] = combo[pos]
+                    for i, arg in enumerate(self.test_args):
+                        if i not in series_indices:
+                            vec[i] = arg.generate()
+                    candidate = tuple(vec)
+                    if self._validate_vector(candidate):
+                        samples.append(candidate)
+                    else:
+                        # Retry with fresh random values for non-Series positions
+                        valid = False
+                        for _ in range(self.max_retries):
+                            for i, arg in enumerate(self.test_args):
+                                if i not in series_indices:
+                                    vec[i] = arg.generate()
+                            candidate = tuple(vec)
+                            if self._validate_vector(candidate):
+                                samples.append(candidate)
+                                valid = True
+                                break
+                        if not valid:
+                            raise ValueError(
+                                f"Could not generate valid vector after {self.max_retries} attempts. "
+                                "Check your constraints."
+                            )
+            else:
+                for _ in range(n):
+                    samples.append(self.generate_vector())
 
         return samples
 
@@ -352,9 +388,9 @@ class Parameter:
         sequences = []
 
         for i, arg in enumerate(self.test_args):
-            if arg.rng_type and isinstance(arg.rng_type, RNGSequence):
+            if arg.rng_type and isinstance(arg.rng_type, SequenceLike):
                 sequence_indices.append(i)
-                sequences.append(arg.rng_type.sequence)
+                sequences.append(arg.rng_type._get_auto_sequence())
 
         if not sequences:
             # If no sequences, fallback to a single random sample?

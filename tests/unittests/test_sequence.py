@@ -44,8 +44,17 @@ class TestParameterExhaustive:
     """Test Parameter.generate_exhaustive method."""
 
     def test_single_sequence(self):
-        """Test exhaustive generation with single sequence."""
+        """Test exhaustive generation with single RNGSequence (order-insensitive, S14b)."""
         param = Parameter(TestArg("item", rng_type=RNGSequence([1, 2, 3])))
+        samples = param.generate_exhaustive()
+        assert len(samples) == 3
+        assert {s[0] for s in samples} == {1, 2, 3}
+
+    def test_single_series_auto_ordered(self):
+        """S14a: single Series auto -> ordered rows."""
+        from pytest_strategy import Series
+
+        param = Parameter(TestArg("item", rng_type=Series([1, 2, 3])))
         samples = param.generate_exhaustive()
         assert len(samples) == 3
         assert samples == [(1,), (2,), (3,)]
@@ -62,7 +71,7 @@ class TestParameterExhaustive:
         assert set(samples) == set(expected)
 
     def test_mixed_sequence_and_random(self):
-        """Test mixed sequence and random arguments."""
+        """Test mixed RNGSequence and random arguments (order-insensitive, S14b)."""
         RNG.seed(42)
         param = Parameter(
             TestArg("seq", rng_type=RNGSequence([1, 2])),
@@ -71,13 +80,11 @@ class TestParameterExhaustive:
         samples = param.generate_exhaustive()
         assert len(samples) == 2
 
-        # Check sequence values
-        assert samples[0][0] == 1
-        assert samples[1][0] == 2
+        # Check sequence values (order-insensitive — RNGSequence gives permutation)
+        assert {s[0] for s in samples} == {1, 2}
 
         # Check random values
-        assert 10 <= samples[0][1] <= 20
-        assert 10 <= samples[1][1] <= 20
+        assert all(10 <= s[1] <= 20 for s in samples)
 
     def test_no_sequence_raises_error(self):
         """Test that exhaustive generation raises error if no sequence args."""
