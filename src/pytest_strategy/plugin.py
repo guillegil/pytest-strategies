@@ -3,11 +3,20 @@ Pytest plugin for pytest-strategies with auto-discovery of strategy definitions.
 """
 
 import importlib.util
+import itertools
 import sys
 from pathlib import Path
 
 import pytest
 from pytest import Config, Session
+
+from ._runtime import runtime
+
+# Monotonic counter so every load gets a unique module name. Without this, two
+# strategy files sharing a relative path (e.g. re-running pytest in-process with
+# a rewritten strategies.py) would collide in sys.modules and the second file's
+# registrations would be silently dropped by the import cache.
+_load_counter = itertools.count()
 
 
 class PytestStrategyPlugin:
@@ -16,11 +25,10 @@ class PytestStrategyPlugin:
 
     This plugin automatically discovers and loads strategy definition files
     from the test directory before tests run.
-    """
 
-    def __init__(self):
-        self.strategies_loaded = False
-        self.discovered_files = []
+    Per-session state (discovery flag, discovered files, active config) lives in
+    the shared ``runtime`` object so it can be reset on ``pytest_unconfigure``.
+    """
 
     # ==== CONFIGURATION HOOKS ====
 
@@ -57,7 +65,7 @@ class PytestStrategyPlugin:
         This hook runs once at the start of the test session and discovers
         all strategy definition files in the test directory.
         """
-        if self.strategies_loaded:
+        if runtime.strategies_loaded:
             return
 
         config = session.config
@@ -74,7 +82,7 @@ class PytestStrategyPlugin:
 
         if strategy_files:
             self._load_strategy_files(strategy_files, config)
-            self.strategies_loaded = True
+            runtime.strategies_loaded = True
 
     @pytest.hookimpl
     def pytest_sessionfinish(self, session: Session, exitstatus: int) -> None:
@@ -109,9 +117,9 @@ class PytestStrategyPlugin:
             lines.append(f"pytest-strategies: {num_strategies} strategies registered")
 
             # Show discovered strategy files
-            if self.discovered_files:
+            if runtime.discovered_files:
                 lines.append(
-                    f"pytest-strategies: Loaded {len(self.discovered_files)} strategy file(s)"
+                    f"pytest-strategies: Loaded {len(runtime.discovered_files)} strategy file(s)"
                 )
 
         return lines
@@ -223,7 +231,7 @@ class PytestStrategyPlugin:
                     sys.modules[module_name] = module
                     spec.loader.exec_module(module)
 
-                    self.discovered_files.append(file_path)
+                    runtime.record_discovered_file(file_path)
 
                     # Optionally log in verbose mode
                     if config.option.verbose >= 2:
@@ -245,15 +253,18 @@ class PytestStrategyPlugin:
         Returns:
             Module name string
         """
+        # Unique per load so re-loading the same relative path never collides
+        # in sys.modules (which would skip the new file's registrations).
+        unique = next(_load_counter)
         try:
             # Try to create relative path from rootpath
             rel_path = file_path.relative_to(config.rootpath)
             # Convert path to module name
             module_name = str(rel_path.with_suffix("")).replace("/", ".").replace("\\", ".")
-            return f"pytest_strategies_discovered.{module_name}"
+            return f"pytest_strategies_discovered.{module_name}_{unique}"
         except ValueError:
-            # If relative path fails, use absolute path hash
-            return f"pytest_strategies_discovered.{file_path.stem}_{hash(str(file_path))}"
+            # If relative path fails, use absolute path stem
+            return f"pytest_strategies_discovered.{file_path.stem}_{unique}"
 
 
 # Plugin instance
@@ -313,17 +324,21 @@ def pytest_addoption(parser) -> None:
 
 
 def pytest_configure(config):
-    """Register the plugin instance."""
+    """Register the plugin instance and open a runtime session for this config."""
     if not hasattr(config, "_strategy_plugin_instance"):
+        # Push the session state BEFORE registering, so the instance's
+        # pytest_configure (which calls Strategy.set_config) has a current state.
+        runtime.push(config)
         config._strategy_plugin_instance = _plugin_instance
         config.pluginmanager.register(_plugin_instance, "pytest-strategies")
 
 
 def pytest_unconfigure(config):
-    """Unregister the plugin instance."""
+    """Unregister the plugin instance and close this config's runtime session."""
     if hasattr(config, "_strategy_plugin_instance"):
         config.pluginmanager.unregister(_plugin_instance, "pytest-strategies")
         delattr(config, "_strategy_plugin_instance")
+        runtime.pop()
 
 
 @pytest.hookimpl(trylast=True)
