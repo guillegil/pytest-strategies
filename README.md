@@ -13,7 +13,7 @@
 ## 🚀 Key Features
 
 - **Hybrid Generation**: seamlessly mix **randomly generated** data with **directed** (hardcoded) edge cases.
-- **Sequence Testing**: Define deterministic sequences of values and generate their **Cartesian product** exhaustively.
+- **Sequence Testing**: Use `Series` for **deterministic, ordered** value sequences (Cartesian product) or `RNGSequence` for a **randomized permutation** of the same values.
 - **Type-Safe RNG**: Built-in generators for Integers, Floats, Booleans, Strings, Choices, Sequences, and **Enums**.
 - **Weighted Probabilities**: Define custom distributions for Enums, Integers, and Floats.
 - **Constraints & Predicates**: Filter generated values using simple lambda predicates or complex vector constraints.
@@ -92,7 +92,8 @@ def math_strategy(nsamples: int):
 | `RNGFloat`     | Floats in range           | `RNGFloat(0.0, 1.0)`                               |
 | `RNGBoolean`   | Booleans with probability | `RNGBoolean(true_probability=0.8)`                 |
 | `RNGString`    | Random strings            | `RNGString(min_length=5, max_length=10)`           |
-| `RNGSequence`  | Deterministic sequence    | `RNGSequence([1, 2, 3])`                           |
+| `Series`       | Ordered, deterministic sequence | `Series([1, 2, 3])`                          |
+| `RNGSequence`  | Randomized sequence (permutation) | `RNGSequence([1, 2, 3])`                   |
 | `RNGChoice`    | Choice from list          | `RNGChoice(["a", "b", "c"])`                       |
 | `RNGEnum`      | Python Enum members       | `RNGEnum(MyEnum)`                                  |
 | `RNGWeighted*` | Weighted ranges           | `RNGWeightedInteger({(0,10): 0.9, (11,100): 0.1})` |
@@ -140,45 +141,58 @@ Parameter(
 
 ### 5. Sequence Testing & Exhaustive Generation (New in v1.1.0)
 
-You can define deterministic sequences using `RNGSequence` and trigger **exhaustive generation** (Cartesian product) by setting `nsamples="auto"`.
+There are two sequence types. Both walk a fixed set of values, but they differ in **ordering**:
 
-**Pure Sequence Strategy:**
+| Type          | `--nsamples=auto`                                   | `--nsamples=K` (finite)                                              |
+| ------------- | --------------------------------------------------- | ------------------------------------------------------------------- |
+| `Series`      | Values in **declaration order** (Cartesian product) | Cycles through the product in order (`K >= len`) or takes the first `K` (`K < len`) |
+| `RNGSequence` | A **random permutation** (each value once)          | Random picks, like `RNGChoice`                                      |
+
+> **Rule of thumb:** the `RNG` prefix means random. `Series` is deterministic and ordered; `RNGSequence` is randomized.
+
+**Deterministic Strategy (`Series`):**
 ```python
-from pytest_strategy.rng import RNGSequence
+from pytest_strategy import Series
 
 @Strategy.register("matrix_test")
 def matrix_strategy(nsamples):
     return Parameter(
-        TestArg("x", rng_type=RNGSequence([1, 2, 3])),
-        TestArg("y", rng_type=RNGSequence(["a", "b"]))
+        TestArg("x", rng_type=Series([1, 2, 3])),
+        TestArg("y", rng_type=Series(["a", "b"]))
     )
 ```
-Running with `pytest --nsamples=auto` generates 6 tests: `(1, 'a'), (1, 'b'), (2, 'a')...`
+Running with `pytest --nsamples=auto` generates 6 tests in order: `(1, 'a'), (1, 'b'), (2, 'a'), (2, 'b'), (3, 'a'), (3, 'b')`. The leftmost arg is the slowest counter.
+
+**Randomized Strategy (`RNGSequence`):**
+```python
+from pytest_strategy import RNGSequence
+
+TestArg("x", rng_type=RNGSequence([1, 2, 3]))
+```
+Under `--nsamples=auto`, this yields a permutation of `[1, 2, 3]` (each value exactly once, random order). Under a finite `--nsamples=K`, it picks `K` random values.
 
 **Mixed Mode (Sequence + Random):**
-If you mix `RNGSequence` with random types (e.g., `RNGInteger`), the random values are regenerated for *each* sequence combination.
+If you mix a sequence type with random types (e.g., `RNGInteger`), the random values are regenerated for *each* sequence combination.
 
 ```python
 @Strategy.register("mixed_test")
 def mixed_strategy(nsamples):
     return Parameter(
-        # Deterministic: Iterate through all user roles
-        TestArg("role", rng_type=RNGSequence(["admin", "user", "guest"])),
-        # Random: Generate a fresh random ID for each role
+        # Deterministic: iterate through all user roles in order
+        TestArg("role", rng_type=Series(["admin", "user", "guest"])),
+        # Random: generate a fresh random ID for each role
         TestArg("id", rng_type=RNGInteger(1, 1000))
     )
 ```
-Running `pytest --nsamples=auto` generates 3 tests (one for each role), each with a random ID.
+Running `pytest --nsamples=auto` generates 3 tests (one per role), each with a random ID.
 
 **Filtering with Predicates:**
-You can filter sequences using the `predicate` argument. This is useful for excluding specific values or applying rules.
+Both sequence types accept a `predicate` argument to exclude values before generation.
 
 ```python
-# Generate only even numbers from 0-9
-TestArg("evens", rng_type=RNGSequence(range(10), predicate=lambda x: x % 2 == 0))
+# Iterate only even numbers from 0-9, in order
+TestArg("evens", rng_type=Series(range(10), predicate=lambda x: x % 2 == 0))
 ```
-
-> **Note:** If you run sequence strategies *without* `auto` (e.g., `nsamples=5`), `RNGSequence` behaves like `RNGChoice`, picking random values from the sequence.
 
 ### 6. Metadata Export (New in v1.0.0)
 
