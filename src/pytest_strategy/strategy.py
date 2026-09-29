@@ -210,10 +210,16 @@ class Strategy:
             # Validate that the strategy exists in the registry
             if name not in Strategy._registry:
                 available = list(Strategy._registry.keys())
-                raise ValueError(
+                message = (
                     f"Strategy '{name}' not found. "
                     f"Available strategies: {available if available else 'none'}"
                 )
+                # Strategy files that failed to load are the likely cause
+                if runtime.load_errors:
+                    message += "\nStrategy files that failed to load:"
+                    for path, error in runtime.load_errors:
+                        message += f"\n  {path}: {error}"
+                raise ValueError(message)
 
             return resolve_and_parametrize(
                 name,

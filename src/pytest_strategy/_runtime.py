@@ -30,6 +30,8 @@ class SessionState:
         self.config: pytest.Config | None = config
         self.strategies_loaded: bool = False
         self.discovered_files: list[Path] = []
+        # Strategy files that raised while loading, as (path, "ErrorType: message").
+        self.load_errors: list[tuple[Path, str]] = []
         # RNG seed in effect when this session began. RNG._seed is process-global,
         # so it is restored on pop: a nested session's --rng-seed must not leak
         # into the enclosing session or later sibling sessions.
@@ -92,6 +94,15 @@ class StrategyRuntime:
         """Append a discovered file to the active session (no-op if none)."""
         if self.current is not None:
             self.current.discovered_files.append(path)
+
+    @property
+    def load_errors(self) -> list[tuple[Path, str]]:
+        return self.current.load_errors if self.current else []
+
+    def record_load_error(self, path: Path, error: str) -> None:
+        """Record a strategy file that failed to load (no-op if no session)."""
+        if self.current is not None:
+            self.current.load_errors.append((path, error))
 
 
 # Process-wide stack; each session pushes on configure and pops on unconfigure.

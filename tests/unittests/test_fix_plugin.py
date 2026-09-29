@@ -156,13 +156,30 @@ class TestRuntimeRestoresSeed:
         assert RNG.get_seed() == 7
 
 
+class _TerminalReporterStub:
+    """Collects the lines written through the terminal reporter."""
+
+    def __init__(self):
+        self.lines = []
+
+    def write_line(self, line, **markup):
+        self.lines.append(line)
+
+
 @pytest.fixture
 def load_session(tmp_path):
-    """A fresh runtime session and a minimal config for _load_strategy_files."""
+    """A fresh runtime session and a minimal config for _load_strategy_files.
+
+    ``config.terminal.lines`` holds what the plugin wrote to the terminal.
+    """
+    terminal = _TerminalReporterStub()
     config = SimpleNamespace(
         option=SimpleNamespace(verbose=0),
         rootpath=tmp_path,
-        pluginmanager=SimpleNamespace(get_plugin=lambda name: None),
+        pluginmanager=SimpleNamespace(
+            get_plugin=lambda name: terminal if name == "terminalreporter" else None
+        ),
+        terminal=terminal,
     )
     runtime.push(config)
     try:
@@ -201,3 +218,57 @@ class TestLoadStrategyFilesOutcomes:
 
         assert runtime.discovered_files == []
         assert _discovered_modules() == before
+
+
+class TestLoadErrorsAreReported:
+    """A strategy file that fails to load is recorded and reported at any verbosity."""
+
+    def test_load_error_is_recorded_and_written_without_verbose(self, tmp_path, load_session):
+        strategy_file = tmp_path / "strategies.py"
+        strategy_file.write_text(
+            "from pytest_strategies_missing_helper import x\n" + STRATEGY_SOURCE
+        )
+
+        PytestStrategyPlugin()._load_strategy_files([strategy_file], load_session)
+
+        error = "ModuleNotFoundError: No module named 'pytest_strategies_missing_helper'"
+        assert runtime.load_errors == [(strategy_file, error)]
+        assert load_session.terminal.lines == [
+            f"pytest-strategies: Warning - Failed to load {strategy_file}: {error}"
+        ]
+
+    def test_skipped_file_is_not_a_load_error(self, tmp_path, load_session):
+        strategy_file = tmp_path / "strategies.py"
+        strategy_file.write_text(
+            "import pytest\npytest.skip('no gpu', allow_module_level=True)\n" + STRATEGY_SOURCE
+        )
+
+        PytestStrategyPlugin()._load_strategy_files([strategy_file], load_session)
+
+        assert runtime.load_errors == []
+        assert load_session.terminal.lines == []
+
+    def test_strategy_not_found_error_lists_failed_files(self, tmp_path, load_session):
+        from pytest_strategy import Strategy
+
+        broken = tmp_path / "strategies.py"
+        runtime.record_load_error(broken, "SyntaxError: expected ':' (strategies.py, line 3)")
+
+        with pytest.raises(ValueError) as excinfo:
+            Strategy.strategy("pytest_strategies_never_registered")(lambda x: None)
+
+        message = str(excinfo.value)
+        assert message.startswith("Strategy 'pytest_strategies_never_registered' not found.")
+        assert "Strategy files that failed to load:" in message
+        assert f"{broken}: SyntaxError: expected ':' (strategies.py, line 3)" in message
+
+    def test_load_errors_belong_to_their_session(self):
+        rt = StrategyRuntime()
+        rt.record_load_error("ghost", "Error: x")  # no session: dropped
+        assert rt.load_errors == []
+        rt.push("outer")
+        rt.push("inner")
+        rt.record_load_error("inner.py", "Error: x")
+        rt.pop()
+        assert rt.load_errors == []
+        rt.pop()

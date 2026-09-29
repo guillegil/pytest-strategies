@@ -304,3 +304,55 @@ class TestSkipInStrategyFile:
 
         result.stdout.no_fnmatch_line("*INTERNALERROR*")
         result.assert_outcomes(passed=1)
+
+
+class TestLoadErrorsAreVisible:
+    """A strategy file that fails to load must be reported without -v."""
+
+    def test_failed_import_is_reported_and_named_in_not_found_error(self, pytester):
+        pytester.makepyfile(strategies="""
+            from pytest_strategies_missing_helper import LIMIT
+
+            from pytest_strategy import Strategy, Parameter, TestArg, RNGInteger
+
+            @Strategy.register("limited")
+            def limited(nsamples):
+                return Parameter(TestArg("x", rng_type=RNGInteger(0, LIMIT)))
+            """)
+        pytester.makepyfile(test_limited="""
+            from pytest_strategy import Strategy
+
+            @Strategy.strategy("limited")
+            def test_limited(x):
+                pass
+            """)
+
+        result = pytester.runpytest_subprocess()
+
+        error = "ModuleNotFoundError: No module named 'pytest_strategies_missing_helper'"
+        result.stdout.fnmatch_lines(
+            [
+                f"pytest-strategies: Warning - Failed to load *strategies.py: {error}",
+                "*ValueError: Strategy 'limited' not found. Available strategies: none",
+                "*Strategy files that failed to load:",
+                f"*strategies.py: {error}",
+            ]
+        )
+        assert result.ret == pytest.ExitCode.INTERRUPTED
+
+    def test_syntax_error_is_reported_in_quiet_mode(self, pytester):
+        pytester.makepyfile(strategies="""
+            from pytest_strategy import Strategy
+
+            @Strategy.register("broken")
+            def broken(nsamples)
+                return ("x",), [(1,)]
+            """)
+        pytester.makepyfile(test_other="def test_other():\n    pass\n")
+
+        result = pytester.runpytest_subprocess("-q")
+
+        result.stdout.fnmatch_lines(
+            ["pytest-strategies: Warning - Failed to load *strategies.py: SyntaxError: *"]
+        )
+        result.assert_outcomes(passed=1)

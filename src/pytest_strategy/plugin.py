@@ -265,10 +265,15 @@ class PytestStrategyPlugin:
                     self._write_line(config, f"Skipped {file_path}: {e}")
 
             except (Exception, pytest.fail.Exception) as e:
-                # Log error but don't fail the test session
+                # Don't fail the test session, but always report the error: its
+                # strategies are missing, and Strategy.strategy lists it again in
+                # any "Strategy not found" error.
                 sys.modules.pop(module_name, None)
-                if config.option.verbose >= 1:
-                    print(f"pytest-strategies: Warning - Failed to load {file_path}: {e}")
+                error = f"{type(e).__name__}: {e}"
+                runtime.record_load_error(file_path, error)
+                self._write_line(
+                    config, f"Warning - Failed to load {file_path}: {error}", yellow=True
+                )
 
     def _write_line(self, config: Config, message: str, **markup: bool) -> None:
         """
