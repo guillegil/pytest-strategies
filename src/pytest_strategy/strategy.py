@@ -1,3 +1,4 @@
+import os
 import warnings
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -20,9 +21,18 @@ def _factory_origin(fn: Callable[..., Any]) -> tuple[str | None, str | None]:
 
     The module name is deliberately not used: the plugin executes each strategies
     file under a fresh module name in every (possibly nested) pytest session.
+    The file path is normalized, so one file reached through different path
+    strings (``proj/../shared/x.py`` and ``shared/x.py``, a symlink) is the same.
     """
     code = getattr(fn, "__code__", None)
-    return (code.co_filename if code is not None else None, getattr(fn, "__qualname__", None))
+    # The module's __file__ is set by the import system from the real location;
+    # co_filename can be stale (pytest's rewritten pyc after a checkout moved)
+    filename = getattr(fn, "__globals__", {}).get("__file__") or (
+        code.co_filename if code is not None else None
+    )
+    if filename:
+        filename = os.path.normcase(os.path.realpath(filename))
+    return (filename, getattr(fn, "__qualname__", None))
 
 
 def _describe_factory(fn: Callable[..., Any]) -> str:
@@ -144,8 +154,10 @@ class Strategy:
         def decorate(fn: Callable[[int | str], tuple[Sequence[str], Sequence[Any]]]):
             # Warn when a different function takes over the name. Re-registering the
             # same function (e.g. a strategies file re-executed in a nested session)
-            # stays silent. The last registration wins either way.
+            # stays silent. The last registration wins either way: it is stored
+            # before warning, in case the warning is turned into an error.
             existing = Strategy._registry.get(name)
+            Strategy._registry[name] = fn
             if existing is not None and _factory_origin(existing) != _factory_origin(fn):
                 warnings.warn(
                     f"Strategy '{name}' is registered more than once: "
@@ -153,7 +165,6 @@ class Strategy:
                     PytestStrategiesWarning,
                     stacklevel=2,
                 )
-            Strategy._registry[name] = fn
             return fn
 
         return decorate

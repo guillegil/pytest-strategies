@@ -11,6 +11,8 @@ import inspect
 import json
 import os
 import random
+import textwrap
+import warnings
 from pathlib import Path
 from unittest import mock
 from unittest.mock import MagicMock
@@ -21,6 +23,7 @@ from pytest_strategy import RNG, RNGInteger, Strategy
 from pytest_strategy._resolver import call_factory, resolve_and_parametrize
 from pytest_strategy.parameters import Parameter
 from pytest_strategy.rng import Series
+from pytest_strategy.strategy import PytestStrategiesWarning
 from pytest_strategy.test_args import TestArg
 
 # ---------------------------------------------------------------------------
@@ -317,3 +320,80 @@ class TestDecoratedFactories:
 
         for name in ("fix_r2_injected", "fix_r2_patched", "fix_r2_adapted", "fix_r2_opaque"):
             assert data[name] == {"type": "legacy_tuple", "argnames": ["x"]}
+
+
+# ---------------------------------------------------------------------------
+# Duplicate registration: one file reached through different path strings
+# ---------------------------------------------------------------------------
+
+STRATEGY_SOURCE = textwrap.dedent("""
+    from pytest_strategy import Strategy
+
+    @Strategy.register("fix_r2_dup")
+    def factory(nsamples):
+        return ("x",), [(1,)]
+    """)
+
+
+def _exec_strategy(filename, **module_globals):
+    """Execute STRATEGY_SOURCE as if loaded from ``filename``."""
+    exec(compile(STRATEGY_SOURCE, str(filename), "exec"), module_globals)
+
+
+class TestDuplicateRegistrationPaths:
+    """The same file is recognized whatever path string it was executed under."""
+
+    def test_parent_directory_segments_are_silent(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _exec_strategy("/virtual/proj/../shared/strategies.py")
+            _exec_strategy("/virtual/shared/strategies.py")
+
+    def test_symlinked_path_is_silent(self, tmp_path):
+        real = tmp_path / "real"
+        real.mkdir()
+        (real / "strategies.py").write_text(STRATEGY_SOURCE)
+        link = tmp_path / "link"
+        try:
+            link.symlink_to(real, target_is_directory=True)
+        except OSError:
+            pytest.skip("symlinks are not supported here")
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _exec_strategy(real / "strategies.py")
+            _exec_strategy(link / "strategies.py")
+
+    def test_relative_and_absolute_paths_are_silent(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _exec_strategy("strategies.py")
+            _exec_strategy(tmp_path / "strategies.py")
+
+    def test_module_file_is_preferred_over_a_stale_code_filename(self):
+        """A rewritten pyc cached before the checkout moved keeps the old co_filename."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _exec_strategy("/old/checkout/strategies.py", __file__="/new/checkout/strategies.py")
+            _exec_strategy("/new/checkout/strategies.py", __file__="/new/checkout/strategies.py")
+
+    def test_another_file_still_warns(self):
+        _exec_strategy("/virtual/users/strategies.py")
+        with pytest.warns(PytestStrategiesWarning, match="/virtual/billing/strategies.py"):
+            _exec_strategy("/virtual/billing/strategies.py")
+
+    def test_warning_as_error_still_registers_the_new_factory(self):
+        @Strategy.register("fix_r2_dup_error")
+        def first(nsamples):
+            return ("x",), [(1,)]
+
+        def second(nsamples):
+            return ("y",), [(2,)]
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(PytestStrategiesWarning):
+                Strategy.register("fix_r2_dup_error")(second)
+
+        assert Strategy._registry["fix_r2_dup_error"] is second
