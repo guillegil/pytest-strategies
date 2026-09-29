@@ -177,10 +177,11 @@ class PytestStrategyPlugin:
 
             for pattern in patterns:
                 for file_path in search_path.glob(pattern):
-                    # Skip __pycache__ and hidden directories
-                    if any(
-                        part.startswith(".") or part == "__pycache__" for part in file_path.parts
-                    ):
+                    # Skip __pycache__ and hidden directories. Only the parts below
+                    # the search path count: a project that lives under a dot
+                    # directory (~/.cache/proj, testpaths = ../shared) is searched.
+                    rel_parts = file_path.relative_to(search_path).parts
+                    if any(part.startswith(".") or part == "__pycache__" for part in rel_parts):
                         continue
 
                     # Skip if already found
