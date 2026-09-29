@@ -545,6 +545,16 @@ def pytest_addoption(parser) -> None:
 
 def pytest_configure(config):
     """Register the plugin instance and open a runtime session for this config."""
+    # --list-strategies prints from pytest_collection_finish and exits. Under
+    # pytest-xdist only the workers collect, and a worker's exit crashes the
+    # controller (INTERNALERROR), so list in-process instead, as xdist does for
+    # --collect-only. This runs before xdist's trylast pytest_configure starts
+    # the distributed session.
+    if config.option.list_strategies and getattr(config.option, "dist", "no") != "no":
+        config.option.dist = "no"
+        if hasattr(config.option, "tx"):
+            config.option.tx = []
+
     if not hasattr(config, "_strategy_plugin_instance"):
         # Push the session state BEFORE registering, so the instance's
         # pytest_configure (which calls Strategy.set_config) has a current state.

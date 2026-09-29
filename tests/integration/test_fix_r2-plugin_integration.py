@@ -281,3 +281,18 @@ class TestDiscoveryScope:
         result = pytester.runpytest_subprocess("integration/test_integ.py::test_ints")
 
         result.assert_outcomes(passed=3)
+
+
+class TestListStrategiesUnderXdist:
+    """--list-strategies lists in-process when pytest-xdist distribution is on."""
+
+    def test_list_strategies_with_workers(self, pytester):
+        pytest.importorskip("xdist")
+        pytester.makepyfile(strategies=STRATEGIES)
+        pytester.makepyfile(test_ints=TESTS)
+
+        result = pytester.runpytest_subprocess("--list-strategies", "-n", "2")
+
+        result.stdout.no_fnmatch_line("*INTERNALERROR*")
+        result.stdout.fnmatch_lines(["*Found 1 registered strategies:*", "*r2_ints*"])
+        assert result.ret == pytest.ExitCode.OK
