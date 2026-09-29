@@ -146,3 +146,30 @@ class TestStableIds:
             "test_fi_ids_a.py::test_codec[codec=Codec0]",
             "test_fi_ids_a.py::test_codec[codec=Codec1]",
         ]
+
+
+class TestArgnameShadowingBuiltinFixture:
+    """A strategy argname named like a built-in fixture must pass validation."""
+
+    def test_argname_named_cache(self, pytester):
+        pytester.makepyfile(fi_sig_a_strategies="""
+            from pytest_strategy import Strategy, Parameter, TestArg, RNGBoolean, RNGInteger
+
+            @Strategy.register("fi_sig_a")
+            def factory(nsamples):
+                return Parameter(
+                    TestArg("cache", rng_type=RNGBoolean()),
+                    TestArg("size", rng_type=RNGInteger(1, 9)),
+                    nsamples=3,
+                )
+            """)
+        pytester.makepyfile(test_fi_sig_a="""
+            from pytest_strategy import Strategy
+
+            @Strategy.strategy("fi_sig_a")
+            def test_lookup(cache, size):
+                assert isinstance(cache, bool)
+                assert 1 <= size <= 9
+            """)
+        result = pytester.runpytest_inprocess()
+        result.assert_outcomes(passed=3)

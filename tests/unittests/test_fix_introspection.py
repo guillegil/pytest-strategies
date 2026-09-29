@@ -3,7 +3,8 @@ Regression tests for fixes in the introspection, dataclass and ID helpers.
 
 Each test here failed before its fix: dataclass mode detection with ``self``,
 custom fixtures and string annotations; conversion of keyword-only and
-``init=False`` dataclasses; test IDs that embedded memory addresses.
+``init=False`` dataclasses; test IDs that embedded memory addresses;
+signature validation of strategy argnames named like built-in fixtures.
 """
 
 from dataclasses import KW_ONLY, dataclass, field
@@ -12,7 +13,11 @@ import pytest
 
 from pytest_strategy._dataclass import convert_to_dataclass
 from pytest_strategy._ids import generate_dataclass_ids, generate_test_ids
-from pytest_strategy._introspection import detect_dataclass_mode, detect_dataclass_param
+from pytest_strategy._introspection import (
+    detect_dataclass_mode,
+    detect_dataclass_param,
+    validate_signature,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -199,3 +204,35 @@ class TestIdsWithoutMemoryAddresses:
 
     def test_custom_repr_is_kept(self):
         assert generate_test_ids(["p"], [(Point(1, 2),)]) == ["p=Point(x=1, y=2)"]
+
+
+# ---------------------------------------------------------------------------
+# validate_signature
+# ---------------------------------------------------------------------------
+
+
+class TestValidateSignatureFixtureNames:
+    def test_argname_named_cache_is_a_strategy_param(self):
+        def test_fn(cache, size):
+            pass
+
+        validate_signature(test_fn, ["cache", "size"], "s")  # no exception
+
+    def test_argname_named_tmpdir_is_a_strategy_param(self):
+        def test_fn(tmpdir, size):
+            pass
+
+        validate_signature(test_fn, ["tmpdir", "size"], "s")  # no exception
+
+    def test_builtin_fixture_outside_argnames_still_ignored(self):
+        def test_fn(size, tmpdir):
+            pass
+
+        validate_signature(test_fn, ["size"], "s")  # no exception
+
+    def test_missing_argname_still_reported(self):
+        def test_fn(size):
+            pass
+
+        with pytest.raises(ValueError, match="Missing parameters: \\['cache'\\]"):
+            validate_signature(test_fn, ["cache", "size"], "s")

@@ -38,20 +38,22 @@ def validate_signature(
     test_fn,
     argnames: Sequence[str],
     strategy_name: str,
-    pytest_fixtures: "frozenset[str] | set[str]" = PYTEST_FIXTURES,
+    pytest_fixtures: "frozenset[str] | set[str]" = PYTEST_FIXTURES,  # noqa: ARG001
 ) -> None:
     """
     Validate that a test function's signature matches the strategy argnames.
 
-    Parameters excluded from validation:
-    - Parameters listed in *pytest_fixtures* (built-in fixtures)
-    - Parameters whose name does not appear in *argnames* (assumed custom fixtures)
+    Parameters whose name does not appear in *argnames* are excluded from
+    validation (built-in or custom fixtures). A parameter named in *argnames*
+    is always a strategy parameter, even when it shares its name with a
+    built-in fixture: pytest's parametrize overrides that fixture.
 
     Args:
         test_fn: The test function to inspect.
         argnames: Expected argument names from the strategy.
         strategy_name: Name of the strategy (used in error messages).
-        pytest_fixtures: Set of fixture names to ignore.
+        pytest_fixtures: Built-in fixture names. Kept for backward
+            compatibility; every name outside *argnames* is ignored anyway.
 
     Raises:
         ValueError: When the test-function signature does not match *argnames*.
@@ -61,8 +63,6 @@ def validate_signature(
 
     actual_params = []
     for p in test_params:
-        if p in pytest_fixtures:
-            continue
         if p not in argnames:
             continue
         actual_params.append(p)
