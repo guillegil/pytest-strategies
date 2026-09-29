@@ -2,7 +2,8 @@
 
 The strategy registry is a process-global catalog populated at import time by
 ``@Strategy.register``, so it cannot be made per-session. The active pytest
-``Config`` and the auto-discovery bookkeeping, however, ARE per-session.
+``Config``, the auto-discovery bookkeeping and the RNG seed, however, ARE
+per-session.
 
 These are held on a STACK rather than a single slot because pytest sessions can
 nest: running pytest in-process (e.g. via ``pytester``) starts an inner session
@@ -16,6 +17,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .rng import RNG
+
 if TYPE_CHECKING:
     import pytest
 
@@ -27,6 +30,10 @@ class SessionState:
         self.config: pytest.Config | None = config
         self.strategies_loaded: bool = False
         self.discovered_files: list[Path] = []
+        # RNG seed in effect when this session began. RNG._seed is process-global,
+        # so it is restored on pop: a nested session's --rng-seed must not leak
+        # into the enclosing session or later sibling sessions.
+        self.prev_seed: int | None = None
 
 
 class StrategyRuntime:
@@ -38,13 +45,16 @@ class StrategyRuntime:
     def push(self, config: pytest.Config | None = None) -> SessionState:
         """Begin a session (``pytest_configure``)."""
         state = SessionState(config)
+        state.prev_seed = RNG.get_seed()
         self._stack.append(state)
         return state
 
     def pop(self) -> None:
-        """End a session (``pytest_unconfigure``)."""
+        """End a session (``pytest_unconfigure``) and restore the seed it began with."""
         if self._stack:
-            self._stack.pop()
+            state = self._stack.pop()
+            if state.prev_seed is not None:
+                RNG.seed(state.prev_seed)
 
     @property
     def current(self) -> SessionState | None:

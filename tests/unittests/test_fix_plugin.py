@@ -7,6 +7,7 @@ import sys
 from types import SimpleNamespace
 
 from pytest_strategy import RNG
+from pytest_strategy._runtime import StrategyRuntime
 from pytest_strategy.plugin import PytestStrategyPlugin
 
 STRATEGY_SOURCE = """
@@ -134,3 +135,20 @@ class TestKeyedRefreshSeed:
             for hash_seed in ("1", "2")
         }
         assert len(outputs) == 1
+
+
+class TestRuntimeRestoresSeed:
+    """Ending a session restores the RNG seed it began with."""
+
+    def test_pop_restores_seed_of_enclosing_session(self):
+        rt = StrategyRuntime()
+        RNG.seed(7)
+        rt.push("outer")
+        rt.push("inner")
+        RNG.seed(42)  # the inner session's --rng-seed
+
+        rt.pop()
+        assert RNG.get_seed() == 7
+
+        rt.pop()
+        assert RNG.get_seed() == 7

@@ -215,3 +215,24 @@ class TestPerTestRandomStreams:
 
         assert len(forward["test_one"]) == 3
         assert forward == backward
+
+
+class TestNestedSessionSeed:
+    """An in-process session's --rng-seed must not leak out of it."""
+
+    def test_inner_rng_seed_is_restored_after_the_run(self, pytester):
+        from pytest_strategy import RNG
+
+        pytester.makepyfile(nested_strategies=STRATEGIES.replace("big_ints", "nested_ints"))
+        pytester.makepyfile(test_nested=TESTS.replace("big_ints", "nested_ints"))
+        RNG.seed(7)  # a known seed for the enclosing session
+
+        seeded = pytester.runpytest_inprocess("--rng-seed=42")
+        seeded.assert_outcomes(passed=6)
+        assert _seed_from_header(seeded) == 42
+        assert RNG.get_seed() == 7
+
+        # A later run without --rng-seed uses the enclosing seed, not the leaked 42.
+        unseeded = pytester.runpytest_inprocess()
+        unseeded.assert_outcomes(passed=6)
+        assert _seed_from_header(unseeded) == 7
