@@ -122,8 +122,9 @@ def resolve_and_parametrize(
                     filter_by_name=vector_name,
                     filter_by_index=vector_index,
                 )
-        except KeyError as e:
-            # If filtering by name/index and vector doesn't exist, return empty samples
+        except (KeyError, IndexError) as e:
+            # If filtering by name (KeyError) or index (IndexError) and the vector
+            # doesn't exist, return empty samples
             # This allows CLI filtering to work gracefully across multiple strategies
             if vector_name or vector_index is not None:
                 samples = []

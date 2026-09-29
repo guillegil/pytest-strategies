@@ -213,3 +213,40 @@ class TestAutoModeWithoutSequenceArgs:
     def test_invalid_mode_still_raises(self):
         with pytest.raises(ValueError, match="Invalid mode"):
             _resolve(lambda nsamples: _random_param(), ["code"], nsamples="auto", vector_mode="bad")
+
+
+# ---------------------------------------------------------------------------
+# --vector-index out of range behaves like a missing --vector-name
+# ---------------------------------------------------------------------------
+
+
+class TestVectorIndexOutOfRange:
+    """A strategy without the requested index gets an empty sample list, not an error."""
+
+    def test_index_beyond_directed_vectors(self):
+        _, samples, _ = _resolve(lambda nsamples: _random_param(), ["code"], vector_index=1)
+        assert samples == []
+
+    def test_strategy_without_directed_vectors(self):
+        param = Parameter(TestArg("w", rng_type=RNGInteger(0, 9)))
+        _, samples, _ = _resolve(lambda nsamples: param, ["w"], vector_index=0)
+        assert samples == []
+
+    def test_index_beyond_directed_vectors_under_auto(self):
+        _, samples, _ = _resolve(
+            lambda nsamples: _series_param(), ["x", "y"], nsamples="auto", vector_index=5
+        )
+        assert samples == []
+
+    def test_index_in_range_still_selects_vector(self):
+        _, samples, _ = _resolve(lambda nsamples: _random_param(), ["code"], vector_index=0)
+        assert samples == [500]
+
+    def test_index_error_without_filter_still_raises(self):
+        class BrokenParameter(Parameter):
+            def generate_vectors(self, *args, **kwargs):
+                raise IndexError("boom")
+
+        param = BrokenParameter(TestArg("w", rng_type=RNGInteger(0, 9)))
+        with pytest.raises(ValueError, match="Error generating samples for strategy 'strat'"):
+            _resolve(lambda nsamples: param, ["w"])
