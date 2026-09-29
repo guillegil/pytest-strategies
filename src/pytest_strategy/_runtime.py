@@ -1,21 +1,28 @@
 """Per-session runtime state for the strategy plugin.
 
 The strategy registry is a process-global catalog populated at import time by
-``@Strategy.register``, so it cannot be made per-session. The active pytest
-``Config``, the auto-discovery bookkeeping and the RNG seed, however, ARE
-per-session.
+``@Strategy.register``, so it cannot be made per-session (it is only restored
+when a session ends, see below). The active pytest ``Config``, the
+auto-discovery bookkeeping and the RNG seed, however, ARE per-session.
 
 These are held on a STACK rather than a single slot because pytest sessions can
 nest: running pytest in-process (e.g. via ``pytester``) starts an inner session
 inside the outer one. A single global flag would let the outer session's
 "already discovered" state leak into the inner run and skip its discovery. A
 stack gives each session its own state and restores the parent's on exit.
+
+The process-global state a session changes (the RNG seed, the global ``random``
+state and the strategy registry) is snapshotted when the session begins and put
+back when it ends, so an inner session leaves no trace in the enclosing session
+or in later sibling sessions.
 """
 
 from __future__ import annotations
 
+import random
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .rng import RNG
 
@@ -32,10 +39,12 @@ class SessionState:
         self.discovered_files: list[Path] = []
         # Strategy files that raised while loading, as (path, "ErrorType: message").
         self.load_errors: list[tuple[Path, str]] = []
-        # RNG seed in effect when this session began. RNG._seed is process-global,
-        # so it is restored on pop: a nested session's --rng-seed must not leak
-        # into the enclosing session or later sibling sessions.
+        # Process-global state in effect when this session began, restored on pop:
+        # a nested session's --rng-seed, random draws and strategy registrations
+        # must not leak into the enclosing session or later sibling sessions.
         self.prev_seed: int | None = None
+        self.prev_random_state: Any = None
+        self.prev_registry: dict[str, Callable[..., Any]] | None = None
 
 
 class StrategyRuntime:
@@ -46,17 +55,32 @@ class StrategyRuntime:
 
     def push(self, config: pytest.Config | None = None) -> SessionState:
         """Begin a session (``pytest_configure``)."""
+        # Imported here: strategy.py imports this module.
+        from .strategy import Strategy
+
         state = SessionState(config)
         state.prev_seed = RNG.get_seed()
+        state.prev_random_state = random.getstate()
+        state.prev_registry = dict(Strategy._registry)
         self._stack.append(state)
         return state
 
     def pop(self) -> None:
-        """End a session (``pytest_unconfigure``) and restore the seed it began with."""
+        """End a session (``pytest_unconfigure``) and restore the state it began with."""
         if self._stack:
+            from .strategy import Strategy
+
             state = self._stack.pop()
+            # Restore the seed without reseeding: the random state is restored
+            # as it was, not restarted from the beginning of the seed's stream.
             if state.prev_seed is not None:
-                RNG.seed(state.prev_seed)
+                RNG._seed = state.prev_seed
+            if state.prev_random_state is not None:
+                random.setstate(state.prev_random_state)
+            if state.prev_registry is not None:
+                # In place: resolve_and_parametrize holds the registry by reference.
+                Strategy._registry.clear()
+                Strategy._registry.update(state.prev_registry)
 
     @property
     def current(self) -> SessionState | None:

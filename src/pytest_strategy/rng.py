@@ -31,13 +31,15 @@ class RNG:
     def seed(seed: int | None = None):
         """Set the random seed and refresh the random state.
 
-        With ``None`` the current seed is kept, but the random state is still
-        refreshed from it, so an unseeded run starts from the same state as a
-        run given ``--rng-seed=<that seed>``.
+        With ``None`` the current seed is kept and the global random state is
+        left alone. The plugin calls this on every run, including runs that never
+        use a strategy, so it must not replace a state the project seeded itself
+        (e.g. ``random.seed(0)`` in a conftest). Use :meth:`refresh_seed` to
+        start the random state from the current seed.
         """
         if seed is not None:
             RNG._seed = seed
-        random.seed(RNG._seed)
+            random.seed(RNG._seed)
 
     @staticmethod
     def get_seed():

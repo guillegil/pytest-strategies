@@ -44,16 +44,25 @@ class PytestStrategyPlugin:
         # Get CLI options
         rng_seed = config.getoption("--rng-seed", None)
 
-        # A pytest-xdist worker without --rng-seed uses the controller's seed
-        # (see pytest_configure_node). Workers must generate identical vectors,
-        # or xdist aborts with "Different tests were collected".
-        workerinput = getattr(config, "workerinput", None)
-        if rng_seed is None and workerinput is not None:
-            rng_seed = workerinput.get("pytest_strategies_seed")
-
         # Configure Strategy and RNG
         Strategy.set_config(config)
-        RNG.seed(rng_seed)
+
+        workerinput = getattr(config, "workerinput", None)
+        worker_seed = workerinput.get("pytest_strategies_seed") if workerinput else None
+        if rng_seed is None and worker_seed is not None:
+            # A pytest-xdist worker without --rng-seed uses the controller's seed
+            # (see pytest_configure_node). Workers must generate identical vectors,
+            # or xdist aborts with "Different tests were collected". Like an
+            # unseeded run, it leaves the global random state alone: workers of a
+            # project without strategy files keep their own entropy.
+            RNG._seed = worker_seed
+        else:
+            # An explicit --rng-seed also seeds the global random state. Without
+            # one, the seed is kept and the random state is left untouched, so a
+            # project that seeds random itself (e.g. in a conftest) is unaffected;
+            # pytest_sessionstart starts it from the seed before loading strategy
+            # files.
+            RNG.seed(rng_seed)
 
         # Register custom markers
         config.addinivalue_line("markers", "strategy(name): mark test to use a specific strategy")
@@ -87,6 +96,8 @@ class PytestStrategyPlugin:
         if runtime.strategies_loaded:
             return
 
+        from .rng import RNG
+
         config = session.config
 
         # Get the root directory for tests
@@ -100,6 +111,11 @@ class PytestStrategyPlugin:
         strategy_files = self._discover_strategy_files(search_paths)
 
         if strategy_files:
+            # Start the global random state from the seed, so draws made when a
+            # strategy file is imported (e.g. OFFSET = RNG.integer(...)) are
+            # reproduced by --rng-seed=<printed seed>. Only here: a run without
+            # strategy files keeps the random state it had.
+            RNG.refresh_seed()
             self._load_strategy_files(strategy_files, config)
             runtime.strategies_loaded = True
 

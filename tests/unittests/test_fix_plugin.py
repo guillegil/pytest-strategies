@@ -64,16 +64,18 @@ class TestDiscoveryHiddenDirectories:
 
 
 class TestSeedNone:
-    """RNG.seed(None) keeps the seed but still refreshes the random state."""
+    """RNG.seed(None) keeps the seed; refresh_seed() starts the random state from it."""
 
-    def test_seed_none_reseeds_random_from_current_seed(self):
+    def test_seed_none_keeps_seed_and_refresh_reseeds_random_from_it(self):
         RNG.seed(1234)
         expected = [random.random() for _ in range(3)]
 
         random.seed()  # state from OS entropy, as in a fresh unseeded process
         RNG.seed(None)
-
         assert RNG.get_seed() == 1234
+
+        # What the plugin does before loading strategy files
+        RNG.refresh_seed()
         assert [random.random() for _ in range(3)] == expected
 
 
