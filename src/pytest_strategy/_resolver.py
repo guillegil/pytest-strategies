@@ -20,6 +20,19 @@ from .rng import RNG, SequenceLike
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+# pytest.param() returns a ParameterSet (a NamedTuple), which pytest does not export
+_ParameterSet = type(pytest.param())
+
+
+def _id_row(sample: Any, single: bool) -> Any:
+    """Return the row generate_test_ids expects for a sample passed to parametrize."""
+    if isinstance(sample, _ParameterSet):
+        # Build the ID from the values; pytest still prefers an explicit id
+        return sample.values
+    # generate_test_ids unwraps a single-argument row once, so re-wrap the value:
+    # a tuple value then keeps its full ID
+    return (sample,) if single else sample
+
 
 def _accepts(sig: inspect.Signature, *args: Any, **kwargs: Any) -> bool:
     """Return True if a callable with signature ``sig`` can be called with these arguments."""
@@ -195,9 +208,13 @@ def resolve_and_parametrize(
 
         argnames, samples = result
 
-        # Convert single string argname to tuple for consistency
+        # Materialize the samples: a generator would otherwise be consumed by ID
+        # generation before pytest.mark.parametrize sees it
+        samples = list(samples)
+
+        # Convert a string of argnames to a tuple, split on commas as pytest does
         if isinstance(argnames, str):
-            argnames = (argnames,)
+            argnames = tuple(n.strip() for n in argnames.split(",") if n.strip())
 
     # Detect dataclass mode
     is_dc_mode, dc_type, dc_param = detect_dataclass_param(
@@ -235,15 +252,17 @@ def resolve_and_parametrize(
         # Create comma-separated string of parameter names for pytest.mark.parametrize
         argstr = ",".join(argnames)
 
-        # For single parameters, unwrap the tuples
+        # For single parameters, unwrap the tuples. A pytest.param() sample is a tuple
+        # too (ParameterSet); it is passed through unchanged to keep its marks and id.
         if len(argnames) == 1:
-            samples = [s[0] if isinstance(s, tuple) else s for s in samples]
+            samples = [
+                s[0] if isinstance(s, tuple) and not isinstance(s, _ParameterSet) else s
+                for s in samples
+            ]
 
         # Generate test IDs for better test output readability, from the same values
-        # passed to parametrize. generate_test_ids unwraps a single-argument row once,
-        # so each already-unwrapped value is re-wrapped: a tuple value keeps its full ID.
-        id_rows = [(s,) for s in samples] if len(argnames) == 1 else samples
-        ids = generate_test_ids(argnames, id_rows)
+        # passed to parametrize
+        ids = generate_test_ids(argnames, [_id_row(s, len(argnames) == 1) for s in samples])
 
         # Apply pytest parametrize decorator to the test function
         return cast(Callable, pytest.mark.parametrize(argstr, samples, ids=ids)(test_fn))

@@ -159,3 +159,75 @@ class TestSingleArgumentIdsIntegration:
                 "*test_point[[]pt=(1, 4)[]] PASSED*",
             ]
         )
+
+
+class TestLegacyTupleStrategiesIntegration:
+    """Legacy (argnames, samples) strategies behave like pytest.mark.parametrize."""
+
+    def test_comma_separated_argnames(self, pytester):
+        pytester.makepyfile(test_fix_legacy_csv="""
+            from pytest_strategy import Strategy
+
+            @Strategy.register("fix_legacy_csv")
+            def csv(nsamples):
+                return "x, y", [(1, 2), (3, 4)]
+
+            @Strategy.strategy("fix_legacy_csv")
+            def test_csv(x, y):
+                assert y == x + 1
+            """)
+        result = pytester.runpytest("-v")
+        result.assert_outcomes(passed=2)
+        result.stdout.fnmatch_lines(["*test_csv[[]x=1,y=2[]] PASSED*"])
+
+    def test_generator_samples(self, pytester):
+        pytester.makepyfile(test_fix_legacy_gen="""
+            from pytest_strategy import Strategy
+
+            @Strategy.register("fix_legacy_gen")
+            def gen(nsamples):
+                return ("a", "b"), ((i, i + 1) for i in range(3))
+
+            @Strategy.strategy("fix_legacy_gen")
+            def test_gen(a, b):
+                assert b == a + 1
+            """)
+        result = pytester.runpytest()
+        result.assert_outcomes(passed=3)
+
+    def test_pytest_param_marks_and_ids_are_kept(self, pytester):
+        pytester.makepyfile(test_fix_legacy_param="""
+            import pytest
+            from pytest_strategy import Strategy
+
+            @Strategy.register("fix_legacy_param_one")
+            def one(nsamples):
+                return ("x",), [
+                    pytest.param(1, marks=pytest.mark.xfail(strict=True)),
+                    pytest.param(5, id="five"),
+                    2,
+                ]
+
+            @Strategy.register("fix_legacy_param_two")
+            def two(nsamples):
+                return ("a", "b"), [pytest.param(1, 2, marks=pytest.mark.xfail(strict=True)), (3, 3)]
+
+            @Strategy.strategy("fix_legacy_param_one")
+            def test_one(x):
+                assert x in (2, 5)
+
+            @Strategy.strategy("fix_legacy_param_two")
+            def test_two(a, b):
+                assert a == b
+            """)
+        result = pytester.runpytest("-v")
+        result.assert_outcomes(passed=3, xfailed=2)
+        result.stdout.fnmatch_lines(
+            [
+                "*test_one[[]x=1[]] XFAIL*",
+                "*test_one[[]five[]] PASSED*",
+                "*test_one[[]x=2[]] PASSED*",
+                "*test_two[[]a=1,b=2[]] XFAIL*",
+                "*test_two[[]a=3,b=3[]] PASSED*",
+            ]
+        )

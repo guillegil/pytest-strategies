@@ -43,8 +43,8 @@ def _make_test_fn(argnames):
     return _fn
 
 
-def _resolve(factory, argnames, **options):
-    """Resolve ``factory`` under the given CLI options.
+def _resolve(factory, argnames, *, validate=False, **options):
+    """Resolve ``factory`` for a test taking ``argnames`` under the given CLI options.
 
     Returns the (argstr, samples, ids) passed to pytest.mark.parametrize.
     """
@@ -54,7 +54,7 @@ def _resolve(factory, argnames, **options):
         registry={"strat": factory},
         config=_make_config(**options),
         pytest_fixtures=set(),
-        validate=False,
+        validate=validate,
     )
     mark = marked.pytestmark[-1]
     return mark.args[0], list(mark.args[1]), mark.kwargs["ids"]
@@ -464,3 +464,62 @@ class TestSingleArgumentIds:
         _, samples, ids = _resolve(lambda nsamples: (("x",), [((1, 2),)]), ["x"])
         assert samples == [(1, 2)]
         assert ids == ["x=(1, 2)"]
+
+
+# ---------------------------------------------------------------------------
+# Legacy tuple strategies: comma argnames, generators and pytest.param samples
+# ---------------------------------------------------------------------------
+
+
+class TestLegacyTupleStrategies:
+    """Legacy (argnames, samples) strategies behave like pytest.mark.parametrize."""
+
+    @pytest.mark.parametrize("argnames", ["x,y", "x, y", " x , y "])
+    def test_comma_separated_argnames(self, argnames):
+        argstr, samples, ids = _resolve(
+            lambda nsamples: (argnames, [(1, 2), (3, 4)]), ["x", "y"], validate=True
+        )
+        assert argstr == "x,y"
+        assert samples == [(1, 2), (3, 4)]
+        assert ids == ["x=1,y=2", "x=3,y=4"]
+
+    def test_single_string_argname_stays_one_name(self):
+        argstr, samples, ids = _resolve(lambda nsamples: ("x", [(1,), (2,)]), ["x"], validate=True)
+        assert argstr == "x"
+        assert samples == [1, 2]
+        assert ids == ["x=1", "x=2"]
+
+    def test_generator_samples_multi_arg(self):
+        _, samples, ids = _resolve(
+            lambda nsamples: (("a", "b"), ((i, i + 1) for i in range(3))), ["a", "b"]
+        )
+        assert samples == [(0, 1), (1, 2), (2, 3)]
+        assert ids == ["a=0,b=1", "a=1,b=2", "a=2,b=3"]
+
+    def test_generator_samples_single_arg(self):
+        _, samples, ids = _resolve(lambda nsamples: ("a", (i for i in range(3))), ["a"])
+        assert samples == [0, 1, 2]
+        assert ids == ["a=0", "a=1", "a=2"]
+
+    def test_pytest_param_single_arg_is_not_unwrapped(self):
+        xfail = pytest.mark.xfail(strict=True)
+        _, samples, ids = _resolve(
+            lambda nsamples: (
+                ("x",),
+                [pytest.param(1, marks=xfail), pytest.param(5, id="five"), (2,)],
+            ),
+            ["x"],
+        )
+        assert samples[0] == pytest.param(1, marks=xfail)
+        assert samples[1] == pytest.param(5, id="five")
+        assert samples[2] == 2
+        assert ids == ["x=1", "x=5", "x=2"]
+
+    def test_pytest_param_multi_arg_ids_use_values(self):
+        xfail = pytest.mark.xfail(strict=True)
+        _, samples, ids = _resolve(
+            lambda nsamples: (("a", "b"), [pytest.param(1, 2, marks=xfail), (3, 3)]),
+            ["a", "b"],
+        )
+        assert samples == [pytest.param(1, 2, marks=xfail), (3, 3)]
+        assert ids == ["a=1,b=2", "a=3,b=3"]
