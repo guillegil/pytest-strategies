@@ -4,20 +4,32 @@ Regression tests for fixed bugs in the RNG module.
 Tests cover:
 - Weighted generators with a predicate re-choosing the range on every retry
 - RNGInteger/RNGFloat rejecting min > max at construction
+- Weights of weighted types and RNGEnum validated at construction
 """
 
+import math
 import random
+from enum import Enum
 
 import pytest
 
 from pytest_strategy import (
     RNG,
+    RNGEnum,
     RNGFloat,
     RNGInteger,
     RNGValueError,
     RNGWeightedFloat,
     RNGWeightedInteger,
 )
+
+
+class Shade(Enum):
+    """Small enum used by the RNGEnum tests"""
+
+    LIGHT = 1
+    MEDIUM = 2
+    DARK = 3
 
 
 class TestWeightedPredicateRedrawsRange:
@@ -151,3 +163,65 @@ class TestRNGTypeBounds:
         """min == max is a valid one-value range"""
         assert RNGInteger(5, 5).generate() == 5
         assert RNGFloat(2.5, 2.5).generate() == 2.5
+
+
+class TestWeightsValidation:
+    """Weights are checked when the RNG type is built, not when a value is generated"""
+
+    @pytest.mark.parametrize("rng_cls", [RNGWeightedInteger, RNGWeightedFloat])
+    def test_negative_weight_rejected(self, rng_cls):
+        """A negative weight used to skew random.choices so positive-weight ranges never came up"""
+        with pytest.raises(
+            RNGValueError,
+            match=rf"{rng_cls.__name__} weight for \(1, 1\) must be a finite number >= 0, got -5",
+        ):
+            rng_cls({(0, 0): 1, (1, 1): -5, (2, 2): 5})
+
+    @pytest.mark.parametrize("rng_cls", [RNGWeightedInteger, RNGWeightedFloat])
+    def test_all_zero_weights_rejected(self, rng_cls):
+        """All-zero weights used to build fine and fail with a plain ValueError at generate()"""
+        with pytest.raises(RNGValueError, match="weights cannot all be zero"):
+            rng_cls({(0, 1): 0, (2, 3): 0.0})
+
+    @pytest.mark.parametrize("rng_cls", [RNGWeightedInteger, RNGWeightedFloat])
+    def test_empty_ranges_rejected(self, rng_cls):
+        """An empty ranges dict is rejected with RNGValueError instead of IndexError"""
+        with pytest.raises(RNGValueError, match=f"{rng_cls.__name__} weights cannot be empty"):
+            rng_cls({})
+
+    @pytest.mark.parametrize("bad", [math.nan, math.inf])
+    def test_non_finite_weight_rejected(self, bad):
+        """NaN or infinite weights are rejected at construction"""
+        with pytest.raises(RNGValueError, match="must be a finite number >= 0"):
+            RNGWeightedInteger({(0, 1): 1, (2, 3): bad})
+
+    def test_some_zero_weights_allowed(self):
+        """A zero weight on some entries is a valid way to exclude them"""
+        RNG.seed(0)
+        int_type = RNGWeightedInteger({(0, 0): 0, (5, 5): 1})
+        float_type = RNGWeightedFloat({(0.0, 0.0): 0, (5.0, 5.0): 2})
+
+        assert {int_type.generate() for _ in range(50)} == {5}
+        assert {float_type.generate() for _ in range(50)} == {5.0}
+
+    def test_enum_negative_weight_rejected(self):
+        """RNGEnum with a negative weight used to never pick members with a positive weight"""
+        with pytest.raises(RNGValueError, match="RNGEnum weight for .*MEDIUM.* got -1.0"):
+            RNGEnum(Shade, weights={Shade.LIGHT: 1.0, Shade.MEDIUM: -1.0, Shade.DARK: 5.0})
+
+    def test_enum_all_zero_weights_rejected(self):
+        """RNGEnum with all-zero weights fails at construction"""
+        with pytest.raises(RNGValueError, match="RNGEnum weights cannot all be zero"):
+            RNGEnum(Shade, weights={Shade.LIGHT: 0, Shade.MEDIUM: 0})
+
+    def test_enum_empty_weights_rejected(self):
+        """weights={} used to fall back to uniform selection over all members"""
+        with pytest.raises(RNGValueError, match="RNGEnum weights cannot be empty"):
+            RNGEnum(Shade, weights={})
+
+    def test_enum_some_zero_weights_allowed(self):
+        """A zero weight on some members is a valid way to exclude them"""
+        RNG.seed(0)
+        rng_enum = RNGEnum(Shade, weights={Shade.LIGHT: 0, Shade.DARK: 1})
+
+        assert {rng_enum.generate() for _ in range(50)} == {Shade.DARK}

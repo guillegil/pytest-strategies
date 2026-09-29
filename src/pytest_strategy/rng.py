@@ -1,9 +1,10 @@
 # rng.py
 
 import builtins
+import math
 import random
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from enum import Enum
 from typing import Callable, TypeVar, cast
 
@@ -299,6 +300,35 @@ def _check_bounds(
     raise RNGValueError(f"{owner} min ({min_val}) must be <= max ({max_val}){note}")
 
 
+def _check_weights(owner: str, weights: Mapping) -> None:
+    """
+    Raise RNGValueError unless weights can be used for weighted selection.
+
+    Individual zero weights are allowed (they exclude an entry), but random.choices
+    silently skews the distribution for negative weights and only rejects an
+    all-zero total when a value is generated.
+
+    Args:
+        owner: Name of the RNG type, used in the error message
+        weights: Mapping of choices to their weights
+
+    Raises:
+        RNGValueError: If weights is empty, contains a negative or non-finite
+            weight, or all weights are zero
+    """
+    if not weights:
+        raise RNGValueError(f"{owner} weights cannot be empty")
+
+    for key, weight in weights.items():
+        if not math.isfinite(weight) or weight < 0:
+            raise RNGValueError(
+                f"{owner} weight for {key!r} must be a finite number >= 0, got {weight!r}"
+            )
+
+    if sum(weights.values()) <= 0:
+        raise RNGValueError(f"{owner} weights cannot all be zero")
+
+
 class RNGType:
     """Base class for all RNG types"""
 
@@ -420,7 +450,8 @@ class RNGEnum(RNGType):
             predicate: Optional function to filter valid enum values
 
         Raises:
-            RNGValueError: If enum_class is not an Enum, or if weights reference non-existent members
+            RNGValueError: If enum_class is not an Enum, if weights reference non-existent members,
+                or if weights are empty, negative, non-finite or all zero
         """
         if not issubclass(enum_class, Enum):
             raise RNGValueError(f"{enum_class} is not an Enum class")
@@ -430,12 +461,13 @@ class RNGEnum(RNGType):
         self.predicate = predicate
 
         # Validate weights if provided
-        if weights:
+        if weights is not None:
             for member in weights:
                 if not isinstance(member, enum_class):
                     raise RNGValueError(
                         f"Weight key {member} is not a member of {enum_class.__name__}"
                     )
+            _check_weights("RNGEnum", weights)
 
     def generate(self) -> Enum:
         """
@@ -574,6 +606,7 @@ class RNGWeightedInteger(RNGType):
     """RNG type for generating weighted integers from multiple ranges"""
 
     def __init__(self, ranges: dict[tuple[int, int], float], predicate: Callable | None = None):
+        _check_weights("RNGWeightedInteger", ranges)
         self.ranges = ranges
         self.predicate = predicate
 
@@ -589,6 +622,7 @@ class RNGWeightedFloat(RNGType):
     """RNG type for generating weighted floats from multiple ranges"""
 
     def __init__(self, ranges: dict[tuple[float, float], float], predicate: Callable | None = None):
+        _check_weights("RNGWeightedFloat", ranges)
         self.ranges = ranges
         self.predicate = predicate
 
