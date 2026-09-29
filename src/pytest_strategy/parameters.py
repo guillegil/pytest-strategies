@@ -59,11 +59,12 @@ class Parameter:
                 }
             )
         """
+        # Copy the caller's containers so add_*/remove_* never mutate shared objects
         self.test_args = list(test_args)
-        self.directed_vectors = directed_vectors or {}
-        self.test_vectors = test_vectors or {}
+        self.directed_vectors = dict(directed_vectors or {})
+        self.test_vectors = dict(test_vectors or {})
         self.always_include_directed = always_include_directed
-        self.vector_constraints = vector_constraints or []
+        self.vector_constraints = list(vector_constraints or [])
         self.max_retries = max_retries
         self.nsamples = nsamples
 
