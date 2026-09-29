@@ -6,8 +6,10 @@ import subprocess
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from pytest_strategy import RNG
-from pytest_strategy._runtime import StrategyRuntime
+from pytest_strategy._runtime import StrategyRuntime, runtime
 from pytest_strategy.plugin import PytestStrategyPlugin
 
 STRATEGY_SOURCE = """
@@ -152,3 +154,50 @@ class TestRuntimeRestoresSeed:
 
         rt.pop()
         assert RNG.get_seed() == 7
+
+
+@pytest.fixture
+def load_session(tmp_path):
+    """A fresh runtime session and a minimal config for _load_strategy_files."""
+    config = SimpleNamespace(
+        option=SimpleNamespace(verbose=0),
+        rootpath=tmp_path,
+        pluginmanager=SimpleNamespace(get_plugin=lambda name: None),
+    )
+    runtime.push(config)
+    try:
+        yield config
+    finally:
+        runtime.pop()
+
+
+def _discovered_modules():
+    return {name for name in sys.modules if name.startswith("pytest_strategies_discovered.")}
+
+
+class TestLoadStrategyFilesOutcomes:
+    """Skipped or failing strategy files are dropped cleanly."""
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "import pytest\npytest.skip('no gpu', allow_module_level=True)\n",
+            "import pytest\npytest.importorskip('pytest_strategies_missing_module')\n",
+            "import pytest\npytest.fail('broken setup')\n",
+            "raise RuntimeError('boom')\n",
+        ],
+        ids=["skip", "importorskip", "fail", "error"],
+    )
+    def test_file_is_not_loaded_and_leaves_no_module_behind(self, tmp_path, load_session, body):
+        strategy_file = tmp_path / "strategies.py"
+        strategy_file.write_text(body + STRATEGY_SOURCE)
+        before = _discovered_modules()
+
+        try:
+            PytestStrategyPlugin()._load_strategy_files([strategy_file], load_session)
+        except pytest.skip.Exception as e:
+            # Escaping, it would mark this test skipped instead of failing it.
+            pytest.fail(f"Skipped escaped _load_strategy_files: {e}")
+
+        assert runtime.discovered_files == []
+        assert _discovered_modules() == before

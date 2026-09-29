@@ -236,3 +236,71 @@ class TestNestedSessionSeed:
         unseeded = pytester.runpytest_inprocess()
         unseeded.assert_outcomes(passed=6)
         assert _seed_from_header(unseeded) == 7
+
+
+class TestSkipInStrategyFile:
+    """pytest.skip / importorskip in a strategy file must not crash the session."""
+
+    def test_importorskip_in_strategy_test_module_skips_only_that_module(self, pytester):
+        """A test module named *_strategies.py is also loaded as a strategy file."""
+        pytester.makepyfile(test_optional_strategies="""
+            import pytest
+
+            missing = pytest.importorskip("pytest_strategies_missing_module")
+
+            from pytest_strategy import Strategy
+
+            @Strategy.register("optional_strat")
+            def optional(nsamples):
+                return ("x",), [(1,)]
+
+            def test_optional():
+                pass
+            """)
+        pytester.makepyfile(test_other="def test_other():\n    pass\n")
+
+        result = pytester.runpytest_subprocess()
+
+        result.stdout.no_fnmatch_line("*INTERNALERROR*")
+        result.assert_outcomes(passed=1, skipped=1)
+
+    def test_module_level_skip_in_strategies_file_is_reported_in_verbose_mode(self, pytester):
+        pytester.makepyfile(strategies="""
+            import pytest
+
+            pytest.skip("no gpu", allow_module_level=True)
+
+            from pytest_strategy import Strategy
+
+            @Strategy.register("gpu_strat")
+            def gpu(nsamples):
+                return ("x",), [(1,)]
+            """)
+        pytester.makepyfile(test_other="def test_other():\n    pass\n")
+
+        quiet = pytester.runpytest_subprocess()
+        verbose = pytester.runpytest_subprocess("-v")
+
+        quiet.assert_outcomes(passed=1)
+        quiet.stdout.no_fnmatch_line("*pytest-strategies: Skipped*")
+        verbose.assert_outcomes(passed=1)
+        verbose.stdout.fnmatch_lines(["pytest-strategies: Skipped *strategies.py: no gpu"])
+
+    def test_module_level_fail_in_strategies_file_does_not_crash(self, pytester):
+        pytester.makepyfile(strategies="""
+            import pytest
+
+            pytest.fail("broken setup")
+
+            from pytest_strategy import Strategy
+
+            @Strategy.register("failing_strat")
+            def failing(nsamples):
+                return ("x",), [(1,)]
+            """)
+        pytester.makepyfile(test_other="def test_other():\n    pass\n")
+
+        result = pytester.runpytest_subprocess()
+
+        result.stdout.no_fnmatch_line("*INTERNALERROR*")
+        result.assert_outcomes(passed=1)

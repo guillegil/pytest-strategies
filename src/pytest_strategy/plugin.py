@@ -239,10 +239,10 @@ class PytestStrategyPlugin:
         """
 
         for file_path in strategy_files:
-            try:
-                # Create a module name from the file path
-                module_name = self._create_module_name(file_path, config)
+            # Create a module name from the file path
+            module_name = self._create_module_name(file_path, config)
 
+            try:
                 # Load the module
                 spec = importlib.util.spec_from_file_location(module_name, file_path)
                 if spec and spec.loader:
@@ -256,10 +256,32 @@ class PytestStrategyPlugin:
                     if config.option.verbose >= 2:
                         print(f"pytest-strategies: Loaded {file_path.relative_to(config.rootpath)}")
 
-            except Exception as e:
+            except pytest.skip.Exception as e:
+                # pytest.skip() / pytest.importorskip() at module level: the file
+                # opted out of this run. pytest's outcome exceptions derive from
+                # BaseException; one escaping this hook aborts the whole session.
+                sys.modules.pop(module_name, None)
+                if config.option.verbose >= 1:
+                    self._write_line(config, f"Skipped {file_path}: {e}")
+
+            except (Exception, pytest.fail.Exception) as e:
                 # Log error but don't fail the test session
+                sys.modules.pop(module_name, None)
                 if config.option.verbose >= 1:
                     print(f"pytest-strategies: Warning - Failed to load {file_path}: {e}")
+
+    def _write_line(self, config: Config, message: str, **markup: bool) -> None:
+        """
+        Write a pytest-strategies message through the terminal reporter.
+
+        Args:
+            config: Pytest config object
+            message: Text to write after the "pytest-strategies: " prefix
+            markup: Terminal markup such as ``yellow=True``
+        """
+        terminalreporter = config.pluginmanager.get_plugin("terminalreporter")
+        if terminalreporter is not None:
+            terminalreporter.write_line(f"pytest-strategies: {message}", **markup)
 
     def _create_module_name(self, file_path: Path, config: Config) -> str:
         """
