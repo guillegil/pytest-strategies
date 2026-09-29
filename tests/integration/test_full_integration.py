@@ -258,8 +258,9 @@ class TestCLIIntegration:
         """Test random_only mode."""
         from pytest_strategy import Parameter, RNGInteger, TestArg
 
+        # Random values start at 1 so a random draw can never look like the directed vector
         param = Parameter(
-            TestArg("value", rng_type=RNGInteger(0, 100)), directed_vectors={"zero": (0,)}
+            TestArg("value", rng_type=RNGInteger(1, 100)), directed_vectors={"zero": (0,)}
         )
 
         samples = param.generate_vectors(10, mode="random_only")
