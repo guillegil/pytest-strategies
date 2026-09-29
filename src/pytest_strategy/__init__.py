@@ -64,6 +64,7 @@ __author__ = "Guillermo Gil"
 __email__ = "guillegil@proton.me"
 
 # Core components
+from ._warnings import PytestStrategiesWarning
 from .parameters import Parameter
 
 # RNG components
@@ -112,6 +113,9 @@ __all__ = [
     "RNGSequence",
     "SequenceLike",
     "Series",
+    # Errors and warnings
+    "RNGValueError",
+    "PytestStrategiesWarning",
 ]
 
 

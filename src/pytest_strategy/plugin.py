@@ -554,7 +554,10 @@ def pytest_addoption(parser) -> None:
         action="store",
         type=_nsamples_type,
         default=None,
-        help="Number of random samples to generate per strategy (or 'auto' for exhaustive)",
+        help=(
+            "Number of random samples to generate per strategy, or 'auto' to enumerate "
+            "Series/RNGSequence combinations (strategies without them use their own count)"
+        ),
     )
 
     group.addoption(

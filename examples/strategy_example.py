@@ -82,7 +82,7 @@ def test_range_validation(min_val, max_val):
 # EXAMPLE 3: Complex Strategy with Multiple Types
 # ============================================================================
 
-@Strategy.register("api_test_strategy")
+@Strategy.register("api_endpoint_strategy")
 def create_api_test_strategy(nsamples):
     """Strategy simulating API endpoint testing."""
     return Parameter(
@@ -97,7 +97,7 @@ def create_api_test_strategy(nsamples):
     )
 
 
-@Strategy.strategy("api_test_strategy")
+@Strategy.strategy("api_endpoint_strategy")
 def test_api_endpoint(user_id, timeout, method):
     """Test API endpoint with various parameters."""
     assert 1 <= user_id <= 10000
