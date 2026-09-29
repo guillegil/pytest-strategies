@@ -18,6 +18,7 @@ import pytest
 from ._dataclass import convert_to_dataclass
 from ._ids import generate_dataclass_ids, generate_test_ids
 from ._introspection import detect_dataclass_param, validate_signature
+from ._runtime import runtime
 from .parameters import Parameter
 from .rng import RNG, SequenceLike
 
@@ -258,10 +259,15 @@ def resolve_and_parametrize(
             # This allows CLI filtering to work gracefully across multiple strategies
             if vector_name or vector_index is not None:
                 samples = []
+                # The plugin reports a filter that no strategy in the run matches
+                runtime.record_vector_filter(name, False, list(param.directed_vectors))
             else:
                 raise ValueError(f"Error generating samples for strategy '{name}': {e}") from e
         except Exception as e:
             raise ValueError(f"Error generating samples for strategy '{name}': {e}") from e
+        else:
+            if vector_name or vector_index is not None:
+                runtime.record_vector_filter(name, True)
 
         # Get argument names from Parameter
         argnames: Sequence[str] = param.arg_names

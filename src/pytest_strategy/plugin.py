@@ -125,10 +125,57 @@ class PytestStrategyPlugin:
 
     # ==== COLLECTION HOOKS ====
 
-    @pytest.hookimpl
-    def pytest_collection_modifyitems(self, config: Config, items: list) -> None:
-        """Modify collected test items if needed."""
-        pass
+    @pytest.hookimpl(trylast=True)
+    def pytest_collection_modifyitems(self, session: Session, config: Config, items: list) -> None:
+        """
+        Fail the run when --vector-name/--vector-index matched no strategy at all.
+
+        A strategy without the requested directed vector gets an empty parameter
+        set, so its tests are skipped. That is intended when another strategy has
+        the vector, but when none has it (a typo, an index out of range) every
+        test would be skipped and the run would still pass.
+        """
+        message = self._vector_filter_error(config)
+        if message is None:
+            return
+        if getattr(config, "workerinput", None) is None:
+            raise pytest.UsageError(message)
+        # A pytest-xdist worker: an exception here kills the worker, and the
+        # controller fails with an INTERNALERROR that hides the message. Run
+        # nothing instead; the controller stops the session with this message.
+        items.clear()
+        session.shouldfail = message
+
+    def _vector_filter_error(self, config: Config) -> str | None:
+        """
+        Describe a --vector-name/--vector-index filter that matched no strategy.
+
+        Args:
+            config: Pytest config object
+
+        Returns:
+            The error message, or None if no filter was given, no Parameter
+            strategy was resolved with it, or at least one of them matched
+        """
+        state = runtime.current
+        if state is None or config.option.list_strategies:
+            return None
+        if not state.vector_filter_resolved or state.vector_filter_matched:
+            return None
+
+        vector_name = config.getoption("vector_name")
+        if vector_name:
+            option = f"--vector-name={vector_name}"
+        else:
+            option = f"--vector-index={config.getoption('vector_index')}"
+        available = "; ".join(
+            f"{name}: {', '.join(names) if names else 'none'}"
+            for name, names in sorted(state.vector_filter_misses.items())
+        )
+        return (
+            f"{option} matched no directed vector in any strategy. "
+            f"Directed vectors by strategy: {available}"
+        )
 
     # ==== REPORTING HOOKS ====
 

@@ -5,6 +5,8 @@ Distinct strategy names are used per test on purpose: the strategy registry is
 process-global and shared by every in-process pytester run.
 """
 
+import pytest
+
 pytest_plugins = ["pytester"]
 
 
@@ -134,9 +136,13 @@ class TestVectorIndexIntegration:
         result.assert_outcomes(passed=3, skipped=1)
 
     def test_index_out_of_range_everywhere(self, pytester):
+        """No strategy has the index: a usage error, not a run that skips every test."""
         pytester.makepyfile(test_fix_idx=_unique_names(INDEX_MODULE, "fix_idx_", pytester))
         result = pytester.runpytest("--vector-index=5")
-        result.assert_outcomes(passed=1, skipped=3)
+        assert result.ret == pytest.ExitCode.USAGE_ERROR
+        result.stderr.fnmatch_lines(
+            ["ERROR: --vector-index=5 matched no directed vector in any strategy.*"]
+        )
 
 
 class TestSingleArgumentIdsIntegration:

@@ -41,6 +41,12 @@ class SessionState:
         self.load_errors: list[tuple[Path, str]] = []
         # Strategy files that called pytest.skip()/importorskip(), as (path, reason).
         self.skipped_files: list[tuple[Path, str]] = []
+        # --vector-name/--vector-index bookkeeping: whether a Parameter strategy
+        # was resolved with the filter, whether any of them had the vector, and
+        # the directed vector names of those that did not (strategy -> names).
+        self.vector_filter_resolved: bool = False
+        self.vector_filter_matched: bool = False
+        self.vector_filter_misses: dict[str, list[str]] = {}
         # Process-global state in effect when this session began, restored on pop:
         # a nested session's --rng-seed, random draws and strategy registrations
         # must not leak into the enclosing session or later sibling sessions.
@@ -138,6 +144,26 @@ class StrategyRuntime:
         """Record a strategy file that skipped itself (no-op if no session)."""
         if self.current is not None:
             self.current.skipped_files.append((path, reason))
+
+    def record_vector_filter(
+        self, strategy: str, matched: bool, vector_names: list[str] | None = None
+    ) -> None:
+        """
+        Record whether a strategy resolved under --vector-name/--vector-index had
+        the requested directed vector (no-op if no session).
+
+        Args:
+            strategy: Name of the resolved strategy
+            matched: True if the strategy has the requested vector
+            vector_names: The strategy's directed vector names, for the error
+                reported when no strategy matched
+        """
+        if self.current is not None:
+            self.current.vector_filter_resolved = True
+            if matched:
+                self.current.vector_filter_matched = True
+            else:
+                self.current.vector_filter_misses[strategy] = list(vector_names or [])
 
 
 # Process-wide stack; each session pushes on configure and pops on unconfigure.

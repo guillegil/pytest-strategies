@@ -6,6 +6,7 @@ names are unique to this module, so they do not clash with other tests.
 """
 
 import random
+import re
 
 import pytest
 
@@ -296,3 +297,89 @@ class TestListStrategiesUnderXdist:
         result.stdout.no_fnmatch_line("*INTERNALERROR*")
         result.stdout.fnmatch_lines(["*Found 1 registered strategies:*", "*r2_ints*"])
         assert result.ret == pytest.ExitCode.OK
+
+
+VECTOR_STRATEGIES = """
+from pytest_strategy import Strategy, Parameter, TestArg, RNGInteger
+
+@Strategy.register("r2_ages")
+def ages(nsamples):
+    return Parameter(
+        TestArg("x", rng_type=RNGInteger(0, 9)),
+        directed_vectors={"newborn": (0,), "old": (9,)},
+    )
+
+@Strategy.register("r2_other")
+def other(nsamples):
+    return Parameter(TestArg("x", rng_type=RNGInteger(0, 9)), directed_vectors={"other": (1,)})
+"""
+
+VECTOR_TESTS = """
+from pytest_strategy import Strategy
+
+@Strategy.strategy("r2_ages")
+def test_ages(x):
+    pass
+
+@Strategy.strategy("r2_other")
+def test_other(x):
+    pass
+
+def test_plain():
+    pass
+"""
+
+NO_MATCH = (
+    "matched no directed vector in any strategy. "
+    "Directed vectors by strategy: r2_ages: newborn, old; r2_other: other"
+)
+
+
+class TestVectorFilterMatchingNothing:
+    """--vector-name/--vector-index that no strategy has is an error, not an all-skip run."""
+
+    @pytest.fixture(autouse=True)
+    def _project(self, pytester):
+        pytester.makepyfile(strategies=VECTOR_STRATEGIES)
+        pytester.makepyfile(test_vectors=VECTOR_TESTS)
+
+    @pytest.mark.parametrize("option", ["--vector-name=newbron", "--vector-index=99"])
+    def test_filter_matching_no_strategy_is_a_usage_error(self, pytester, option):
+        result = pytester.runpytest_subprocess(option)
+
+        assert result.ret == pytest.ExitCode.USAGE_ERROR
+        result.stderr.fnmatch_lines([f"ERROR: {option} {NO_MATCH}"])
+
+    def test_filter_matching_some_strategies_skips_the_others(self, pytester):
+        result = pytester.runpytest_subprocess("--vector-name=newborn")
+
+        assert result.ret == pytest.ExitCode.OK
+        result.assert_outcomes(passed=2, skipped=1)
+
+    def test_filter_without_parameter_strategies_is_not_checked(self, pytester):
+        pytester.makepyfile(strategies="""
+            from pytest_strategy import Strategy
+
+            @Strategy.register("r2_ages")
+            def ages(nsamples):
+                return ("x",), [(1,)]
+
+            @Strategy.register("r2_other")
+            def other(nsamples):
+                return ("x",), [(2,)]
+            """)
+
+        result = pytester.runpytest_subprocess("--vector-name=newbron")
+
+        result.assert_outcomes(passed=3)
+
+    def test_filter_matching_no_strategy_under_xdist(self, pytester):
+        pytest.importorskip("xdist")
+
+        result = pytester.runpytest_subprocess("--vector-name=newbron", "-n", "2")
+
+        output = result.stdout.str()
+        assert result.ret != pytest.ExitCode.OK
+        assert "INTERNALERROR" not in output
+        assert f"--vector-name=newbron {NO_MATCH}" in re.sub(r"\s+", " ", output)
+        result.assert_outcomes()
