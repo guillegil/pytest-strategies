@@ -76,3 +76,41 @@ class TestExhaustiveRandomConstraint:
         for seed in range(6):
             result = pytester.runpytest_inprocess("--nsamples=auto", f"--rng-seed={seed}")
             result.assert_outcomes(passed=3)
+
+
+class TestValidatorOnSeriesValues:
+    """An invalid Series value is reported at collection instead of reaching the test."""
+
+    def _make_ports(self, pytester, prefix):
+        pytester.makepyfile(**{f"{prefix}_strategies": f"""
+            from pytest_strategy import Strategy, Parameter, TestArg, Series
+
+            @Strategy.register("{prefix}_ports")
+            def factory(nsamples):
+                return Parameter(
+                    TestArg(
+                        "port",
+                        rng_type=Series([80, 443, -1]),
+                        validator=lambda p: 0 < p < 65536,
+                    ),
+                )
+            """})
+        pytester.makepyfile(**{f"test_{prefix}": f"""
+            from pytest_strategy import Strategy
+
+            @Strategy.strategy("{prefix}_ports")
+            def test_port(port):
+                assert 0 < port < 65536
+            """})
+
+    def test_finite_mode_reports_invalid_value(self, pytester):
+        self._make_ports(pytester, "fixval_a")
+        result = pytester.runpytest_inprocess()
+        result.assert_outcomes(errors=1)
+        result.stdout.fnmatch_lines(["*Value -1 failed validation for argument 'port'*"])
+
+    def test_auto_mode_reports_invalid_value(self, pytester):
+        self._make_ports(pytester, "fixval_b")
+        result = pytester.runpytest_inprocess("--nsamples=auto")
+        result.assert_outcomes(errors=1)
+        result.stdout.fnmatch_lines(["*Value -1 failed validation for argument 'port'*"])

@@ -365,8 +365,9 @@ class Parameter:
                     if series_rows == n:
                         break
                     vec: list = [None] * len(self.test_args)
+                    # Series values skip arg.generate(), so apply the arg's validator here
                     for pos, idx in enumerate(series_indices):
-                        vec[idx] = combo[pos]
+                        vec[idx] = self.test_args[idx]._validate(combo[pos])
                     # Try fresh random values for the non-Series positions
                     for _ in range(attempts):
                         for i in random_indices:
@@ -404,6 +405,7 @@ class Parameter:
 
         Raises:
             ValueError: If no sequence arguments are present
+            ValueError: If a sequence value fails its argument's validator
         """
         # Identify sequence args and their indices
         sequence_indices = []
@@ -434,9 +436,9 @@ class Parameter:
             # Create a mutable vector (list) to fill in
             vector = [None] * len(self.test_args)
 
-            # Fill in sequence values
+            # Fill in sequence values (they skip arg.generate(), so validate them here)
             for idx, value in zip(sequence_indices, combination):
-                vector[idx] = value
+                vector[idx] = self.test_args[idx]._validate(value)
 
             # Fill in non-sequence values with random generation, redrawing them if the
             # constraints reject the vector. A combination that still fails (e.g. its

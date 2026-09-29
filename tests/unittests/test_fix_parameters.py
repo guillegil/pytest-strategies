@@ -8,7 +8,7 @@ import pytest
 
 from pytest_strategy import RNGInteger, Series
 from pytest_strategy.parameters import Parameter
-from pytest_strategy.rng import RNG
+from pytest_strategy.rng import RNG, RNGSequence
 from pytest_strategy.test_args import TestArg
 
 
@@ -276,3 +276,46 @@ class TestExhaustiveRetriesRandomPositions:
         param = Parameter(TestArg("s", rng_type=Series([1, 2, 3])), vector_constraints=[odd])
         assert param.generate_exhaustive() == [(1,), (3,)]
         assert calls == [(1,), (2,), (3,)]
+
+
+class TestValidatorAppliedToSequenceValues:
+    """A TestArg validator also checks Series/sequence values placed by Parameter."""
+
+    @staticmethod
+    def _positive(values, rng_cls=Series):
+        return Parameter(TestArg("x", rng_type=rng_cls(values), validator=lambda x: x > 0))
+
+    def test_series_finite_rejects_invalid_value(self):
+        with pytest.raises(ValueError, match="Value -1 failed validation for argument 'x'"):
+            self._positive([1, -1]).generate_vectors(4, mode="random_only")
+
+    def test_series_exhaustive_rejects_invalid_value(self):
+        with pytest.raises(ValueError, match="Value -1 failed validation for argument 'x'"):
+            self._positive([1, -1]).generate_exhaustive()
+
+    def test_rngsequence_exhaustive_rejects_invalid_value(self):
+        """Matches finite mode, where RNGSequence values already go through generate()."""
+        with pytest.raises(ValueError, match="Value -1 failed validation for argument 'x'"):
+            self._positive([1, -1], rng_cls=RNGSequence).generate_exhaustive()
+
+    def test_valid_values_pass_through(self):
+        param = self._positive([1, 2])
+        assert param.generate_vectors(3, mode="random_only") == [(1,), (2,), (1,)]
+        assert param.generate_exhaustive() == [(1,), (2,)]
+
+    def test_validator_sees_each_series_value(self):
+        seen = []
+
+        def record(value):
+            seen.append(value)
+            return True
+
+        param = Parameter(
+            TestArg("a", rng_type=Series([1, 2]), validator=record),
+            TestArg("b", rng_type=Series(["x"])),
+        )
+        param.generate_vectors(3, mode="random_only")
+        assert seen == [1, 2, 1]
+        seen.clear()
+        param.generate_exhaustive()
+        assert seen == [1, 2]
