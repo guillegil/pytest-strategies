@@ -4,9 +4,9 @@ import builtins
 import math
 import random
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from enum import Enum
-from typing import Callable, TypeVar, cast
+from typing import TypeVar, cast
 
 T = TypeVar("T")
 

@@ -2,7 +2,8 @@
 
 import itertools
 import math
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from .rng import SequenceLike, Series
 from .test_args import TestArg
