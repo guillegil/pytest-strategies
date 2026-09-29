@@ -15,7 +15,7 @@ from ._dataclass import convert_to_dataclass
 from ._ids import generate_dataclass_ids, generate_test_ids
 from ._introspection import detect_dataclass_param, validate_signature
 from .parameters import Parameter
-from .rng import RNG
+from .rng import RNG, SequenceLike
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -90,10 +90,30 @@ def resolve_and_parametrize(
         else:
             effective_nsamples = 10
 
+        # "auto" enumerates the Series/RNGSequence args. A strategy without any has
+        # nothing to enumerate, so it falls back to the finite count instead of failing.
+        if effective_nsamples == "auto" and not any(
+            isinstance(arg.rng_type, SequenceLike) for arg in param.test_args
+        ):
+            effective_nsamples = param.nsamples if param.nsamples is not None else 10
+
         # Generate samples using Parameter's generate_vectors with CLI options
         try:
             if effective_nsamples == "auto":
-                samples = param.generate_exhaustive()
+                # "auto" replaces only the random samples: CLI filters, vector modes
+                # and directed vectors apply exactly as they do for a finite count.
+                samples = param.generate_vectors(
+                    n=0,
+                    mode=vector_mode,
+                    filter_by_name=vector_name,
+                    filter_by_index=vector_index,
+                )
+                if (
+                    not vector_name
+                    and vector_index is None
+                    and vector_mode not in ("test", "directed_only")
+                ):
+                    samples.extend(param.generate_exhaustive())
             else:
                 assert isinstance(effective_nsamples, int)
                 samples = param.generate_vectors(
