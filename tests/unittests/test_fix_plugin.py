@@ -1,5 +1,6 @@
-"""Unit tests for plugin fixes: discovery, seeding, xdist and per-test streams."""
+"""Unit tests for plugin fixes: discovery, seeding, xdist, strategy file loading and options."""
 
+import argparse
 import os
 import random
 import subprocess
@@ -272,3 +273,26 @@ class TestLoadErrorsAreReported:
         rt.pop()
         assert rt.load_errors == []
         rt.pop()
+
+
+class TestNsamplesOptionType:
+    """--nsamples accepts 'auto' (any case) or an integer >= 0, nothing else."""
+
+    @staticmethod
+    def _parse(value):
+        from pytest_strategy.plugin import _nsamples_type
+
+        return _nsamples_type(value)
+
+    @pytest.mark.parametrize(
+        "value, expected",
+        [("auto", "auto"), ("AUTO", "auto"), (" Auto ", "auto"), ("0", 0), ("7", 7)],
+    )
+    def test_valid_values_are_parsed(self, value, expected):
+        assert self._parse(value) == expected
+
+    @pytest.mark.parametrize("value", ["-1", "abc", "2.5", ""])
+    def test_invalid_values_raise_argument_type_error(self, value):
+        with pytest.raises(argparse.ArgumentTypeError) as excinfo:
+            self._parse(value)
+        assert str(excinfo.value) == f"expected an integer >= 0 or 'auto', got {value!r}"

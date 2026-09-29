@@ -2,6 +2,7 @@
 Pytest plugin for pytest-strategies with auto-discovery of strategy definitions.
 """
 
+import argparse
 import importlib.util
 import itertools
 import sys
@@ -317,6 +318,34 @@ class PytestStrategyPlugin:
 _plugin_instance = PytestStrategyPlugin()
 
 
+def _nsamples_type(value: str) -> int | str:
+    """
+    Parse the --nsamples value: "auto" (any case) or an integer >= 0.
+
+    Args:
+        value: Raw command-line value
+
+    Returns:
+        "auto" or the number of samples
+
+    Raises:
+        argparse.ArgumentTypeError: For any other value, so pytest reports a
+            usage error up front instead of a collection error in every module
+            that uses a strategy (or silently skipping every test for n < 0)
+    """
+    if value.strip().lower() == "auto":
+        return "auto"
+
+    error = f"expected an integer >= 0 or 'auto', got {value!r}"
+    try:
+        nsamples = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(error) from None
+    if nsamples < 0:
+        raise argparse.ArgumentTypeError(error)
+    return nsamples
+
+
 def pytest_addoption(parser) -> None:
     """Add command-line options for the plugin."""
     group = parser.getgroup("pytest-strategies", "Pytest Strategies Plugin Options")
@@ -331,7 +360,7 @@ def pytest_addoption(parser) -> None:
     group.addoption(
         "--nsamples",
         action="store",
-        type=str,
+        type=_nsamples_type,
         default=None,
         help="Number of random samples to generate per strategy (or 'auto' for exhaustive)",
     )

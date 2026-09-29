@@ -356,3 +356,46 @@ class TestLoadErrorsAreVisible:
             ["pytest-strategies: Warning - Failed to load *strategies.py: SyntaxError: *"]
         )
         result.assert_outcomes(passed=1)
+
+
+class TestNsamplesValidation:
+    """Invalid --nsamples values are usage errors, reported before collection."""
+
+    @pytest.mark.parametrize("value", ["abc", "-1", "2.5"])
+    def test_invalid_value_is_a_usage_error(self, pytester, value):
+        pytester.makepyfile(strategies=STRATEGIES)
+        pytester.makepyfile(test_ns=TESTS)
+
+        result = pytester.runpytest_subprocess(f"--nsamples={value}")
+
+        assert result.ret == pytest.ExitCode.USAGE_ERROR
+        result.stderr.fnmatch_lines(
+            [f"*argument --nsamples: expected an integer >= 0 or 'auto', got '{value}'"]
+        )
+
+    def test_invalid_value_is_rejected_without_strategy_tests(self, pytester):
+        pytester.makepyfile(test_plain="def test_plain():\n    pass\n")
+
+        result = pytester.runpytest_subprocess("--nsamples=abc")
+
+        assert result.ret == pytest.ExitCode.USAGE_ERROR
+
+    def test_auto_is_case_insensitive(self, pytester):
+        pytester.makepyfile(series_strategies="""
+            from pytest_strategy import Strategy, Parameter, TestArg, Series
+
+            @Strategy.register("series_strat")
+            def series(nsamples):
+                return Parameter(TestArg("x", rng_type=Series([1, 2, 3])))
+            """)
+        pytester.makepyfile(test_series="""
+            from pytest_strategy import Strategy
+
+            @Strategy.strategy("series_strat")
+            def test_series(x):
+                assert x in (1, 2, 3)
+            """)
+
+        result = pytester.runpytest_subprocess("--nsamples=AUTO")
+
+        result.assert_outcomes(passed=3)
