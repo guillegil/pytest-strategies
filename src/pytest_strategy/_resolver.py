@@ -128,7 +128,7 @@ def resolve_and_parametrize(
     factory = registry[name]
 
     # Refresh the random number generator seed
-    RNG.refresh_seed()
+    RNG.refresh_seed(key=f"{name}:{test_fn.__module__}.{test_fn.__qualname__}")
 
     # Call factory function exactly once, the way its signature accepts nsamples
     result = call_factory(name, factory, factory_nsamples)

@@ -148,3 +148,70 @@ class TestXdistSeedSharing:
         result = pytester.runpytest_subprocess("-p", "no:xdist")
 
         result.assert_outcomes(passed=6)
+
+
+class TestPerTestRandomStreams:
+    """Each (strategy, test) pair draws from its own reproducible stream."""
+
+    TWIN_STRATEGIES = """
+        from pytest_strategy import Strategy, Parameter, TestArg, RNGInteger
+
+        @Strategy.register("twin_a")
+        def twin_a(nsamples):
+            return Parameter(TestArg("x", rng_type=RNGInteger(0, 10**9)), nsamples=3)
+
+        @Strategy.register("twin_b")
+        def twin_b(nsamples):
+            return Parameter(TestArg("x", rng_type=RNGInteger(0, 10**9)), nsamples=3)
+        """
+
+    @staticmethod
+    def _ids_by_test(result):
+        """Map each test name to the list of IDs it was collected with."""
+        ids = {}
+        for test_id in _test_ids(result):
+            ids.setdefault(test_id.split("[")[0], []).append(test_id.split("[", 1)[1])
+        return ids
+
+    @staticmethod
+    def _test_module(*names):
+        """Build a test module whose tests use the strategies in the given order."""
+        blocks = [
+            f"@Strategy.strategy({strategy!r})\ndef {test}(x):\n    pass\n"
+            for test, strategy in names
+        ]
+        return "from pytest_strategy import Strategy\n\n" + "\n".join(blocks)
+
+    def test_tests_and_strategies_get_different_values(self, pytester):
+        pytester.makepyfile(twin_strategies=self.TWIN_STRATEGIES)
+        pytester.makepyfile(
+            test_twins=self._test_module(
+                ("test_one", "twin_a"), ("test_two", "twin_a"), ("test_three", "twin_b")
+            )
+        )
+
+        ids = self._ids_by_test(pytester.runpytest_subprocess("--collect-only", "--rng-seed=42"))
+
+        # Same strategy, different tests: different values.
+        assert ids["test_one"] != ids["test_two"]
+        # Identical strategy definitions under different names: different values.
+        assert ids["test_one"] != ids["test_three"]
+
+    def test_values_do_not_depend_on_collection_order(self, pytester):
+        pytester.makepyfile(twin_strategies=self.TWIN_STRATEGIES)
+        pytester.makepyfile(
+            test_twins=self._test_module(("test_one", "twin_a"), ("test_two", "twin_b"))
+        )
+        forward = self._ids_by_test(
+            pytester.runpytest_subprocess("--collect-only", "--rng-seed=42")
+        )
+
+        pytester.makepyfile(
+            test_twins=self._test_module(("test_two", "twin_b"), ("test_one", "twin_a"))
+        )
+        backward = self._ids_by_test(
+            pytester.runpytest_subprocess("--collect-only", "--rng-seed=42")
+        )
+
+        assert len(forward["test_one"]) == 3
+        assert forward == backward

@@ -45,9 +45,21 @@ class RNG:
         return RNG._seed
 
     @staticmethod
-    def refresh_seed():
-        """Refresh the random state with the current seed"""
-        random.seed(RNG._seed)
+    def refresh_seed(key: str | None = None):
+        """Refresh the random state with the current seed.
+
+        Args:
+            key: Optional stream name. With a key, the state is seeded from the
+                seed and the key together, so each key gets its own stream that
+                is the same on every run with this seed and does not depend on
+                the order in which keys are used.
+        """
+        if key is None:
+            random.seed(RNG._seed)
+        else:
+            # A str seed is hashed with SHA-512, so it is stable across processes
+            # (unlike hash(), which is salted per process).
+            random.seed(f"{RNG._seed}:{key}")
 
     @staticmethod
     def set_max_retries(retries: int):
