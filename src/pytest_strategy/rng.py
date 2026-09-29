@@ -500,21 +500,24 @@ class RNGEnum(RNGType):
             weights: Optional dictionary mapping enum members to their weights.
                     If provided, only weighted members will be selected.
                     Weights don't need to sum to 1.0 (they'll be normalized).
-            predicate: Optional function to filter valid enum values. It is applied once
-                    here to every candidate member, and values are then drawn only
-                    from the members it accepts.
+            predicate: Optional function to filter valid enum values. Each draw picks
+                    only among the candidate members it accepts, using the current
+                    predicate and weights. It is also checked here against every
+                    candidate member, so an unsatisfiable predicate fails at once.
 
         Raises:
-            RNGValueError: If enum_class is not an Enum class or has no members, if weights
-                reference non-existent members, if weights are empty, negative,
-                non-finite or all zero, or if no member (with a positive weight)
-                satisfies the predicate
+            RNGValueError: If enum_class is not an Enum class, if it has no members to
+                draw from and no weights are given, if weights reference non-existent
+                members, if weights are empty, negative, non-finite or all zero, or if
+                no member (with a positive weight) satisfies the predicate
         """
         # isinstance guard first: issubclass raises TypeError for non-classes (e.g. a member)
         if not (isinstance(enum_class, type) and issubclass(enum_class, Enum)):
             raise RNGValueError(f"{enum_class!r} is not an Enum class")
-        if len(enum_class) == 0:
-            raise RNGValueError(f"{enum_class.__name__} has no members")
+        # Uniform selection draws from iteration, which for a Flag skips zero-valued and
+        # multi-bit members. Weighted selection draws from the weights keys instead.
+        if weights is None and len(enum_class) == 0:
+            raise RNGValueError(f"{enum_class.__name__} has no members to choose from")
 
         self.enum_class = enum_class
         self.weights = weights
@@ -529,23 +532,42 @@ class RNGEnum(RNGType):
                     )
             _check_weights("RNGEnum", weights)
 
-        # With a predicate, filter the (finite) candidate members once, keeping their
-        # weights, so generation never fails while a valid member exists
-        self._valid_members: list[Enum] = []
-        self._valid_weights: list[float] = []
+        # Fail now, not at the first draw, when no member satisfies the predicate
         if predicate:
-            candidates = weights if weights is not None else dict.fromkeys(enum_class, 1.0)
-            for member, weight in candidates.items():
-                if predicate(member):
-                    self._valid_members.append(member)
-                    self._valid_weights.append(weight)
+            self._filter_by_predicate(predicate)
 
-            if sum(self._valid_weights) <= 0:
-                which = "weighted member with a positive weight" if weights else "member"
-                raise RNGValueError(
-                    f"No valid value found: no {which} of {enum_class.__name__} "
-                    "satisfies the predicate"
-                )
+    def _filter_by_predicate(
+        self, predicate: Callable[[Enum], bool]
+    ) -> tuple[list[Enum], list[float]]:
+        """
+        Return the candidate members the predicate accepts, with their weights.
+
+        Filtering the finite set of candidates (instead of retrying draws) means a draw
+        never fails while a valid member exists. The candidates come from the current
+        weights on every call, so reassigning predicate or weights takes effect.
+
+        Args:
+            predicate: The predicate to filter the candidate members with
+
+        Raises:
+            RNGValueError: If no candidate member with a positive weight is accepted
+        """
+        # Same candidates generate() draws from: the weighted members, else all members
+        candidates = self.weights if self.weights else dict.fromkeys(self.enum_class, 1.0)
+        members: list[Enum] = []
+        weights: list[float] = []
+        for member, weight in candidates.items():
+            if predicate(member):
+                members.append(member)
+                weights.append(weight)
+
+        if sum(weights) <= 0:
+            which = "weighted member with a positive weight" if self.weights else "member"
+            raise RNGValueError(
+                f"No valid value found: no {which} of {self.enum_class.__name__} "
+                "satisfies the predicate"
+            )
+        return members, weights
 
     def generate(self) -> Enum:
         """
@@ -557,8 +579,9 @@ class RNGEnum(RNGType):
         if self.weights:
             # Weighted selection
             if self.predicate:
-                # With predicate: choose among the members filtered in __init__
-                return random.choices(self._valid_members, weights=self._valid_weights, k=1)[0]
+                # With predicate: choose among the weighted members it accepts
+                members, weights = self._filter_by_predicate(self.predicate)
+                return random.choices(members, weights=weights, k=1)[0]
 
             # Without predicate: direct selection
             members = list(self.weights.keys())
@@ -567,8 +590,8 @@ class RNGEnum(RNGType):
         else:
             # Uniform selection from all members
             if self.predicate:
-                # With predicate: choose among the members filtered in __init__
-                return random.choice(self._valid_members)
+                # With predicate: choose among the members it accepts
+                return random.choice(self._filter_by_predicate(self.predicate)[0])
 
             # Without predicate: direct selection
             return random.choice(list(self.enum_class))

@@ -1,15 +1,18 @@
 """
-Regression tests for Parameter review fixes.
+Regression tests for Parameter and RNGEnum review fixes.
 
 Covers:
 - Parameter(nsamples="auto") accepted again (factories pass --nsamples=auto through)
 - generate_vectors rejecting a non-int n instead of looping forever on Series args
 - Finite-mode Series warning when a combination is skipped after random redraws
 - generate_exhaustive raising when the constraints reject every combination
+- RNGEnum accepting a Flag whose iteration is empty when weights name members
+- RNGEnum reading predicate and weights when drawing, not only at construction
 """
 
 import random
 import warnings
+from enum import Enum, Flag
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,14 +20,31 @@ import pytest
 from pytest_strategy import (
     RNG,
     Parameter,
+    RNGEnum,
     RNGInteger,
     RNGSequence,
+    RNGValueError,
     Series,
     Strategy,
     TestArg,
 )
 from pytest_strategy._resolver import resolve_and_parametrize
 from pytest_strategy.strategy import PytestStrategiesWarning
+
+
+class Color(Enum):
+    """Small enum used by the RNGEnum tests"""
+
+    RED = 1
+    GREEN = 2
+    BLUE = 3
+
+
+class Mode(Flag):
+    """A Flag whose members are all zero-valued or multi-bit"""
+
+    NONE = 0
+    BOTH = 3
 
 
 @pytest.fixture(autouse=True)
@@ -274,3 +294,88 @@ class TestExhaustiveUnsatisfiableRaises:
             vector_constraints=[lambda v: v[0] == 3],
         )
         assert param.generate_exhaustive() == [(3,)]
+
+
+class TestRNGEnumFlagWithoutCanonicalMembers:
+    """Iterating such a Flag yields nothing on 3.11+, but weights can still name members."""
+
+    def test_weights_naming_members_accepted(self):
+        RNG.seed(0)
+        rng_enum = RNGEnum(Mode, weights={Mode.BOTH: 1, Mode.NONE: 1})
+        assert {rng_enum.generate() for _ in range(50)} == {Mode.BOTH, Mode.NONE}
+
+    def test_weights_with_predicate_accepted(self):
+        RNG.seed(0)
+        rng_enum = RNGEnum(Mode, weights={Mode.BOTH: 1, Mode.NONE: 1}, predicate=bool)
+        assert {rng_enum.generate() for _ in range(50)} == {Mode.BOTH}
+
+    @pytest.mark.skipif(len(Mode) != 0, reason="iterating a Flag yields every member before 3.11")
+    @pytest.mark.parametrize("predicate", [None, bool])
+    def test_without_weights_rejected(self, predicate):
+        with pytest.raises(RNGValueError, match="Mode has no members to choose from"):
+            RNGEnum(Mode, predicate=predicate)
+
+    def test_empty_enum_still_rejected_with_weights(self):
+        class Empty(Enum):
+            pass
+
+        with pytest.raises(RNGValueError, match="RNGEnum weights cannot be empty"):
+            RNGEnum(Empty, weights={})
+
+
+class TestRNGEnumReadsPredicateAndWeightsLive:
+    """predicate/weights set after construction used to crash generate() or be ignored."""
+
+    def test_predicate_set_after_construction(self):
+        """This used to raise IndexError: the members were only filtered in __init__."""
+        RNG.seed(0)
+        rng_enum = RNGEnum(Color)
+        rng_enum.predicate = lambda c: c is not Color.RED
+        assert {rng_enum.generate() for _ in range(100)} == {Color.GREEN, Color.BLUE}
+
+    def test_predicate_replaced_after_construction(self):
+        RNG.seed(0)
+        rng_enum = RNGEnum(Color, predicate=lambda c: c is not Color.RED)
+        rng_enum.predicate = lambda c: c is Color.RED
+        assert {rng_enum.generate() for _ in range(50)} == {Color.RED}
+
+    def test_weights_replaced_after_construction(self):
+        RNG.seed(0)
+        rng_enum = RNGEnum(Color, predicate=lambda c: c is not Color.RED)
+        rng_enum.weights = {Color.BLUE: 1.0}
+        assert {rng_enum.generate() for _ in range(100)} == {Color.BLUE}
+
+    def test_weights_changed_in_place(self):
+        RNG.seed(0)
+        weights = {Color.RED: 1.0, Color.GREEN: 1.0, Color.BLUE: 1.0}
+        rng_enum = RNGEnum(Color, weights=weights, predicate=lambda c: c is not Color.RED)
+        weights[Color.GREEN] = 0.0
+        assert {rng_enum.generate() for _ in range(100)} == {Color.BLUE}
+
+    def test_unsatisfiable_predicate_set_later_raises_rng_error(self):
+        rng_enum = RNGEnum(Color)
+        rng_enum.predicate = lambda c: False
+        with pytest.raises(RNGValueError, match="No valid value found: no member of Color"):
+            rng_enum.generate()
+
+    def test_unsatisfiable_predicate_still_raises_at_construction(self):
+        with pytest.raises(RNGValueError, match="No valid value found"):
+            RNGEnum(Color, predicate=lambda c: False)
+
+    @pytest.mark.parametrize("seed", [0, 42, 2024])
+    def test_stream_unchanged_with_predicate(self, seed):
+        """Each draw is still one random call over the accepted members, in member order."""
+        weights = {Color.RED: 0.5, Color.GREEN: 0.3, Color.BLUE: 0.2}
+        accepted = [Color.GREEN, Color.BLUE]
+
+        random.seed(seed)
+        expected_uniform = [random.choice(accepted) for _ in range(50)]
+        expected_weighted = [
+            random.choices(accepted, weights=[0.3, 0.2], k=1)[0] for _ in range(50)
+        ]
+
+        RNG.seed(seed)
+        uniform = RNGEnum(Color, predicate=lambda c: c is not Color.RED)
+        weighted = RNGEnum(Color, weights=weights, predicate=lambda c: c is not Color.RED)
+        assert [uniform.generate() for _ in range(50)] == expected_uniform
+        assert [weighted.generate() for _ in range(50)] == expected_weighted
