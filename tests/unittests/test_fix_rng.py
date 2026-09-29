@@ -6,6 +6,7 @@ Tests cover:
 - RNGInteger/RNGFloat rejecting min > max at construction
 - Weights of weighted types and RNGEnum validated at construction
 - RNGEnum rejecting non-Enum arguments and member-less Enums with RNGValueError
+- RNGEnum filtering members by the predicate up front instead of retrying draws
 """
 
 import math
@@ -250,3 +251,79 @@ class TestRNGEnumClassValidation:
 
         with pytest.raises(RNGValueError, match="Empty has no members"):
             RNGEnum(Empty)
+
+
+class TestRNGEnumPredicateFiltersMembers:
+    """RNGEnum applies the predicate to its finite set of members instead of retrying draws"""
+
+    def test_selective_predicate_on_large_enum(self):
+        """One valid member out of 60 used to fail about 19% of calls after 100 retries"""
+        big = Enum("Big", [f"M{i}" for i in range(60)])
+        RNG.seed(0)
+        rng_enum = RNGEnum(big, predicate=lambda m: m is big.M7)
+
+        assert {rng_enum.generate() for _ in range(1000)} == {big.M7}
+
+    def test_selective_predicate_on_low_weight_members(self):
+        """Excluding the member that holds 99% of the weight used to fail about 37% of calls"""
+        RNG.seed(0)
+        rng_enum = RNGEnum(
+            Shade,
+            weights={Shade.LIGHT: 0.99, Shade.MEDIUM: 0.005, Shade.DARK: 0.005},
+            predicate=lambda s: s is not Shade.LIGHT,
+        )
+
+        values = [rng_enum.generate() for _ in range(500)]
+
+        assert set(values) == {Shade.MEDIUM, Shade.DARK}
+
+    def test_filtered_members_keep_relative_weights(self):
+        """The result matches rejection sampling: weights renormalized over accepted members"""
+        RNG.seed(3)
+        rng_enum = RNGEnum(
+            Shade,
+            weights={Shade.LIGHT: 0.6, Shade.MEDIUM: 0.3, Shade.DARK: 0.1},
+            predicate=lambda s: s is not Shade.DARK,
+        )
+
+        values = [rng_enum.generate() for _ in range(3000)]
+        light_share = values.count(Shade.LIGHT) / len(values)
+
+        assert Shade.DARK not in values
+        assert 0.62 < light_share < 0.72  # expected 2/3
+
+    def test_impossible_predicate_raises_at_construction(self):
+        """No member satisfies the predicate: fail when built, not after 100 draws"""
+        with pytest.raises(RNGValueError, match="No valid value found: no member of Shade"):
+            RNGEnum(Shade, predicate=lambda s: False)
+
+    def test_predicate_accepting_only_unweighted_members_raises(self):
+        """Only weighted members are candidates, so accepting an unweighted one is not enough"""
+        with pytest.raises(RNGValueError, match="No valid value found"):
+            RNGEnum(Shade, weights={Shade.LIGHT: 1.0}, predicate=lambda s: s is Shade.DARK)
+
+    def test_predicate_accepting_only_zero_weight_members_raises(self):
+        """Accepted members whose weights are all zero can never be drawn"""
+        with pytest.raises(RNGValueError, match="with a positive weight"):
+            RNGEnum(
+                Shade,
+                weights={Shade.LIGHT: 1.0, Shade.MEDIUM: 0.0},
+                predicate=lambda s: s is Shade.MEDIUM,
+            )
+
+    @pytest.mark.parametrize("seed", [0, 42, 2024])
+    def test_stream_unchanged_without_predicate(self, seed):
+        """Without a predicate the seeded sequence is the same single random call per draw"""
+        weights = {Shade.LIGHT: 0.5, Shade.DARK: 0.3, Shade.MEDIUM: 0.2}
+
+        random.seed(seed)
+        expected_uniform = [random.choice(list(Shade)) for _ in range(50)]
+        expected_weighted = [
+            random.choices(list(weights), weights=list(weights.values()), k=1)[0] for _ in range(50)
+        ]
+
+        RNG.seed(seed)
+        uniform = RNGEnum(Shade)
+        weighted = RNGEnum(Shade, weights=weights)
+        assert [uniform.generate() for _ in range(50)] == expected_uniform
+        assert [weighted.generate() for _ in range(50)] == expected_weighted

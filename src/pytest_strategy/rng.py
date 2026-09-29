@@ -447,12 +447,15 @@ class RNGEnum(RNGType):
             weights: Optional dictionary mapping enum members to their weights.
                     If provided, only weighted members will be selected.
                     Weights don't need to sum to 1.0 (they'll be normalized).
-            predicate: Optional function to filter valid enum values
+            predicate: Optional function to filter valid enum values. It is applied once
+                    here to every candidate member, and values are then drawn only
+                    from the members it accepts.
 
         Raises:
             RNGValueError: If enum_class is not an Enum class or has no members, if weights
-                reference non-existent members, or if weights are empty, negative,
-                non-finite or all zero
+                reference non-existent members, if weights are empty, negative,
+                non-finite or all zero, or if no member (with a positive weight)
+                satisfies the predicate
         """
         # isinstance guard first: issubclass raises TypeError for non-classes (e.g. a member)
         if not (isinstance(enum_class, type) and issubclass(enum_class, Enum)):
@@ -473,43 +476,49 @@ class RNGEnum(RNGType):
                     )
             _check_weights("RNGEnum", weights)
 
+        # With a predicate, filter the (finite) candidate members once, keeping their
+        # weights, so generation never fails while a valid member exists
+        self._valid_members: list[Enum] = []
+        self._valid_weights: list[float] = []
+        if predicate:
+            candidates = weights if weights is not None else dict.fromkeys(enum_class, 1.0)
+            for member, weight in candidates.items():
+                if predicate(member):
+                    self._valid_members.append(member)
+                    self._valid_weights.append(weight)
+
+            if sum(self._valid_weights) <= 0:
+                which = "weighted member with a positive weight" if weights else "member"
+                raise RNGValueError(
+                    f"No valid value found: no {which} of {enum_class.__name__} "
+                    "satisfies the predicate"
+                )
+
     def generate(self) -> Enum:
         """
         Generate a random enum value.
 
         Returns:
             Random enum member satisfying constraints
-
-        Raises:
-            RNGValueError: If no valid value found after max_retries attempts
         """
         if self.weights:
             # Weighted selection
+            if self.predicate:
+                # With predicate: choose among the members filtered in __init__
+                return random.choices(self._valid_members, weights=self._valid_weights, k=1)[0]
+
+            # Without predicate: direct selection
             members = list(self.weights.keys())
             weights = list(self.weights.values())
-
-            if self.predicate:
-                # With predicate: use retry logic
-                def generator():
-                    return random.choices(members, weights=weights, k=1)[0]
-
-                return cast(Enum, RNG._generate_with_constraint(generator, self.predicate))
-            else:
-                # Without predicate: direct selection
-                return random.choices(members, weights=weights, k=1)[0]
+            return random.choices(members, weights=weights, k=1)[0]
         else:
             # Uniform selection from all members
-            members = list(self.enum_class)
-
             if self.predicate:
-                # With predicate: use retry logic
-                def generator():
-                    return random.choice(members)
+                # With predicate: choose among the members filtered in __init__
+                return random.choice(self._valid_members)
 
-                return cast(Enum, RNG._generate_with_constraint(generator, self.predicate))
-            else:
-                # Without predicate: direct selection
-                return random.choice(members)
+            # Without predicate: direct selection
+            return random.choice(list(self.enum_class))
 
     @property
     def python_type(self):
