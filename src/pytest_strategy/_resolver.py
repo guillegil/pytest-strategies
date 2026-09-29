@@ -239,8 +239,11 @@ def resolve_and_parametrize(
         if len(argnames) == 1:
             samples = [s[0] if isinstance(s, tuple) else s for s in samples]
 
-        # Generate test IDs for better test output readability
-        ids = generate_test_ids(argnames, samples)
+        # Generate test IDs for better test output readability, from the same values
+        # passed to parametrize. generate_test_ids unwraps a single-argument row once,
+        # so each already-unwrapped value is re-wrapped: a tuple value keeps its full ID.
+        id_rows = [(s,) for s in samples] if len(argnames) == 1 else samples
+        ids = generate_test_ids(argnames, id_rows)
 
         # Apply pytest parametrize decorator to the test function
         return cast(Callable, pytest.mark.parametrize(argstr, samples, ids=ids)(test_fn))

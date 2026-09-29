@@ -44,7 +44,7 @@ class TestAutoModeIntegration:
     """--nsamples=auto combined with vector modes and filters."""
 
     def test_auto_all_mode_includes_directed_vectors(self, pytester):
-        pytester.makepyfile(test_auto=AUTO_MODULE)
+        pytester.makepyfile(test_fix_auto=AUTO_MODULE)
         result = pytester.runpytest("--nsamples=auto", "-v")
         # seq: corner + 3x2 product; noseq (no sequence args): edge + 4 random
         result.assert_outcomes(passed=7 + 5)
@@ -52,7 +52,7 @@ class TestAutoModeIntegration:
         result.stdout.fnmatch_lines(["*test_noseq[[]code=500[]] PASSED*"])
 
     def test_auto_test_mode_runs_only_test_vectors(self, pytester):
-        pytester.makepyfile(test_auto=AUTO_MODULE)
+        pytester.makepyfile(test_fix_auto=AUTO_MODULE)
         result = pytester.runpytest("--nsamples=auto", "--vector-mode=test", "-v")
         result.assert_outcomes(passed=2)
         result.stdout.fnmatch_lines(
@@ -60,7 +60,7 @@ class TestAutoModeIntegration:
         )
 
     def test_auto_directed_only_mode(self, pytester):
-        pytester.makepyfile(test_auto=AUTO_MODULE)
+        pytester.makepyfile(test_fix_auto=AUTO_MODULE)
         result = pytester.runpytest("--nsamples=auto", "--vector-mode=directed_only", "-v")
         result.assert_outcomes(passed=2)
         result.stdout.fnmatch_lines(
@@ -68,7 +68,7 @@ class TestAutoModeIntegration:
         )
 
     def test_auto_vector_name_filters_across_strategies(self, pytester):
-        pytester.makepyfile(test_auto=AUTO_MODULE)
+        pytester.makepyfile(test_fix_auto=AUTO_MODULE)
         result = pytester.runpytest("--nsamples=auto", "--vector-name=corner", "-v")
         # Only fix_auto_seq has "corner"; fix_auto_noseq gets an empty parameter set
         result.assert_outcomes(passed=1, skipped=1)
@@ -114,18 +114,48 @@ class TestVectorIndexIntegration:
     """--vector-index skips strategies that lack the index, like --vector-name does."""
 
     def test_index_valid_for_some_strategies(self, pytester):
-        pytester.makepyfile(test_idx=INDEX_MODULE)
+        pytester.makepyfile(test_fix_idx=INDEX_MODULE)
         result = pytester.runpytest("--vector-index=1", "-v")
         # fix_idx_two has index 1 and test_plain is unaffected; the others are skipped
         result.assert_outcomes(passed=2, skipped=2)
         result.stdout.fnmatch_lines(["*test_two[[]y=10[]] PASSED*"])
 
     def test_index_zero_with_strategy_without_directed_vectors(self, pytester):
-        pytester.makepyfile(test_idx=INDEX_MODULE)
+        pytester.makepyfile(test_fix_idx=INDEX_MODULE)
         result = pytester.runpytest("--vector-index=0")
         result.assert_outcomes(passed=3, skipped=1)
 
     def test_index_out_of_range_everywhere(self, pytester):
-        pytester.makepyfile(test_idx=INDEX_MODULE)
+        pytester.makepyfile(test_fix_idx=INDEX_MODULE)
         result = pytester.runpytest("--vector-index=5")
         result.assert_outcomes(passed=1, skipped=3)
+
+
+class TestSingleArgumentIdsIntegration:
+    """Tuple-valued single-argument strategies get IDs showing the whole value."""
+
+    def test_tuple_values_get_distinct_ids(self, pytester):
+        pytester.makepyfile(test_fix_single_ids="""
+            from pytest_strategy import Strategy, Parameter, TestArg
+            from pytest_strategy.rng import RNGChoice
+
+            @Strategy.register("fix_ids_point")
+            def point(nsamples):
+                return Parameter(
+                    TestArg("pt", rng_type=RNGChoice([(1, 2)])),
+                    directed_vectors={"a": ((1, 2),), "b": ((1, 3),), "c": ((1, 4),)},
+                )
+
+            @Strategy.strategy("fix_ids_point")
+            def test_point(pt):
+                assert len(pt) == 2
+            """)
+        result = pytester.runpytest("--vector-mode=directed_only", "-v")
+        result.assert_outcomes(passed=3)
+        result.stdout.fnmatch_lines(
+            [
+                "*test_point[[]pt=(1, 2)[]] PASSED*",
+                "*test_point[[]pt=(1, 3)[]] PASSED*",
+                "*test_point[[]pt=(1, 4)[]] PASSED*",
+            ]
+        )

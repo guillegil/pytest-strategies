@@ -14,7 +14,7 @@ import pytest
 from pytest_strategy import RNGInteger, Strategy
 from pytest_strategy._resolver import call_factory, resolve_and_parametrize
 from pytest_strategy.parameters import Parameter
-from pytest_strategy.rng import Series
+from pytest_strategy.rng import RNGChoice, Series
 from pytest_strategy.test_args import TestArg
 
 # ---------------------------------------------------------------------------
@@ -423,3 +423,44 @@ class TestExportStrategiesFactoryCalling:
         data = json.loads(Strategy.export_strategies())
 
         assert "RuntimeError: boom" in data["fix_export_broken"]["error"]
+
+
+# ---------------------------------------------------------------------------
+# Single-argument strategies: IDs show the whole value passed to the test
+# ---------------------------------------------------------------------------
+
+
+class TestSingleArgumentIds:
+    """IDs are built from the values passed to parametrize, unwrapped exactly once."""
+
+    def test_tuple_valued_directed_vectors(self):
+        param = Parameter(
+            TestArg("pt", rng_type=RNGChoice([(1, 2)])),
+            directed_vectors={"a": ((1, 2),), "b": ((1, 3),)},
+        )
+        _, samples, ids = _resolve(lambda nsamples: param, ["pt"], vector_mode="directed_only")
+        assert samples == [(1, 2), (1, 3)]
+        assert ids == ["pt=(1, 2)", "pt=(1, 3)"]
+
+    def test_tuple_valued_random_samples(self):
+        param = Parameter(TestArg("pt", rng_type=RNGChoice([(7, 8)])))
+        _, samples, ids = _resolve(
+            lambda nsamples: param, ["pt"], nsamples=2, vector_mode="random_only"
+        )
+        assert samples == [(7, 8), (7, 8)]
+        assert ids == ["pt=(7, 8)", "pt=(7, 8)"]
+
+    def test_legacy_one_tuple_rows(self):
+        _, samples, ids = _resolve(lambda nsamples: (("x",), [(1,), (2,)]), ["x"])
+        assert samples == [1, 2]
+        assert ids == ["x=1", "x=2"]
+
+    def test_legacy_bare_values(self):
+        _, samples, ids = _resolve(lambda nsamples: ("x", [1, "a"]), ["x"])
+        assert samples == [1, "a"]
+        assert ids == ["x=1", "x='a'"]
+
+    def test_legacy_tuple_value_in_one_tuple_row(self):
+        _, samples, ids = _resolve(lambda nsamples: (("x",), [((1, 2),)]), ["x"])
+        assert samples == [(1, 2)]
+        assert ids == ["x=(1, 2)"]
