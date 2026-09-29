@@ -226,11 +226,14 @@ class RNG:
         range_list = list(ranges.keys())
         weights = list(ranges.values())
 
-        # Choose range using random.choices (handles normalization)
-        chosen_range = random.choices(range_list, weights=weights, k=1)[0]
-        min_val, max_val = chosen_range
+        def generator() -> int:
+            # Choose range using random.choices (handles normalization). The range
+            # is re-chosen on every predicate retry so that a range with no valid
+            # value cannot exhaust all retries while other ranges could succeed.
+            min_val, max_val = random.choices(range_list, weights=weights, k=1)[0]
+            return RNG.integer(min_val, max_val)
 
-        return RNG.integer(min_val, max_val, predicate)
+        return cast(int, RNG._generate_with_constraint(generator, predicate))
 
     @staticmethod
     def wfloat(
@@ -256,10 +259,12 @@ class RNG:
         range_list = list(ranges.keys())
         weights = list(ranges.values())
 
-        chosen_range = random.choices(range_list, weights=weights, k=1)[0]
-        min_val, max_val = chosen_range
+        def generator() -> builtins.float:
+            # Re-choose the range on every predicate retry (see winteger)
+            min_val, max_val = random.choices(range_list, weights=weights, k=1)[0]
+            return RNG.float(min_val, max_val)
 
-        return RNG.float(min_val, max_val, predicate)
+        return cast(builtins.float, RNG._generate_with_constraint(generator, predicate))
 
 
 # ====
