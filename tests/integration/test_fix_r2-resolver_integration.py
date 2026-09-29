@@ -8,6 +8,7 @@ working directory, pyc cache, xdist) use a subprocess; the others run in-process
 import random
 import re
 import shutil
+import textwrap
 
 import pytest
 
@@ -177,5 +178,72 @@ class TestDuplicateRegistrationSameFile:
         monkeypatch.chdir(moved)
 
         result = pytester.runpytest_subprocess("-W", "error::UserWarning")
+
+        result.assert_outcomes(passed=2)
+
+
+# ---------------------------------------------------------------------------
+# Dataclass-typed fixture consuming the argnames (validate_signature=False)
+# ---------------------------------------------------------------------------
+
+HOSTPORT_STRATEGIES = """
+    from pytest_strategy import Strategy
+
+    @Strategy.register("r2_hostport")
+    def hostport(nsamples):
+        return ("host", "port"), [("localhost", 8000), ("127.0.0.1", 9000)]
+    """
+
+SERVER_FIXTURES = textwrap.dedent("""
+    from dataclasses import dataclass
+
+    import pytest
+
+    @dataclass
+    class Server:
+        host: str
+        port: int
+        {extra_field}
+
+    STARTED = []
+
+    @pytest.fixture
+    def server(host, port):
+        STARTED.append((host, port))
+        yield Server(host, port)
+
+    @pytest.fixture
+    def client():
+        return "client"
+    """)
+
+SERVER_TEST = textwrap.dedent("""
+    from pytest_strategy import Strategy
+
+    @Strategy.strategy("r2_hostport", validate_signature=False)
+    def test_server(server: Server, client):
+        assert (server.host, server.port) in STARTED
+    """)
+
+
+class TestDataclassTypedFixture:
+    """The fixture receives the argnames and runs; the test is not in dataclass mode."""
+
+    @pytest.mark.parametrize("extra_field", ["", "started: bool = False"])
+    def test_fixture_in_test_module(self, pytester, extra_field):
+        pytester.makepyfile(hostport_strategies=HOSTPORT_STRATEGIES)
+        fixtures = SERVER_FIXTURES.replace("{extra_field}", extra_field)
+        pytester.makepyfile(test_server=fixtures + SERVER_TEST)
+
+        result = pytester.runpytest_inprocess()
+
+        result.assert_outcomes(passed=2)
+
+    def test_fixture_in_conftest(self, pytester):
+        pytester.makepyfile(hostport_strategies=HOSTPORT_STRATEGIES)
+        pytester.makeconftest(SERVER_FIXTURES.replace("{extra_field}", ""))
+        pytester.makepyfile(test_server="from conftest import STARTED, Server\n" + SERVER_TEST)
+
+        result = pytester.runpytest_inprocess()
 
         result.assert_outcomes(passed=2)

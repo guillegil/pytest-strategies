@@ -89,6 +89,7 @@ def detect_dataclass_param(
     test_fn,
     argnames: Sequence[str],
     pytest_fixtures: "frozenset[str] | set[str]" = PYTEST_FIXTURES,
+    allow_fixtures: bool = True,
 ) -> tuple[bool, type | None, str | None]:
     """
     Detect dataclass mode and the test parameter that receives the dataclass.
@@ -101,6 +102,11 @@ def detect_dataclass_param(
     exactly but a single parameter is dataclass-annotated, that parameter is
     still chosen so that the field mismatch is reported by
     ``convert_to_dataclass``.
+
+    With ``allow_fixtures=False`` (used when signature validation is off), the
+    dataclass parameter must be the only parameter besides ``self``/``cls`` and
+    *pytest_fixtures*. A dataclass-typed parameter next to other parameters is
+    then treated as a fixture, which may itself consume the *argnames*.
 
     String annotations (``from __future__ import annotations`` or quoted
     forward references) are resolved in the test module's globals, so the
@@ -125,10 +131,13 @@ def detect_dataclass_param(
         # annotations and resolve the candidates one by one below.
         hints = {}
 
+    others = [n for n in sig.parameters if n not in ("self", "cls") and n not in pytest_fixtures]
+    if not allow_fixtures and len(others) != 1:
+        return False, None, None
+
     candidates: list[tuple[str, type]] = []
-    for name, param in sig.parameters.items():
-        if name in ("self", "cls") or name in pytest_fixtures:
-            continue
+    for name in others:
+        param = sig.parameters[name]
         annotation = hints.get(name, param.annotation)
         if isinstance(annotation, str):
             annotation = _eval_annotation(test_fn, annotation)

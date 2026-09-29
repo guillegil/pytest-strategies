@@ -259,9 +259,11 @@ def resolve_and_parametrize(
         if isinstance(argnames, str):
             argnames = tuple(n.strip() for n in argnames.split(",") if n.strip())
 
-    # Detect dataclass mode
+    # Detect dataclass mode. Without signature validation, parameters other than the
+    # dataclass one may be fixtures consuming the argnames, so the dataclass
+    # parameter must then be the test's only one.
     is_dc_mode, dc_type, dc_param = detect_dataclass_param(
-        test_fn, argnames, pytest_fixtures=pytest_fixtures
+        test_fn, argnames, pytest_fixtures=pytest_fixtures, allow_fixtures=validate
     )
 
     if is_dc_mode:

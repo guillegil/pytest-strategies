@@ -13,6 +13,7 @@ import os
 import random
 import textwrap
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 from unittest import mock
 from unittest.mock import MagicMock
@@ -20,6 +21,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from pytest_strategy import RNG, RNGInteger, Strategy
+from pytest_strategy._introspection import detect_dataclass_param
 from pytest_strategy._resolver import call_factory, resolve_and_parametrize
 from pytest_strategy.parameters import Parameter
 from pytest_strategy.rng import Series
@@ -397,3 +399,98 @@ class TestDuplicateRegistrationPaths:
                 Strategy.register("fix_r2_dup_error")(second)
 
         assert Strategy._registry["fix_r2_dup_error"] is second
+
+
+# ---------------------------------------------------------------------------
+# Dataclass detection without signature validation
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Server:
+    host: str
+    port: int
+
+
+@dataclass
+class StartedServer:
+    host: str
+    port: int
+    started: bool = False
+
+
+@dataclass
+class Point:
+    x: int
+    y: int
+
+
+class TestDataclassTypedFixture:
+    """With allow_fixtures=False, a dataclass parameter next to others is a fixture."""
+
+    def test_exact_match_next_to_fixture_is_left_alone(self):
+        def test_fn(server: Server, client):
+            pass
+
+        assert detect_dataclass_param(test_fn, ["host", "port"], allow_fixtures=False) == (
+            False,
+            None,
+            None,
+        )
+
+    def test_field_mismatch_next_to_fixture_is_left_alone(self):
+        def test_fn(server: StartedServer, client):
+            pass
+
+        assert detect_dataclass_param(test_fn, ["host", "port"], allow_fixtures=False) == (
+            False,
+            None,
+            None,
+        )
+
+    def test_default_still_allows_fixtures(self):
+        def test_fn(server: Server, client):
+            pass
+
+        assert detect_dataclass_param(test_fn, ["host", "port"]) == (True, Server, "server")
+
+    def test_only_parameter_is_still_dataclass_mode(self):
+        def test_fn(p: Point):
+            pass
+
+        assert detect_dataclass_param(test_fn, ["x", "y"], allow_fixtures=False) == (
+            True,
+            Point,
+            "p",
+        )
+
+    def test_self_and_builtin_fixtures_do_not_count(self):
+        class TestPoints:
+            def test_point(self, p: Point, tmp_path):
+                pass
+
+        assert detect_dataclass_param(TestPoints.test_point, ["x", "y"], allow_fixtures=False) == (
+            True,
+            Point,
+            "p",
+        )
+
+    def test_resolver_parametrizes_the_argnames_without_validation(self):
+        def test_server(server: Server, client):
+            pass
+
+        argstr, samples, _ = _parametrize(
+            lambda nsamples: (("host", "port"), [("localhost", 8000)]), test_server, validate=False
+        )
+        assert argstr == "host,port"
+        assert samples == [("localhost", 8000)]
+
+    def test_resolver_keeps_dataclass_mode_next_to_fixture_with_validation(self):
+        def test_server(server: Server, client):
+            pass
+
+        argstr, samples, _ = _parametrize(
+            lambda nsamples: (("host", "port"), [("localhost", 8000)]), test_server
+        )
+        assert argstr == "server"
+        assert samples == [Server("localhost", 8000)]
