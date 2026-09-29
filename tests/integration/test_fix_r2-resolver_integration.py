@@ -421,3 +421,56 @@ class TestDataclassModeSamples:
 
         slow = pytester.runpytest_inprocess("-m", "slow")
         slow.assert_outcomes(passed=1, deselected=4)
+
+
+# ---------------------------------------------------------------------------
+# Per-test random values do not depend on --import-mode or how the test is selected
+# ---------------------------------------------------------------------------
+
+
+class TestStreamKeyIgnoresImportMode:
+    """The same --rng-seed gives the same values under prepend and importlib."""
+
+    def test_values_are_identical_across_import_modes_and_selection(self, pytester, monkeypatch):
+        pytester.makeini("[pytest]\n")
+        sub = pytester.path / "tests" / "sub"
+        sub.mkdir(parents=True)
+        (sub / "strategies.py").write_text(
+            "from pytest_strategy import Parameter, RNGInteger, Strategy, TestArg\n"
+            "\n"
+            '@Strategy.register("r2_stream")\n'
+            "def stream(nsamples):\n"
+            '    return Parameter(TestArg("x", rng_type=RNGInteger(0, 10**9)), nsamples=3)\n'
+        )
+        (sub / "test_b.py").write_text(
+            "from pytest_strategy import Strategy\n"
+            "\n"
+            '@Strategy.strategy("r2_stream")\n'
+            "def test_b(x):\n"
+            "    pass\n"
+        )
+        (sub / "test_other.py").write_text(
+            "from pytest_strategy import Strategy\n"
+            "\n"
+            '@Strategy.strategy("r2_stream")\n'
+            "def test_other(x):\n"
+            "    pass\n"
+        )
+
+        def collect(*args):
+            result = pytester.runpytest_subprocess("--collect-only", "-q", "--rng-seed=7", *args)
+            return _ids(result, "test_b")
+
+        prepend = collect("--import-mode=prepend")
+        runs = {
+            "importlib": collect("--import-mode=importlib"),
+            "append": collect("--import-mode=append"),
+            "single file": collect("tests/sub/test_b.py"),
+            "single file importlib": collect("--import-mode=importlib", "tests/sub/test_b.py"),
+        }
+        monkeypatch.chdir(sub)
+        runs["from tests/sub"] = collect()
+        runs["from tests/sub importlib"] = collect("--import-mode=importlib")
+
+        assert len(prepend) == 3
+        assert runs == dict.fromkeys(runs, prepend)

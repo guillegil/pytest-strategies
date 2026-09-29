@@ -18,6 +18,7 @@ import typing
 import warnings
 from dataclasses import InitVar, dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 from unittest import mock
 from unittest.mock import MagicMock
@@ -25,7 +26,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import pytest_strategy
-from pytest_strategy import RNG, RNGInteger, Strategy
+from pytest_strategy import RNG, RNGInteger, Strategy, _resolver
 from pytest_strategy._dataclass import convert_to_dataclass
 from pytest_strategy._ids import generate_dataclass_ids, generate_test_ids
 from pytest_strategy._introspection import detect_dataclass_param
@@ -760,3 +761,58 @@ class TestDataclassModePytestParam:
         )
         assert samples == [Point(0, 0)]
         assert ids == ["x=0,y=0"]
+
+
+# ---------------------------------------------------------------------------
+# Per-test random stream: keyed by rootdir-relative file path, not __module__
+# ---------------------------------------------------------------------------
+
+
+def _random_values(test_fn, rootpath):
+    """Values a 3-sample random strategy gives ``test_fn`` with seed 7."""
+    RNG.seed(7)
+    _, samples, _ = _parametrize(
+        lambda nsamples: Parameter(TestArg("v", rng_type=RNGInteger(0, 10**9)), nsamples=3),
+        test_fn,
+        validate=False,
+        config=_make_config(rootpath=rootpath),
+    )
+    return samples
+
+
+def _module_function(module_name, filename):
+    """Return ``test_values`` defined in a fresh module named ``module_name`` at ``filename``."""
+    namespace = {"__name__": module_name, "__file__": str(filename)}
+    exec(compile("def test_values(v):\n    pass\n", str(filename), "exec"), namespace)
+    return namespace["test_values"]
+
+
+class TestStreamKeyIgnoresImportMode:
+    """The same test file and qualname give the same values under any module name."""
+
+    def test_location_is_rootdir_relative_posix_path(self, tmp_path):
+        test_fn = _module_function("tests.sub.test_b", tmp_path / "tests" / "sub" / "test_b.py")
+        config = SimpleNamespace(rootpath=tmp_path)
+        assert _resolver._test_location(test_fn, config) == "tests/sub/test_b.py"
+
+    def test_location_falls_back_to_module_without_config(self, tmp_path):
+        test_fn = _module_function("tests.sub.test_b", tmp_path / "test_b.py")
+        assert _resolver._test_location(test_fn, None) == "tests.sub.test_b"
+
+    def test_location_falls_back_to_module_outside_rootdir(self, tmp_path):
+        test_fn = _module_function("test_b", tmp_path / "elsewhere" / "test_b.py")
+        config = SimpleNamespace(rootpath=tmp_path / "root")
+        assert _resolver._test_location(test_fn, config) == "test_b"
+
+    def test_prepend_and_importlib_module_names_give_the_same_values(self, tmp_path):
+        filename = tmp_path / "tests" / "sub" / "test_b.py"
+        prepend = _module_function("test_b", filename)
+        importlib_mode = _module_function("tests.sub.test_b", filename)
+
+        assert _random_values(prepend, tmp_path) == _random_values(importlib_mode, tmp_path)
+
+    def test_different_files_still_get_different_values(self, tmp_path):
+        first = _module_function("test_b", tmp_path / "a" / "test_b.py")
+        second = _module_function("test_b", tmp_path / "b" / "test_b.py")
+
+        assert _random_values(first, tmp_path) != _random_values(second, tmp_path)

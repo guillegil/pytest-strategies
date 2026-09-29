@@ -8,7 +8,9 @@ read CLI options, call the factory, generate vectors, and apply
 from __future__ import annotations
 
 import inspect
+import os
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -34,6 +36,29 @@ def _id_row(sample: Any, single: bool) -> Any:
     # generate_test_ids unwraps a single-argument row once, so re-wrap the value:
     # a tuple value then keeps its full ID
     return (sample,) if single else sample
+
+
+def _test_location(test_fn: Callable, config: pytest.Config | None) -> str:
+    """
+    Return the test's file path relative to the rootdir, in posix form.
+
+    Used in the test's random stream key instead of ``__module__``, which depends
+    on ``--import-mode``. Falls back to ``__module__`` without a config or when
+    the file is outside the rootdir.
+    """
+    rootpath = getattr(config, "rootpath", None) if config is not None else None
+    if rootpath is not None:
+        try:
+            fn = inspect.unwrap(test_fn)
+            # The module's __file__ comes from the import system; co_filename can be
+            # stale (a rewritten pyc cached before the checkout was moved)
+            source = getattr(fn, "__globals__", {}).get("__file__") or inspect.getsourcefile(fn)
+            if source:
+                path = Path(os.path.realpath(source))
+                return path.relative_to(os.path.realpath(rootpath)).as_posix()
+        except (TypeError, ValueError):
+            pass
+    return test_fn.__module__
 
 
 def _accepts(sig: inspect.Signature, *args: Any, **kwargs: Any) -> bool:
@@ -169,7 +194,7 @@ def resolve_and_parametrize(
     factory = registry[name]
 
     # Refresh the random number generator seed
-    RNG.refresh_seed(key=f"{name}:{test_fn.__module__}.{test_fn.__qualname__}")
+    RNG.refresh_seed(key=f"{name}:{_test_location(test_fn, config)}::{test_fn.__qualname__}")
 
     # Call the factory function the way its signature accepts nsamples
     result = call_factory(name, factory, factory_nsamples)
