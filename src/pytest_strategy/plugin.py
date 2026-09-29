@@ -443,5 +443,7 @@ def pytest_collection_finish(session: Session) -> None:
             else:
                 terminalreporter.write_line("\nNo strategies registered.\n")
 
-        # Exit pytest without running tests
-        pytest.exit("Strategy listing complete", returncode=0)
+        # Exit pytest without running tests. Like --collect-only, report
+        # collection errors (e.g. a factory that raised) with a non-zero code.
+        returncode = pytest.ExitCode.INTERRUPTED if session.testsfailed else pytest.ExitCode.OK
+        pytest.exit("Strategy listing complete", returncode=returncode)

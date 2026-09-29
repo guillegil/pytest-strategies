@@ -399,3 +399,37 @@ class TestNsamplesValidation:
         result = pytester.runpytest_subprocess("--nsamples=AUTO")
 
         result.assert_outcomes(passed=3)
+
+
+class TestListStrategiesExitCode:
+    """--list-strategies exits non-zero when collection had errors."""
+
+    def test_collection_error_gives_non_zero_exit(self, pytester):
+        pytester.makepyfile(strategies="""
+            from pytest_strategy import Strategy
+
+            @Strategy.register("boom_strat")
+            def boom(nsamples):
+                raise RuntimeError("factory boom")
+            """)
+        pytester.makepyfile(test_boom="""
+            from pytest_strategy import Strategy
+
+            @Strategy.strategy("boom_strat")
+            def test_boom(x):
+                pass
+            """)
+
+        result = pytester.runpytest_subprocess("--list-strategies")
+
+        result.stdout.fnmatch_lines(["*boom_strat*", "*RuntimeError: factory boom*"])
+        assert result.ret == pytest.ExitCode.INTERRUPTED
+
+    def test_clean_collection_exits_zero(self, pytester):
+        pytester.makepyfile(strategies=STRATEGIES)
+        pytester.makepyfile(test_clean=TESTS)
+
+        result = pytester.runpytest_subprocess("--list-strategies")
+
+        result.stdout.fnmatch_lines(["*big_ints*"])
+        assert result.ret == pytest.ExitCode.OK
