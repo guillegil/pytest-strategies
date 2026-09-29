@@ -45,14 +45,41 @@ def _accepts(sig: inspect.Signature, *args: Any, **kwargs: Any) -> bool:
     return True
 
 
+def _only_var_args(sig: inspect.Signature) -> bool:
+    """Return True if ``sig`` has parameters, all of them ``*args``/``**kwargs``.
+
+    Such a signature (e.g. a decorator without ``functools.wraps``, or
+    ``unittest.mock.patch``) does not say how to pass ``nsamples``.
+    """
+    params = sig.parameters.values()
+    return bool(params) and all(
+        p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD) for p in params
+    )
+
+
+def _factory_error(name: str, nsamples: int | str, error: Exception) -> ValueError:
+    """Return the error reported when a strategy factory raises ``error``."""
+    return ValueError(
+        f"Error calling strategy factory '{name}' (nsamples={nsamples!r}): "
+        f"{type(error).__name__}: {error}"
+    )
+
+
 def call_factory(name: str, factory: Callable[..., Any], nsamples: int | str) -> Any:
     """
-    Call a strategy factory exactly once, passing ``nsamples`` the way it accepts it.
+    Call a strategy factory, passing ``nsamples`` the way it accepts it.
 
-    The calling convention is chosen from the factory's signature, never by retrying
-    after a failure: ``factory(nsamples=...)`` when it accepts that keyword (a named
-    parameter or ``**kwargs``), ``factory(nsamples)`` when it has a positional
-    parameter, and ``factory()`` when it takes no arguments.
+    The calling convention is chosen from the signature of the callable that is
+    actually called (a decorator's wrapper, not the function it wraps), never by
+    retrying after a failure, so the factory is called exactly once:
+    ``factory(nsamples=...)`` when it accepts that keyword (a named parameter or
+    ``**kwargs``), ``factory(nsamples)`` when it has a positional parameter, and
+    ``factory()`` when it takes no arguments.
+
+    The exception is a signature with only ``*args``/``**kwargs`` (e.g. a decorator
+    without ``functools.wraps``), or none at all, which does not say how to pass
+    ``nsamples``. Such a factory is called as ``factory(nsamples=...)`` and, if that
+    raises ``TypeError``, once more as ``factory(nsamples)``.
 
     Args:
         name: Name of the strategy (for error messages)
@@ -69,12 +96,27 @@ def call_factory(name: str, factory: Callable[..., Any], nsamples: int | str) ->
     args: tuple[Any, ...] = ()
     kwargs: dict[str, Any] = {"nsamples": nsamples}
     try:
-        sig: inspect.Signature | None = inspect.signature(factory)
+        # follow_wrapped=False: a wraps() decorator's __wrapped__ describes the inner
+        # function, not the wrapper that is called
+        sig: inspect.Signature | None = inspect.signature(factory, follow_wrapped=False)
     except (TypeError, ValueError):
-        # No introspectable signature (e.g. some builtins): keep the keyword call
+        # No introspectable signature (e.g. some builtins)
         sig = None
 
-    if sig is not None and not _accepts(sig, nsamples=nsamples):
+    if sig is None or _only_var_args(sig):
+        try:
+            return factory(nsamples=nsamples)
+        except TypeError as e:
+            # The keyword may not be accepted: retry positionally, and report the
+            # original error if that fails too
+            try:
+                return factory(nsamples)
+            except Exception as retry_error:
+                raise _factory_error(name, nsamples, e) from retry_error
+        except Exception as e:
+            raise _factory_error(name, nsamples, e) from e
+
+    if not _accepts(sig, nsamples=nsamples):
         if _accepts(sig, nsamples):
             args, kwargs = (nsamples,), {}
         elif _accepts(sig):
@@ -88,10 +130,7 @@ def call_factory(name: str, factory: Callable[..., Any], nsamples: int | str) ->
     try:
         return factory(*args, **kwargs)
     except Exception as e:
-        raise ValueError(
-            f"Error calling strategy factory '{name}' (nsamples={nsamples!r}): "
-            f"{type(e).__name__}: {e}"
-        ) from e
+        raise _factory_error(name, nsamples, e) from e
 
 
 def resolve_and_parametrize(
@@ -132,7 +171,7 @@ def resolve_and_parametrize(
     # Refresh the random number generator seed
     RNG.refresh_seed(key=f"{name}:{test_fn.__module__}.{test_fn.__qualname__}")
 
-    # Call factory function exactly once, the way its signature accepts nsamples
+    # Call the factory function the way its signature accepts nsamples
     result = call_factory(name, factory, factory_nsamples)
 
     # Detect if result is a Parameter instance or tuple

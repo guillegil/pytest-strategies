@@ -6,15 +6,19 @@ behaviour that already worked. Most drive resolve_and_parametrize directly with 
 mocked pytest.Config and inspect the pytest.mark.parametrize it applies.
 """
 
+import functools
 import inspect
+import json
+import os
 import random
 from pathlib import Path
+from unittest import mock
 from unittest.mock import MagicMock
 
 import pytest
 
 from pytest_strategy import RNG, RNGInteger, Strategy
-from pytest_strategy._resolver import resolve_and_parametrize
+from pytest_strategy._resolver import call_factory, resolve_and_parametrize
 from pytest_strategy.parameters import Parameter
 from pytest_strategy.rng import Series
 from pytest_strategy.test_args import TestArg
@@ -150,3 +154,166 @@ class TestParameterNsamplesAuto:
             lambda nsamples: _with_nsamples(_random_param(), 3), ["code"], nsamples="auto"
         )
         assert len(samples) == 1 + 3
+
+
+# ---------------------------------------------------------------------------
+# Decorated factories
+# ---------------------------------------------------------------------------
+
+
+def _inject_rng(fn):
+    """A functools.wraps decorator that injects an extra argument."""
+
+    @functools.wraps(fn)
+    def wrapper(nsamples):
+        return fn(nsamples, "rng")
+
+    return wrapper
+
+
+def _adapt_zero_arg(fn):
+    """A functools.wraps adapter that lets a zero-argument function take nsamples."""
+
+    @functools.wraps(fn)
+    def wrapper(nsamples):
+        return fn()
+
+    return wrapper
+
+
+def _passthrough(fn):
+    """A decorator without functools.wraps."""
+
+    def wrapper(*args, **kwargs):
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+def _wraps_passthrough(fn):
+    """The usual functools.wraps decorator with *args/**kwargs."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+class TestDecoratedFactories:
+    """The signature of the wrapper that is called decides how nsamples is passed."""
+
+    def test_wraps_decorator_injecting_an_argument(self):
+        @_inject_rng
+        def make(nsamples, rng):
+            return nsamples, rng
+
+        assert call_factory("s", make, 3) == (3, "rng")
+
+    def test_mock_patch_decorator(self):
+        @mock.patch("os.getcwd", return_value="/fake")
+        def make(nsamples, getcwd):
+            return nsamples, os.getcwd()
+
+        assert call_factory("s", make, 3) == (3, "/fake")
+
+    def test_wraps_adapter_around_zero_argument_function(self):
+        @_adapt_zero_arg
+        def make():
+            return "called"
+
+        assert call_factory("s", make, 3) == "called"
+
+    def test_var_args_wrapper_without_wraps_around_positional_factory(self):
+        @_passthrough
+        def make(n):
+            return n
+
+        assert call_factory("s", make, 3) == 3
+
+    def test_var_args_wrapper_without_wraps_around_keyword_factory(self):
+        calls = []
+
+        @_passthrough
+        def make(nsamples):
+            calls.append(nsamples)
+            return nsamples
+
+        assert call_factory("s", make, 3) == 3
+        assert calls == [3]
+
+    def test_wraps_var_args_wrapper(self):
+        @_wraps_passthrough
+        def make(n):
+            return n
+
+        assert call_factory("s", make, 3) == 3
+
+    def test_opaque_wrapper_reports_the_original_error(self):
+        @_passthrough
+        def make(a, b):
+            return a, b
+
+        with pytest.raises(ValueError, match="Error calling strategy factory 's'") as exc_info:
+            call_factory("s", make, 3)
+
+        assert "unexpected keyword argument 'nsamples'" in str(exc_info.value)
+        assert isinstance(exc_info.value.__cause__, TypeError)
+
+    def test_opaque_wrapper_non_type_error_is_not_retried(self):
+        calls = []
+
+        @_passthrough
+        def make(nsamples):
+            calls.append(nsamples)
+            raise RuntimeError("boom")
+
+        with pytest.raises(ValueError, match="RuntimeError: boom"):
+            call_factory("s", make, 3)
+        assert calls == [3]
+
+    def test_informative_wrapper_is_still_called_once(self):
+        """A wrapper that names nsamples keeps the single-call guarantee."""
+        calls = []
+
+        def make(nsamples, rng):
+            calls.append(nsamples)
+            return None + 1
+
+        with pytest.raises(ValueError, match="unsupported operand"):
+            call_factory("s", _inject_rng(make), 3)
+        assert calls == [3]
+
+    def test_resolver_uses_decorated_factory(self):
+        @_inject_rng
+        def make(nsamples, rng):
+            return ("x",), [(rng,)] * nsamples
+
+        _, samples, _ = _resolve(make, ["x"], nsamples=2)
+        assert samples == ["rng", "rng"]
+
+    def test_export_strategies_lists_decorated_factories(self):
+        @Strategy.register("fix_r2_injected")
+        @_inject_rng
+        def injected(nsamples, rng):
+            return ("x",), [(rng,)]
+
+        @Strategy.register("fix_r2_patched")
+        @mock.patch("os.getcwd", return_value="/fake")
+        def patched(nsamples, getcwd):
+            return ("x",), [(os.getcwd(),)]
+
+        @Strategy.register("fix_r2_adapted")
+        @_adapt_zero_arg
+        def adapted():
+            return ("x",), [(1,)]
+
+        @Strategy.register("fix_r2_opaque")
+        @_passthrough
+        def opaque(n):
+            return ("x",), [(n,)]
+
+        data = json.loads(Strategy.export_strategies())
+
+        for name in ("fix_r2_injected", "fix_r2_patched", "fix_r2_adapted", "fix_r2_opaque"):
+            assert data[name] == {"type": "legacy_tuple", "argnames": ["x"]}
