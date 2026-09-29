@@ -3,6 +3,7 @@ Test ID generation for parametrized strategies.
 """
 
 import re
+import reprlib
 from collections.abc import Sequence
 from dataclasses import fields
 from typing import Any
@@ -12,16 +13,50 @@ from typing import Any
 _ADDRESS = re.compile(r" at 0x[0-9a-fA-F]+>")
 
 
+def _sorted_elements(values: set | frozenset) -> list:
+    """Return set elements in a deterministic order: by value when they sort, else by repr."""
+    # Sets are only partially ordered (by inclusion), so nested sets sort by repr
+    if not any(isinstance(v, (set, frozenset)) for v in values):
+        try:
+            return sorted(values)
+        except TypeError:
+            pass
+    return sorted(values, key=_stable_repr)
+
+
+@reprlib.recursive_repr()
+def _stable_repr(value: Any) -> str:
+    """
+    Return ``repr(value)``, with the elements of sets in a deterministic order.
+
+    A set of strings reprs in hash order, which changes with ``PYTHONHASHSEED``
+    (so between xdist workers). Sets nested in plain tuples, lists and dicts
+    are ordered too; a container that contains itself is shown as ``...``.
+    """
+    if isinstance(value, (set, frozenset)) and value:
+        body = "{" + ", ".join(_stable_repr(v) for v in _sorted_elements(value)) + "}"
+        return body if type(value) is set else f"{type(value).__name__}({body})"
+    if type(value) is tuple:
+        items = [_stable_repr(v) for v in value]
+        return f"({items[0]},)" if len(items) == 1 else "(" + ", ".join(items) + ")"
+    if type(value) is list:
+        return "[" + ", ".join(_stable_repr(v) for v in value) + "]"
+    if type(value) is dict:
+        pairs = (f"{_stable_repr(k)}: {_stable_repr(v)}" for k, v in value.items())
+        return "{" + ", ".join(pairs) + "}"
+    return repr(value)
+
+
 def _value_repr(value: Any) -> str:
     """
-    Return ``repr(value)``, or the type name when the repr embeds a memory address.
+    Return a repr of *value* that is stable across runs with the same seed.
 
     The default object repr (``<Foo object at 0x7f...>``) differs on every run,
     so a value whose repr embeds a memory address is shown by its type name.
     Strings and bytes always keep their repr, even when they contain text such as
-    ``"fault at 0x10"``.
+    ``"fault at 0x10"``. Set elements are shown in a deterministic order.
     """
-    val_str = repr(value)
+    val_str = _stable_repr(value)
     if not isinstance(value, (str, bytes)) and _ADDRESS.search(val_str):
         return type(value).__name__
     return val_str

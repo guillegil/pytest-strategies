@@ -288,3 +288,53 @@ class TestIdsInRealRuns:
             "msg='fault at 0x10',code=1",
             "msg='fault at 0x20',code=2",
         ]
+
+    SET_STRATEGIES = """
+        from pytest_strategy import Parameter, RNGChoice, Strategy, TestArg
+
+        @Strategy.register("r2_perms")
+        def perms(nsamples):
+            return Parameter(
+                TestArg(
+                    "perms",
+                    rng_type=RNGChoice(
+                        [frozenset({"read", "write", "admin", "exec"}), frozenset({"read"})]
+                    ),
+                ),
+                TestArg("user", rng_type=RNGChoice(["alice", "bob"])),
+                directed_vectors={"all": ({"read", "write", "admin", "exec", "delete"}, "root")},
+            )
+        """
+    SET_TESTS = """
+        from pytest_strategy import Strategy
+
+        @Strategy.strategy("r2_perms")
+        def test_perms(perms, user):
+            pass
+        """
+
+    def test_set_ids_do_not_depend_on_the_hash_seed(self, pytester, monkeypatch):
+        pytester.makepyfile(set_strategies=self.SET_STRATEGIES)
+        pytester.makepyfile(test_sets=self.SET_TESTS)
+
+        collected = []
+        for hash_seed in ("1", "2", "3"):
+            monkeypatch.setenv("PYTHONHASHSEED", hash_seed)
+            result = pytester.runpytest_subprocess("--collect-only", "-q", "--rng-seed=1")
+            collected.append(_ids(result, "test_perms"))
+
+        assert len(collected[0]) == 11
+        assert collected[0][0] == "perms={'admin', 'delete...,user='root'"
+        assert collected[1] == collected[0]
+        assert collected[2] == collected[0]
+
+    def test_xdist_workers_collect_the_same_set_ids(self, pytester, monkeypatch):
+        pytest.importorskip("xdist")
+        monkeypatch.delenv("PYTHONHASHSEED", raising=False)
+        pytester.makepyfile(set_strategies=self.SET_STRATEGIES)
+        pytester.makepyfile(test_sets=self.SET_TESTS)
+
+        result = pytester.runpytest_subprocess("-n", "3", "--rng-seed=1")
+
+        result.stdout.no_fnmatch_line("*Different tests were collected*")
+        result.assert_outcomes(passed=11)

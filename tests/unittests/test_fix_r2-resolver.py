@@ -11,6 +11,8 @@ import inspect
 import json
 import os
 import random
+import subprocess
+import sys
 import textwrap
 import warnings
 from dataclasses import dataclass
@@ -20,6 +22,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import pytest_strategy
 from pytest_strategy import RNG, RNGInteger, Strategy
 from pytest_strategy._ids import generate_dataclass_ids, generate_test_ids
 from pytest_strategy._introspection import detect_dataclass_param
@@ -545,3 +548,50 @@ class TestIdsOfStringsWithAddresses:
         assert generate_test_ids(["c"], [(Codec(),)]) == ["c=Codec"]
         assert generate_test_ids(["m"], [(Codec().encode,)]) == ["m=method"]
         assert generate_test_ids(["cs"], [([Codec()],)]) == ["cs=list"]
+
+
+class TestIdsOfSets:
+    """Set elements are shown in a deterministic order."""
+
+    def test_set_of_strings_is_sorted(self):
+        assert generate_test_ids(["perms"], [({"write", "read", "admin"},)]) == [
+            "perms={'admin', 'read', 'write'}"
+        ]
+
+    def test_frozenset_of_strings_is_sorted(self):
+        assert generate_test_ids(["perms"], [(frozenset({"write", "read"}),)]) == [
+            "perms=frozenset({'read', 'write'})"
+        ]
+
+    def test_unsortable_elements_are_sorted_by_repr(self):
+        assert generate_test_ids(["v"], [({"b", 1, "a"},)]) == ["v={'a', 'b', 1}"]
+
+    def test_nested_sets_are_sorted(self):
+        assert generate_test_ids(["v"], [(({"b", "a"}, [frozenset({"d", "c"})]),)]) == [
+            "v=({'a', 'b'}, [frozenset({'c', 'd'})])"
+        ]
+
+    def test_other_values_keep_their_repr(self):
+        values = [set(), frozenset(), {3, 1, 2}, (1,), (), [1, "a"], {"k": 1}, 1.5]
+        assert generate_test_ids(["v"], [(v,) for v in values]) == [f"v={v!r}" for v in values]
+
+    def test_ids_do_not_depend_on_the_hash_seed(self):
+        code = (
+            "from pytest_strategy._ids import generate_dataclass_ids, generate_test_ids\n"
+            "rows = [({'read', 'write', 'admin', 'exec'}, frozenset({'x', 'y', 'z'}))]\n"
+            "print(generate_test_ids(['perms', 'more'], rows))\n"
+            "print(generate_test_ids(['perms'], [({'alpha', 'beta', 'gamma', 'delta'},)]))\n"
+        )
+        package_root = str(Path(pytest_strategy.__file__).resolve().parents[1])
+        python_path = os.pathsep.join(filter(None, [package_root, os.environ.get("PYTHONPATH")]))
+        outputs = {
+            subprocess.run(
+                [sys.executable, "-c", code],
+                env={**os.environ, "PYTHONPATH": python_path, "PYTHONHASHSEED": hash_seed},
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+            for hash_seed in ("1", "2", "3", "4")
+        }
+        assert len(outputs) == 1
