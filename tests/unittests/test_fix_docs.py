@@ -30,6 +30,13 @@ def _python_blocks(relative_path: str):
         yield text[: match.start()].count("\n") + 2, match.group(1)
 
 
+@pytest.fixture(scope="module")
+def pyproject():
+    """Parsed pyproject.toml (tomllib is stdlib from Python 3.11)."""
+    tomllib = pytest.importorskip("tomllib")
+    return tomllib.loads(_read("pyproject.toml"))
+
+
 # ---------------------------------------------------------------------------
 # Markdown documentation
 # ---------------------------------------------------------------------------
@@ -86,3 +93,51 @@ class TestExampleDocstrings:
         """Since 1.1.0a2 RNGSequence yields a random permutation under --nsamples=auto."""
         tree = ast.parse(_read("examples/sequence_example.py"))
         assert "deterministic" not in (ast.get_docstring(tree) or "").lower()
+
+
+# ---------------------------------------------------------------------------
+# Packaging metadata
+# ---------------------------------------------------------------------------
+
+
+class TestPackagingMetadata:
+    """pyproject.toml must describe the package that is actually shipped."""
+
+    def test_py_typed_marker_exists(self):
+        """The "Typing :: Typed" classifier and package-data promise a PEP 561 marker."""
+        assert (REPO_ROOT / "src" / "pytest_strategy" / "py.typed").is_file()
+
+    def test_py_typed_marker_is_declared_as_package_data(self, pyproject):
+        assert "py.typed" in pyproject["tool"]["setuptools"]["package-data"]["pytest_strategy"]
+
+    def test_python_classifiers_match_ci_matrix_and_requires_python(self, pyproject):
+        """Advertise exactly the versions CI tests, none below requires-python."""
+        project = pyproject["project"]
+        classified = sorted(
+            (c.rsplit(" :: ", 1)[1] for c in project["classifiers"] if re.search(r":: 3\.\d+$", c)),
+            key=lambda v: int(v.split(".")[1]),
+        )
+        matrix = re.search(r"python-version: \[([^\]]*)\]", _read(".github/workflows/tests.yml"))
+        assert matrix is not None
+        tested = [v.strip().strip("\"'") for v in matrix.group(1).split(",")]
+
+        assert classified == tested
+        minimum = re.fullmatch(r">=3\.(\d+)", project["requires-python"])
+        assert minimum is not None
+        assert int(classified[0].split(".")[1]) == int(minimum.group(1))
+
+    def test_development_status_matches_prerelease_version(self, pyproject):
+        """An alpha/beta version must not be classified as Production/Stable."""
+        project = pyproject["project"]
+        status = [c for c in project["classifiers"] if c.startswith("Development Status")]
+        pre = re.fullmatch(r"[\d.]+(?:(a|b|rc)\d+)?", project["version"])
+        assert pre is not None
+        if pre.group(1) == "a":
+            assert status == ["Development Status :: 3 - Alpha"]
+        elif pre.group(1):
+            assert "Development Status :: 5 - Production/Stable" not in status
+
+    def test_black_targets_match_requires_python(self, pyproject):
+        """black must not target Python versions the package does not support."""
+        minors = [int(t[len("py3") :]) for t in pyproject["tool"]["black"]["target-version"]]
+        assert min(minors) == 10

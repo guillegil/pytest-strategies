@@ -20,16 +20,16 @@ keywords = [
 ]
 
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
+    "Development Status :: 3 - Alpha",
     "Framework :: Pytest",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Testing",
     "Topic :: Software Development :: Testing :: Unit",
     "Typing :: Typed",
@@ -80,7 +80,7 @@ pytest_strategy = ["py.typed"]
 # ============================================================================
 [tool.black]
 line-length = 100
-target-version = ["py39", "py310", "py311", "py312"]
+target-version = ["py310", "py311", "py312"]
 include = '\.pyi?$'
 extend-exclude = '''
 /(
@@ -138,10 +138,6 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 warn_no_return = true
 strict_equality = true
-
-[[tool.mypy.overrides]]
-module = "tests.*"
-disallow_untyped_defs = false
 
 # ============================================================================
 # PYTEST - Testing Configuration
