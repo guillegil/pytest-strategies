@@ -221,3 +221,58 @@ class TestSeriesFiniteConstraintsSkipCombinations:
         with pytest.raises(ValueError, match="none of the 3 Series combinations"):
             param.generate_vectors(10)
         assert [v[0] for v in calls] == [1] * 4 + [2] * 4 + [3] * 4
+
+
+class TestExhaustiveRetriesRandomPositions:
+    """Auto mode redraws random args instead of dropping a combination on one bad draw."""
+
+    @pytest.mark.parametrize("seed", range(50))
+    def test_constraint_on_random_arg_keeps_every_combination(self, seed):
+        RNG.seed(seed)
+        param = Parameter(
+            TestArg("role", rng_type=Series(["admin", "user", "guest"])),
+            TestArg("uid", rng_type=RNGInteger(1, 1000)),
+            vector_constraints=[lambda v: v[1] > 500],
+        )
+        samples = param.generate_exhaustive()
+        assert [s[0] for s in samples] == ["admin", "user", "guest"]
+        assert all(s[1] > 500 for s in samples)
+
+    def test_sequence_only_constraint_still_filters_with_random_arg(self):
+        """Combinations whose sequence values break a constraint are still dropped."""
+        RNG.seed(0)
+        param = Parameter(
+            TestArg("lo", rng_type=Series([1, 2, 3])),
+            TestArg("hi", rng_type=Series([1, 2, 3])),
+            TestArg("pad", rng_type=RNGInteger(0, 9)),
+            vector_constraints=[lambda v: v[0] < v[1]],
+        )
+        samples = param.generate_exhaustive()
+        assert [s[:2] for s in samples] == [(1, 2), (1, 3), (2, 3)]
+
+    def test_unsatisfiable_random_constraint_drops_after_max_retries(self):
+        calls = []
+
+        def never(v):
+            calls.append(v)
+            return False
+
+        param = Parameter(
+            TestArg("s", rng_type=Series([1, 2])),
+            TestArg("i", rng_type=RNGInteger(0, 9)),
+            vector_constraints=[never],
+            max_retries=3,
+        )
+        assert param.generate_exhaustive() == []
+        assert [v[0] for v in calls] == [1, 1, 1, 2, 2, 2]
+
+    def test_no_random_args_checks_each_combination_once(self):
+        calls = []
+
+        def odd(v):
+            calls.append(v)
+            return v[0] % 2 == 1
+
+        param = Parameter(TestArg("s", rng_type=Series([1, 2, 3])), vector_constraints=[odd])
+        assert param.generate_exhaustive() == [(1,), (3,)]
+        assert calls == [(1,), (2,), (3,)]

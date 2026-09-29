@@ -48,3 +48,31 @@ class TestSeriesConstraintsFiniteMode:
         self._make_ordered_pairs(pytester, "fixser_c")
         result = pytester.runpytest_inprocess("--nsamples=auto")
         result.assert_outcomes(passed=3)
+
+
+class TestExhaustiveRandomConstraint:
+    """--nsamples=auto covers every Series value when the constraint is on a random arg."""
+
+    def test_auto_keeps_every_role_for_every_seed(self, pytester):
+        pytester.makepyfile(fixexh_strategies="""
+            from pytest_strategy import Strategy, Parameter, TestArg, Series, RNGInteger
+
+            @Strategy.register("fixexh_roles")
+            def factory(nsamples):
+                return Parameter(
+                    TestArg("role", rng_type=Series(["admin", "user", "guest"])),
+                    TestArg("uid", rng_type=RNGInteger(1, 1000)),
+                    vector_constraints=[lambda v: v[1] > 500],
+                )
+            """)
+        pytester.makepyfile(test_fixexh="""
+            from pytest_strategy import Strategy
+
+            @Strategy.strategy("fixexh_roles")
+            def test_roles(role, uid):
+                assert uid > 500
+            """)
+        # Seed 4 used to produce an empty parameter set (0 tests)
+        for seed in range(6):
+            result = pytester.runpytest_inprocess("--nsamples=auto", f"--rng-seed={seed}")
+            result.assert_outcomes(passed=3)

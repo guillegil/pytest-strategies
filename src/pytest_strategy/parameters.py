@@ -424,6 +424,10 @@ class Parameter:
             # Actually, let's raise ValueError as per docstring.
             raise ValueError("No sequence arguments found for exhaustive generation")
 
+        random_indices = [i for i in range(len(self.test_args)) if i not in sequence_indices]
+        # Redrawing only helps when there are non-sequence positions to change
+        attempts = self.max_retries if random_indices else 1
+
         # Generate Cartesian product
         samples = []
         for combination in itertools.product(*sequences):
@@ -434,15 +438,18 @@ class Parameter:
             for idx, value in zip(sequence_indices, combination):
                 vector[idx] = value
 
-            # Fill in non-sequence values with random generation
-            for i, arg in enumerate(self.test_args):
-                if i not in sequence_indices:
-                    vector[i] = arg.generate()
+            # Fill in non-sequence values with random generation, redrawing them if the
+            # constraints reject the vector. A combination that still fails (e.g. its
+            # sequence values alone break a constraint) is dropped.
+            for _ in range(attempts):
+                for i in random_indices:
+                    vector[i] = self.test_args[i].generate()
 
-            # Convert to tuple and validate
-            vector_tuple = tuple(vector)
-            if self._validate_vector(vector_tuple):
-                samples.append(vector_tuple)
+                # Convert to tuple and validate
+                vector_tuple = tuple(vector)
+                if self._validate_vector(vector_tuple):
+                    samples.append(vector_tuple)
+                    break
 
         return samples
 
