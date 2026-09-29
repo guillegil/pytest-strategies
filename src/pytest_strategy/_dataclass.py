@@ -2,6 +2,7 @@
 Dataclass conversion utilities for strategy samples.
 """
 
+import inspect
 from collections.abc import Sequence
 from dataclasses import fields
 
@@ -17,7 +18,9 @@ def convert_to_dataclass(
     The function validates that the dataclass ``__init__`` fields (fields with
     ``init=False`` are skipped) exactly match the strategy *argnames*, then
     builds each instance with keyword arguments, so argname order and
-    keyword-only fields do not matter.
+    keyword-only fields do not matter. A hand-written ``__init__`` that does not
+    take the field names as keywords (other names, or positional-only) gets the
+    values positionally, in field declaration order.
 
     Args:
         samples: Sequence of value tuples from the strategy.
@@ -47,5 +50,18 @@ def convert_to_dataclass(
             error_msg += f"  Extra in dataclass: {list(extra)}\n"
 
         raise ValueError(error_msg)
+
+    try:
+        inspect.signature(dataclass_type).bind(**dict.fromkeys(argnames))
+    except TypeError:
+        # Hand-written __init__ with other or positional-only parameter names
+        order = [f.name for f in fields(dataclass_type) if f.init]
+        return [
+            dataclass_type(*(values[name] for name in order))
+            for values in (dict(zip(argnames, sample)) for sample in samples)
+        ]
+    except ValueError:
+        # No inspectable signature: keep the keyword construction
+        pass
 
     return [dataclass_type(**dict(zip(argnames, sample))) for sample in samples]

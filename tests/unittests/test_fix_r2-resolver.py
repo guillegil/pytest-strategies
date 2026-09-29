@@ -16,7 +16,7 @@ import sys
 import textwrap
 import typing
 import warnings
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from pathlib import Path
 from typing import Optional
 from unittest import mock
@@ -26,6 +26,7 @@ import pytest
 
 import pytest_strategy
 from pytest_strategy import RNG, RNGInteger, Strategy
+from pytest_strategy._dataclass import convert_to_dataclass
 from pytest_strategy._ids import generate_dataclass_ids, generate_test_ids
 from pytest_strategy._introspection import detect_dataclass_param
 from pytest_strategy._resolver import call_factory, resolve_and_parametrize
@@ -650,3 +651,64 @@ class TestNoneDefaultDataclassParam:
             pass
 
         assert detect_dataclass_param(test_fn, ["x", "y"]) == (False, None, None)
+
+
+# ---------------------------------------------------------------------------
+# Dataclasses with a hand-written __init__
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Rect:
+    width: int
+    height: int
+
+    def __init__(self, w, h, /):
+        self.width = w
+        self.height = h
+
+
+@dataclass
+class RenamedRect:
+    width: int
+    height: int
+
+    def __init__(self, w, h):
+        self.width = w
+        self.height = h
+
+
+@dataclass
+class WithInitVar:
+    a: int
+    scale: InitVar[int] = 100
+    b: int = 0
+
+    def __post_init__(self, scale):
+        self.scaled = self.a * scale
+
+
+class TestConvertCustomInit:
+    """A hand-written __init__ gets the values positionally, in field order."""
+
+    @pytest.mark.parametrize("dc_type", [Rect, RenamedRect])
+    def test_custom_init(self, dc_type):
+        result = convert_to_dataclass([(1, 2), (3, 4)], ["width", "height"], dc_type)
+        assert [(r.width, r.height) for r in result] == [(1, 2), (3, 4)]
+
+    def test_custom_init_with_reordered_argnames(self):
+        result = convert_to_dataclass([(2, 1)], ["height", "width"], Rect)
+        assert (result[0].width, result[0].height) == (1, 2)
+
+    def test_generated_init_with_init_var_still_uses_keywords(self):
+        """Guards behaviour that already worked: positional values would fill the InitVar."""
+        result = convert_to_dataclass([(1, 2)], ["a", "b"], WithInitVar)
+        assert (result[0].a, result[0].b, result[0].scaled) == (1, 2, 100)
+
+    def test_resolver_builds_custom_init_dataclass(self):
+        def test_rect(r: Rect):
+            pass
+
+        _, samples, ids = _parametrize(lambda nsamples: (("width", "height"), [(1, 2)]), test_rect)
+        assert [(r.width, r.height) for r in samples] == [(1, 2)]
+        assert ids == ["width=1,height=2"]

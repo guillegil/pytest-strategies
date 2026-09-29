@@ -338,3 +338,44 @@ class TestIdsInRealRuns:
 
         result.stdout.no_fnmatch_line("*Different tests were collected*")
         result.assert_outcomes(passed=11)
+
+
+# ---------------------------------------------------------------------------
+# Dataclass mode: hand-written __init__ and pytest.param samples
+# ---------------------------------------------------------------------------
+
+
+class TestDataclassModeSamples:
+    """Custom __init__ dataclasses are built; pytest.param keeps its marks and id."""
+
+    def test_custom_init_dataclass(self, pytester):
+        pytester.makepyfile(rect_strategies="""
+            from pytest_strategy import Strategy
+
+            @Strategy.register("r2_rect")
+            def rect(nsamples):
+                return ("width", "height"), [(1, 2), (3, 4)]
+            """)
+        pytester.makepyfile(test_rect="""
+            from dataclasses import dataclass
+
+            from pytest_strategy import Strategy
+
+            @dataclass
+            class Rect:
+                width: int
+                height: int
+
+                def __init__(self, w, h, /):
+                    self.width = w
+                    self.height = h
+
+            @Strategy.strategy("r2_rect")
+            def test_rect(r: Rect):
+                assert r.height == r.width + 1
+            """)
+
+        result = pytester.runpytest_inprocess("-v")
+
+        result.assert_outcomes(passed=2)
+        result.stdout.fnmatch_lines(["*test_rect[[]width=1,height=2[]] PASSED*"])
