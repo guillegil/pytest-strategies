@@ -7,6 +7,7 @@ Tests cover:
 - Weights of weighted types and RNGEnum validated at construction
 - RNGEnum rejecting non-Enum arguments and member-less Enums with RNGValueError
 - RNGEnum filtering members by the predicate up front instead of retrying draws
+- Series/RNGSequence rejecting unordered sets
 """
 
 import math
@@ -20,9 +21,11 @@ from pytest_strategy import (
     RNGEnum,
     RNGFloat,
     RNGInteger,
+    RNGSequence,
     RNGValueError,
     RNGWeightedFloat,
     RNGWeightedInteger,
+    Series,
 )
 
 
@@ -327,3 +330,38 @@ class TestRNGEnumPredicateFiltersMembers:
         weighted = RNGEnum(Shade, weights=weights)
         assert [uniform.generate() for _ in range(50)] == expected_uniform
         assert [weighted.generate() for _ in range(50)] == expected_weighted
+
+
+class TestSequenceLikeRejectsSets:
+    """Series/RNGSequence need an ordered input for seeded runs to be reproducible"""
+
+    @pytest.mark.parametrize("seq_cls", [Series, RNGSequence])
+    @pytest.mark.parametrize("container", [set, frozenset])
+    def test_set_rejected(self, seq_cls, container):
+        """A set of strings iterates in an order that changes with PYTHONHASHSEED"""
+        with pytest.raises(
+            RNGValueError,
+            match=rf"{seq_cls.__name__} requires an ordered sequence, got a "
+            rf"{container.__name__} .* use sorted\(\.\.\.\) or a list",
+        ):
+            seq_cls(container({"alpha", "beta", "gamma", "delta"}))
+
+    def test_sorted_set_accepted(self):
+        """The suggested fix works"""
+        series = Series(sorted({"beta", "alpha", "gamma"}))
+
+        assert series._get_auto_sequence() == ["alpha", "beta", "gamma"]
+
+    @pytest.mark.parametrize(
+        "sequence",
+        [
+            ["b", "a", "c"],
+            ("b", "a", "c"),
+            {"b": 1, "a": 2, "c": 3}.keys(),
+            (x for x in "bac"),
+        ],
+        ids=["list", "tuple", "dict_keys", "generator"],
+    )
+    def test_ordered_iterables_still_accepted(self, sequence):
+        """dict keys, generators and other ordered iterables keep working"""
+        assert Series(sequence)._get_auto_sequence() == ["b", "a", "c"]

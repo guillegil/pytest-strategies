@@ -536,6 +536,15 @@ class SequenceLike(RNGType):
     """
 
     def __init__(self, sequence: Sequence, predicate: Callable | None = None):
+        # Sets iterate in hash order, which for str/bytes changes with PYTHONHASHSEED,
+        # so the same --rng-seed would give different values in each process
+        if isinstance(sequence, (set, frozenset)):
+            raise RNGValueError(
+                f"{type(self).__name__} requires an ordered sequence, got a "
+                f"{type(sequence).__name__} whose iteration order is not reproducible "
+                "across runs; use sorted(...) or a list"
+            )
+
         self.sequence = list(sequence)
 
         # Apply predicate if provided
