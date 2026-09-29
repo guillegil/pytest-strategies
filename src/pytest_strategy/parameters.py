@@ -37,10 +37,12 @@ class Parameter:
             test_vectors: Dictionary mapping test vector names to value tuples (for test mode)
             always_include_directed: If True, directed vectors are included in "mixed" mode
             vector_constraints: List of functions that validate entire parameter vectors
-            max_retries: Maximum attempts to satisfy vector_constraints before raising
+            max_retries: Maximum attempts to satisfy vector_constraints before raising (>= 1)
+            nsamples: Default number of random samples for this strategy (None or >= 0)
 
         Raises:
             ValueError: If directed vectors don't match the number of test args
+            ValueError: If nsamples or max_retries is not a valid count
 
         Examples:
             # Simple parameter with 2 args
@@ -59,6 +61,14 @@ class Parameter:
                 }
             )
         """
+        # Validate counts up front (bool is an int subclass, so reject it explicitly)
+        if nsamples is not None and (
+            not isinstance(nsamples, int) or isinstance(nsamples, bool) or nsamples < 0
+        ):
+            raise ValueError(f"nsamples must be None or an int >= 0, got {nsamples!r}")
+        if not isinstance(max_retries, int) or isinstance(max_retries, bool) or max_retries < 1:
+            raise ValueError(f"max_retries must be an int >= 1, got {max_retries!r}")
+
         # Copy the caller's containers so add_*/remove_* never mutate shared objects
         self.test_args = list(test_args)
         self.directed_vectors = dict(directed_vectors or {})
@@ -272,7 +282,7 @@ class Parameter:
         Generate parameter vectors.
 
         Args:
-            n: Number of random samples to generate
+            n: Number of random samples to generate (>= 0)
             mode: Sampling mode
                 - "all": All directed vectors + n random samples (default)
                 - "random_only": Only n random samples, no directed
@@ -322,6 +332,10 @@ class Parameter:
         # Mode: directed_only
         if mode == "directed_only":
             return list(self.directed_vectors.values())
+
+        # The remaining modes generate n random samples
+        if n < 0:
+            raise ValueError(f"n must be >= 0, got {n}")
 
         # Mode: all - always include all directed vectors
         if mode == "all" or mode == "mixed" and self.always_include_directed:
