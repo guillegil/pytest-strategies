@@ -8,6 +8,7 @@ import pytest
 
 from pytest_strategy import RNGInteger, Series
 from pytest_strategy.parameters import Parameter
+from pytest_strategy.rng import RNG
 from pytest_strategy.test_args import TestArg
 
 
@@ -121,3 +122,102 @@ class TestCountValidation:
             directed_vectors={"edge": (0,)},
         )
         assert param.generate_vectors(0) == [(0,)]
+
+
+class TestSeriesFiniteConstraintsSkipCombinations:
+    """Finite mode skips Series combinations that the vector constraints reject."""
+
+    @staticmethod
+    def _ordered_pairs(**kwargs):
+        return Parameter(
+            TestArg("lo", rng_type=Series([1, 2, 3])),
+            TestArg("hi", rng_type=Series([1, 2, 3])),
+            vector_constraints=[lambda v: v[0] < v[1]],
+            **kwargs,
+        )
+
+    def test_all_series_cycles_over_valid_combinations(self):
+        """n larger than the valid set cycles through it in product order."""
+        samples = self._ordered_pairs().generate_vectors(10)
+        valid = [(1, 2), (1, 3), (2, 3)]
+        assert samples == (valid * 4)[:10]
+
+    def test_all_series_truncates_to_first_valid_combinations(self):
+        """n smaller than the valid set takes the first n valid rows."""
+        assert self._ordered_pairs().generate_vectors(2) == [(1, 2), (1, 3)]
+
+    def test_finite_matches_exhaustive_filtering(self):
+        """Finite mode with n == number of valid rows equals auto mode."""
+        param = self._ordered_pairs()
+        exhaustive = param.generate_exhaustive()
+        assert param.generate_vectors(len(exhaustive), mode="random_only") == exhaustive
+
+    def test_single_series_value_excluding_constraint(self):
+        param = Parameter(
+            TestArg("x", rng_type=Series([1, 2, 3])),
+            vector_constraints=[lambda v: v[0] != 2],
+        )
+        assert param.generate_vectors(3, mode="random_only") == [(1,), (3,), (1,)]
+
+    def test_series_plus_random_constraint_on_series_value_only(self):
+        """Redrawing the random arg cannot fix a rejected Series value; it is skipped."""
+        RNG.seed(0)
+        param = Parameter(
+            TestArg("s", rng_type=Series([1, 2, 3])),
+            TestArg("i", rng_type=RNGInteger(0, 5)),
+            vector_constraints=[lambda v: v[0] != 1],
+        )
+        samples = param.generate_vectors(4)
+        assert [s[0] for s in samples] == [2, 3, 2, 3]
+        assert all(0 <= s[1] <= 5 for s in samples)
+
+    def test_series_plus_random_constraint_on_random_value_keeps_every_combination(self):
+        """A constraint on the random arg is met by redrawing, so no combination is lost."""
+        RNG.seed(0)
+        param = Parameter(
+            TestArg("role", rng_type=Series(["admin", "user", "guest"])),
+            TestArg("uid", rng_type=RNGInteger(1, 1000)),
+            vector_constraints=[lambda v: v[1] > 500],
+        )
+        samples = param.generate_vectors(6)
+        assert [s[0] for s in samples] == ["admin", "user", "guest"] * 2
+        assert all(s[1] > 500 for s in samples)
+
+    def test_directed_vectors_still_prepended(self):
+        param = self._ordered_pairs(directed_vectors={"same": (2, 2)})
+        assert param.generate_vectors(3) == [(2, 2), (1, 2), (1, 3), (2, 3)]
+
+    def test_all_series_unsatisfiable_raises_after_one_cycle(self):
+        """Every combination is checked once; nothing is pointlessly retried."""
+        calls = []
+
+        def never(v):
+            calls.append(v)
+            return False
+
+        param = Parameter(
+            TestArg("a", rng_type=Series([1, 2])),
+            TestArg("b", rng_type=Series(["x", "y", "z"])),
+            vector_constraints=[never],
+        )
+        with pytest.raises(ValueError, match="Could not generate valid vector"):
+            param.generate_vectors(5)
+        assert calls == [(1, "x"), (1, "y"), (1, "z"), (2, "x"), (2, "y"), (2, "z")]
+
+    def test_series_plus_random_unsatisfiable_raises_after_one_cycle(self):
+        """With random args, each combination gets max_retries attempts, then it stops."""
+        calls = []
+
+        def never(v):
+            calls.append(v)
+            return False
+
+        param = Parameter(
+            TestArg("s", rng_type=Series([1, 2, 3])),
+            TestArg("i", rng_type=RNGInteger(0, 100)),
+            vector_constraints=[never],
+            max_retries=4,
+        )
+        with pytest.raises(ValueError, match="none of the 3 Series combinations"):
+            param.generate_vectors(10)
+        assert [v[0] for v in calls] == [1] * 4 + [2] * 4 + [3] * 4

@@ -1,6 +1,7 @@
 # parameter.py
 
 import itertools
+import math
 from typing import Any, Callable
 
 from .rng import SequenceLike, Series
@@ -354,31 +355,37 @@ class Parameter:
             ]
             if series_indices:
                 series_seqs = [self.test_args[i].rng_type.sequence for i in series_indices]
-                for combo in itertools.islice(itertools.cycle(itertools.product(*series_seqs)), n):
+                random_indices = [i for i in range(len(self.test_args)) if i not in series_indices]
+                # Redrawing only helps when there are non-Series positions to change
+                attempts = self.max_retries if random_indices else 1
+                num_combos = math.prod(len(seq) for seq in series_seqs)
+                series_rows = 0
+                misses = 0
+                for combo in itertools.cycle(itertools.product(*series_seqs)):
+                    if series_rows == n:
+                        break
                     vec: list = [None] * len(self.test_args)
                     for pos, idx in enumerate(series_indices):
                         vec[idx] = combo[pos]
-                    for i, arg in enumerate(self.test_args):
-                        if i not in series_indices:
-                            vec[i] = arg.generate()
-                    candidate = tuple(vec)
-                    if self._validate_vector(candidate):
-                        samples.append(candidate)
+                    # Try fresh random values for the non-Series positions
+                    for _ in range(attempts):
+                        for i in random_indices:
+                            vec[i] = self.test_args[i].generate()
+                        candidate = tuple(vec)
+                        if self._validate_vector(candidate):
+                            samples.append(candidate)
+                            series_rows += 1
+                            misses = 0
+                            break
                     else:
-                        # Retry with fresh random values for non-Series positions
-                        valid = False
-                        for _ in range(self.max_retries):
-                            for i, arg in enumerate(self.test_args):
-                                if i not in series_indices:
-                                    vec[i] = arg.generate()
-                            candidate = tuple(vec)
-                            if self._validate_vector(candidate):
-                                samples.append(candidate)
-                                valid = True
-                                break
-                        if not valid:
+                        # Skip a combination the constraints reject and move on to the
+                        # next one, unless a whole cycle in a row has produced nothing
+                        misses += 1
+                        if misses == num_combos:
                             raise ValueError(
-                                f"Could not generate valid vector after {self.max_retries} attempts. "
+                                "Could not generate valid vector: none of the "
+                                f"{num_combos} Series combinations satisfied the vector "
+                                f"constraints ({attempts} attempt(s) each). "
                                 "Check your constraints."
                             )
             else:
