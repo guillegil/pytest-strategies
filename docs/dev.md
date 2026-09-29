@@ -30,8 +30,8 @@ from pytest_strategy.rng import RNGInteger, RNGFloat, RNGChoice
 # Define a strategy
 @Strategy.register("test_addition_strategy")
 def create_addition_samples(nsamples):
-    # Create parameter with test arguments
-    param = Parameter(
+    # Return a Parameter; the plugin generates the vectors from it
+    return Parameter(
         TestArg("a", rng_type=RNGInteger(0, 100)),
         TestArg("b", rng_type=RNGInteger(0, 100)),
         directed_vectors={
@@ -39,12 +39,6 @@ def create_addition_samples(nsamples):
             "max": (100, 100),
         }
     )
-
-    # Generate samples
-    samples = param.generate_samples(nsamples, mode="all")
-
-    # Return (argnames, samples) tuple
-    return param.arg_names, samples
 
 # Use the strategy in a test
 @Strategy.strategy("test_addition_strategy")
@@ -73,7 +67,7 @@ pytest test_example.py --vector-name "zeros"
 pytest test_example.py --vector-index 0
 
 # Set seed for reproducibility
-pytest test_example.py --seed 42
+pytest test_example.py --rng-seed 42
 ```
 
 ## Architecture
@@ -81,14 +75,14 @@ pytest test_example.py --seed 42
 ### File Structure
 
 ```
-pytest_strategy/
+src/pytest_strategy/
 ├── __init__.py          # Package initialization
 ├── plugin.py            # Pytest plugin hooks and CLI options
-├── strategies.py        # Strategy decorator and registry
-├── parameter.py         # Parameter class (vector container)
+├── strategy.py          # Strategy decorator and registry
+├── parameters.py        # Parameter class (vector container)
 ├── test_args.py         # TestArg class (single argument definition)
-├── rng.py              # Random number generation and RNG types
-└── pyproject.toml      # Project configuration
+├── rng.py               # Random number generation and RNG types
+└── _*.py                # Internal helpers (resolver, introspection, test IDs, dataclasses, runtime)
 ```
 
 ## Core Components
@@ -224,7 +218,7 @@ samples = arg3.generate_samples(10)        # 10 samples (+ directed if configure
 
 ---
 
-### 3. `parameter.py` - Parameter Vector Container
+### 3. `parameters.py` - Parameter Vector Container
 
 Groups multiple `TestArg` instances into parameter vectors (tuples).
 
@@ -246,10 +240,10 @@ param = Parameter(
 )
 
 # Generate samples with different modes
-samples = param.generate_samples(10, mode="all")           # 3 directed + 10 random
-samples = param.generate_samples(10, mode="random_only")   # 10 random only
-samples = param.generate_samples(0, mode="directed_only")  # 3 directed only
-samples = param.generate_samples(10, mode="mixed")         # Respects always_include_directed
+samples = param.generate_vectors(10, mode="all")           # 3 directed + 10 random
+samples = param.generate_vectors(10, mode="random_only")   # 10 random only
+samples = param.generate_vectors(0, mode="directed_only")  # 3 directed only
+samples = param.generate_vectors(10, mode="mixed")         # Respects always_include_directed
 
 # CLI support
 vector = param.get_vector_by_name("edge_zero")    # Get specific vector
@@ -290,7 +284,7 @@ param.add_constraint(lambda v: v[0] < v[1])  # Ensure first < second
 
 ---
 
-### 4. `strategies.py` - Strategy Registry & Decorator
+### 4. `strategy.py` - Strategy Registry & Decorator
 
 Manages strategy registration and applies parametrization to tests.
 
@@ -301,7 +295,9 @@ from pytest_strategy.rng import RNGInteger
 # Register a strategy
 @Strategy.register("my_strategy")
 def create_samples(nsamples):
-    param = Parameter(
+    # Return the Parameter itself; the plugin generates the vectors from it,
+    # which is what lets CLI options such as --vector-mode apply to it
+    return Parameter(
         TestArg("x", rng_type=RNGInteger(0, 10)),
         TestArg("y", rng_type=RNGInteger(0, 10)),
         directed_vectors={
@@ -309,11 +305,6 @@ def create_samples(nsamples):
             "max": (10, 10),
         }
     )
-
-    samples = param.generate_samples(nsamples, mode="all")
-
-    # Must return (argnames, samples) tuple
-    return param.arg_names, samples
 
 # Apply strategy to test
 @Strategy.strategy("my_strategy")
@@ -346,7 +337,7 @@ Provides pytest hooks and CLI options.
 
 ```bash
 --nsamples N              # Number of random samples (default: 10)
---seed SEED               # Random seed for reproducibility
+--rng-seed SEED           # Random seed for reproducibility
 --vector-mode MODE        # Sampling mode: all, random_only, directed_only, mixed
 --vector-name NAME        # Run specific directed vector by name
 --vector-index INDEX      # Run specific directed vector by index
@@ -397,8 +388,7 @@ def create_division_samples(nsamples):
     # Add constraint: divisor must not be zero
     param.add_constraint(lambda v: v[1] != 0)
 
-    samples = param.generate_samples(nsamples, mode="all")
-    return param.arg_names, samples
+    return param
 
 @Strategy.strategy("division_strategy")
 def test_division(dividend, divisor):
@@ -419,7 +409,7 @@ def test_division(dividend, divisor):
 def create_string_samples(nsamples):
     from pytest_strategy.rng import RNGString, RNGChoice
 
-    param = Parameter(
+    return Parameter(
         TestArg("str1", rng_type=RNGString(min_length=0, max_length=20)),
         TestArg("str2", rng_type=RNGString(min_length=0, max_length=20)),
         TestArg("separator", rng_type=RNGChoice(choices=["", " ", "-", "_"])),
@@ -429,9 +419,6 @@ def create_string_samples(nsamples):
             "with_space": ("hello", "world", " "),
         }
     )
-
-    samples = param.generate_samples(nsamples, mode="all")
-    return param.arg_names, samples
 
 @Strategy.strategy("string_concat_strategy")
 def test_string_concatenation(str1, str2, separator):
@@ -447,7 +434,8 @@ def test_string_concatenation(str1, str2, separator):
 **Run the tests:**
 
 ```bash
-# Default: 4 directed + 10 random = 14 test cases per test
+# Default: directed vectors + 10 random
+# (4 + 10 = 14 cases for test_division, 3 + 10 = 13 for test_string_concatenation)
 pytest test_math_operations.py
 
 # More random samples
@@ -463,7 +451,7 @@ pytest test_math_operations.py --nsamples 50 --vector-mode random_only
 pytest test_math_operations.py --vector-name "simple"
 
 # Reproducible run
-pytest test_math_operations.py --seed 42
+pytest test_math_operations.py --rng-seed 42
 
 # Verbose output
 pytest test_math_operations.py -v
@@ -518,18 +506,27 @@ param.add_constraint(lambda v: v[0] + v[1] <= 100)
 
 ### Reproducibility
 
+Parametrized values are generated when pytest collects the tests, so the seed
+has to be set before collection. Use the CLI option:
+
+```bash
+pytest --rng-seed 42
+```
+
+The seed of every run is shown in the pytest report header
+(`pytest-strategies: RNG seed = ...`), which pytest hides under `-q` or
+`--no-header`.
+
+Calling `RNG.seed()` inside a test body does not change the test's parameters,
+which are already fixed by then. It only makes the random values drawn inside
+that body reproducible:
+
 ```python
-# Set seed in test or via CLI
 from pytest_strategy.rng import RNG
 
 def test_something():
     RNG.seed(42)
-    # Test will always generate same random values
-```
-
-Or via CLI:
-```bash
-pytest --seed 42
+    value = RNG.integer(0, 100)  # Same value on every run
 ```
 
 ## Best Practices
@@ -604,7 +601,7 @@ Make sure you:
 
 ### Tests not reproducible
 
-- Use `--seed` CLI option or `RNG.seed()` in code
+- Pass the same `--rng-seed` value (a run's seed is shown in the report header); calling `RNG.seed()` inside a test body does not change its parametrized values
 - Ensure no other randomness sources (use RNG class only)
 
 ## Future Enhancements

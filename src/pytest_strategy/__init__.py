@@ -20,7 +20,7 @@ Example Usage:
 
     @Strategy.register("addition_strategy")
     def create_samples(nsamples):
-        param = Parameter(
+        return Parameter(
             TestArg("a", rng_type=RNGInteger(0, 100)),
             TestArg("b", rng_type=RNGInteger(0, 100)),
             directed_vectors={
@@ -28,7 +28,6 @@ Example Usage:
                 "max": (100, 100),
             }
         )
-        return param.arg_names, param.generate_samples(nsamples)
 
     @Strategy.strategy("addition_strategy")
     def test_addition(a, b):
@@ -48,7 +47,7 @@ Dataclass Support:
 
 CLI Options:
     pytest --nsamples 50              # Generate 50 random samples
-    pytest --seed 42                  # Set random seed for reproducibility
+    pytest --rng-seed 42              # Set random seed for reproducibility
     pytest --vector-mode directed_only # Run only directed test vectors
     pytest --vector-name "zeros"      # Run specific directed vector
 """

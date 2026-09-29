@@ -24,9 +24,13 @@
 
 ## 📦 Installation
 
+`pytest-strategies` is not published on PyPI yet. Install it from GitHub:
+
 ```bash
-pip install pytest-strategies
+pip install git+https://github.com/guillegil/pytest-strategies.git
 ```
+
+or from a local clone with `pip install -e .`.
 
 ## ⚡ Quick Start
 
@@ -133,8 +137,6 @@ Parameter(
     TestArg("max", rng_type=RNGInteger(0, 10)),
     vector_constraints=[
         lambda v: v[0] < v[1]  # Ensure min < max
-    ]
-)
     ]
 )
 ```
@@ -274,15 +276,17 @@ Control test generation directly from the command line:
 | `--nsamples`     | Number of samples (default 10), or "auto" for exhaustive. Overrides a strategy's own `nsamples`. | `pytest --nsamples=50` or `--nsamples=auto` |
 | `--vector-mode`  | Generation mode: `all`, `random_only`, `directed_only`, `mixed`, `test` | `pytest --vector-mode=test`                 |  |
 | `--vector-name`  | Run only a specific directed vector by name                             | `pytest --vector-name=edge_case_1`          |
-| `--vector-index` | Run only a specific sample by index                                     | `pytest --vector-index=0`                   |
+| `--vector-index` | Run only the directed vector at this index                              | `pytest --vector-index=0`                   |
 | `--rng-seed`     | Set seed for reproducibility                                            | `pytest --rng-seed=42`                      |
 
 ## 🔄 Reproducibility
 
-Every test run prints the RNG seed used:
+The RNG seed of each run is printed in the pytest report header:
 ```text
 pytest-strategies: RNG seed = 1763926297314361000
 ```
+pytest does not show the header with `-q` or `--no-header`, so drop those flags (or pass your own `--rng-seed`) when you need the seed, e.g. in CI.
+
 If a test fails, you can reproduce the exact same data sequence by passing this seed:
 ```bash
 pytest --rng-seed=1763926297314361000

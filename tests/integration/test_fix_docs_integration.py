@@ -1,0 +1,106 @@
+"""
+End-to-end checks that documented examples and CLI options actually work.
+
+The package docstring, the runnable snippets of README.md / docs/dev.md and the
+scripts in examples/ are copied into a pytester sandbox and run the way a user
+would run them. These documents went stale before (they called the renamed
+``Parameter.generate_samples`` and a ``--seed`` flag that never existed), and
+nothing ran examples/, so a flaky example went unnoticed.
+"""
+
+import random
+import re
+import shlex
+import textwrap
+from pathlib import Path
+
+import pytest
+
+import pytest_strategy
+from pytest_strategy import RNG, Strategy
+
+pytest_plugins = ["pytester"]
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+EXAMPLES = sorted((REPO_ROOT / "examples").glob("*.py"))
+OPTION_RE = re.compile(r"(?<![\w-])--[a-z][\w-]*")
+
+
+@pytest.fixture(autouse=True)
+def _restore_global_state():
+    """Undo what the in-process runs change globally: the registry and the RNG seed."""
+    registry = dict(Strategy._registry)
+    seed = RNG.get_seed()
+    state = random.getstate()
+    yield
+    Strategy._registry.clear()
+    Strategy._registry.update(registry)
+    RNG.seed(seed)
+    random.setstate(state)
+
+
+def _package_docstring_example() -> str:
+    """The "Example Usage" section of ``help(pytest_strategy)``."""
+    doc = pytest_strategy.__doc__ or ""
+    return textwrap.dedent(doc.split("Example Usage:", 1)[1].split("Dataclass Support:", 1)[0])
+
+
+def _package_docstring_cli_lines() -> list:
+    """The pytest command lines listed under "CLI Options" in the package docstring."""
+    section = (pytest_strategy.__doc__ or "").split("CLI Options:", 1)[1]
+    commands = (line.split("#", 1)[0].strip() for line in section.splitlines())
+    return [shlex.split(command)[1:] for command in commands if command.startswith("pytest ")]
+
+
+def _runnable_markdown_blocks() -> list:
+    """Python blocks of README.md and docs/dev.md that both register and use a strategy."""
+    params = []
+    for doc in ("README.md", "docs/dev.md"):
+        text = (REPO_ROOT / doc).read_text(encoding="utf-8")
+        for match in re.finditer(r"```python\n(.*?)```", text, re.S):
+            source = match.group(1)
+            if "@Strategy.register(" in source and "@Strategy.strategy(" in source:
+                line = text[: match.start()].count("\n") + 2
+                params.append(pytest.param(source, id=f"{doc}:{line}"))
+    return params
+
+
+class TestPackageDocstring:
+    """The example in ``help(pytest_strategy)`` must run as documented."""
+
+    @pytest.mark.parametrize("args", _package_docstring_cli_lines(), ids=" ".join)
+    def test_example_runs_with_documented_cli_line(self, pytester, args):
+        pytester.makepyfile(test_doc_example=_package_docstring_example())
+        result = pytester.runpytest(*args)
+        assert result.ret == pytest.ExitCode.OK, result.stdout.str()
+        assert result.parseoutcomes().get("passed", 0) > 0
+
+    def test_example_honours_vector_mode(self, pytester):
+        """The factory must return a Parameter: the legacy tuple form ignores --vector-mode."""
+        pytester.makepyfile(test_doc_example=_package_docstring_example())
+        pytester.runpytest("--vector-mode", "directed_only").assert_outcomes(passed=2)
+
+
+class TestMarkdownExamples:
+    """Self-contained strategy snippets in the Markdown docs must run."""
+
+    @pytest.mark.parametrize("source", _runnable_markdown_blocks())
+    def test_snippet_runs(self, pytester, source):
+        pytester.makepyfile(test_snippet=source)
+        result = pytester.runpytest("--rng-seed", "1")
+        assert result.ret == pytest.ExitCode.OK, result.stdout.str()
+
+
+class TestDocumentedCliOptions:
+    def test_every_documented_option_exists(self, pytester):
+        """Every --option mentioned in the docs and examples must be accepted by pytest."""
+        sources = [
+            (REPO_ROOT / "README.md").read_text(encoding="utf-8"),
+            (REPO_ROOT / "docs" / "dev.md").read_text(encoding="utf-8"),
+            pytest_strategy.__doc__ or "",
+            *(path.read_text(encoding="utf-8") for path in EXAMPLES),
+        ]
+        documented = {option for text in sources for option in OPTION_RE.findall(text)}
+
+        known = set(OPTION_RE.findall(pytester.runpytest("--help").stdout.str()))
+        assert documented - known == set()
