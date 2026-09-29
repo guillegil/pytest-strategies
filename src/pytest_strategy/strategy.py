@@ -1,3 +1,4 @@
+import warnings
 from collections.abc import Sequence
 from typing import Any, Callable
 
@@ -10,6 +11,27 @@ from ._introspection import detect_dataclass_mode, validate_signature
 from ._resolver import call_factory, resolve_and_parametrize
 from ._runtime import runtime
 from .parameters import Parameter
+
+
+class PytestStrategiesWarning(UserWarning):
+    """Warning category for pytest-strategies (e.g. a strategy name registered twice)."""
+
+
+def _factory_origin(fn: Callable[..., Any]) -> tuple[str | None, str | None]:
+    """
+    Identify a factory by its source file and qualified name.
+
+    The module name is deliberately not used: the plugin executes each strategies
+    file under a fresh module name in every (possibly nested) pytest session.
+    """
+    code = getattr(fn, "__code__", None)
+    return (code.co_filename if code is not None else None, getattr(fn, "__qualname__", None))
+
+
+def _describe_factory(fn: Callable[..., Any]) -> str:
+    """Return a readable 'file:qualname' description of a factory for messages."""
+    filename, qualname = _factory_origin(fn)
+    return f"{filename or '<unknown>'}:{qualname or repr(fn)}"
 
 
 class Strategy:
@@ -123,6 +145,17 @@ class Strategy:
         """
 
         def decorate(fn: Callable[[int | str], tuple[Sequence[str], Sequence[Any]]]):
+            # Warn when a different function takes over the name. Re-registering the
+            # same function (e.g. a strategies file re-executed in a nested session)
+            # stays silent. The last registration wins either way.
+            existing = Strategy._registry.get(name)
+            if existing is not None and _factory_origin(existing) != _factory_origin(fn):
+                warnings.warn(
+                    f"Strategy '{name}' is registered more than once: "
+                    f"{_describe_factory(fn)} replaces {_describe_factory(existing)}",
+                    PytestStrategiesWarning,
+                    stacklevel=2,
+                )
             Strategy._registry[name] = fn
             return fn
 

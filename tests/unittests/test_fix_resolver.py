@@ -1,12 +1,14 @@
 """
-Regression tests for resolver fixes.
+Regression tests for resolver and strategy registration fixes.
 
-These tests mock the pytest.Config and registry to drive resolve_and_parametrize
+Most tests mock the pytest.Config and registry to drive resolve_and_parametrize
 directly and inspect the pytest.mark.parametrize it applies.
 """
 
 import inspect
 import json
+import textwrap
+import warnings
 from unittest.mock import MagicMock
 
 import pytest
@@ -15,6 +17,7 @@ from pytest_strategy import RNGInteger, Strategy
 from pytest_strategy._resolver import call_factory, resolve_and_parametrize
 from pytest_strategy.parameters import Parameter
 from pytest_strategy.rng import RNGChoice, Series
+from pytest_strategy.strategy import PytestStrategiesWarning
 from pytest_strategy.test_args import TestArg
 
 # ---------------------------------------------------------------------------
@@ -523,3 +526,64 @@ class TestLegacyTupleStrategies:
         )
         assert samples == [pytest.param(1, 2, marks=xfail), (3, 3)]
         assert ids == ["a=1,b=2", "a=3,b=3"]
+
+
+# ---------------------------------------------------------------------------
+# Duplicate strategy names: warn when a different function takes over a name
+# ---------------------------------------------------------------------------
+
+STRATEGY_SOURCE = textwrap.dedent("""
+    from pytest_strategy import Strategy
+
+    @Strategy.register("fix_dup_source")
+    def factory(nsamples):
+        return ("x",), [(1,)]
+    """)
+
+
+class TestDuplicateRegistration:
+    """Strategy.register warns on a real name clash and stays silent on a re-run."""
+
+    def test_different_function_warns_and_last_wins(self, restore_registry):
+        @Strategy.register("fix_dup")
+        def first(nsamples):
+            return ("x",), [(1,)]
+
+        with pytest.warns(PytestStrategiesWarning, match="'fix_dup'") as record:
+
+            @Strategy.register("fix_dup")
+            def second(nsamples):
+                return ("y",), [(2,)]
+
+        assert Strategy._registry["fix_dup"] is second
+        assert len(record) == 1
+        message = str(record[0].message)
+        assert "first" in message
+        assert "second" in message
+        # stacklevel points at the registering code, not at the plugin
+        assert record[0].filename == __file__
+
+    def test_warning_is_a_user_warning(self):
+        assert issubclass(PytestStrategiesWarning, UserWarning)
+
+    def test_same_function_again_is_silent(self, restore_registry):
+        def factory(nsamples):
+            return ("x",), [(1,)]
+
+        Strategy.register("fix_dup_same")(factory)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            Strategy.register("fix_dup_same")(factory)
+
+    def test_reexecuted_source_file_is_silent(self, restore_registry):
+        # The plugin re-executes a strategies file under a new module name per session
+        code = compile(STRATEGY_SOURCE, "/virtual/tests/strategies.py", "exec")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            exec(code, {"__name__": "strategies_0"})
+            exec(code, {"__name__": "strategies_1"})
+
+    def test_same_name_from_another_file_warns(self, restore_registry):
+        exec(compile(STRATEGY_SOURCE, "/virtual/users/strategies.py", "exec"), {})
+        with pytest.warns(PytestStrategiesWarning, match="/virtual/users/strategies.py"):
+            exec(compile(STRATEGY_SOURCE, "/virtual/billing/strategies.py", "exec"), {})

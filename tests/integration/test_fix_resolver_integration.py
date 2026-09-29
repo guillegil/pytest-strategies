@@ -8,6 +8,14 @@ process-global and shared by every in-process pytester run.
 pytest_plugins = ["pytester"]
 
 
+def _unique_names(source, prefix, pytester):
+    """Make the strategy names starting with ``prefix`` unique to this test's pytester dir.
+
+    Reusing a name from another file would trigger the duplicate-registration warning.
+    """
+    return source.replace(prefix, f"{prefix}{pytester.path.name}_")
+
+
 AUTO_MODULE = """
     from pytest_strategy import Strategy, Parameter, TestArg, RNGInteger
     from pytest_strategy.rng import Series
@@ -44,7 +52,7 @@ class TestAutoModeIntegration:
     """--nsamples=auto combined with vector modes and filters."""
 
     def test_auto_all_mode_includes_directed_vectors(self, pytester):
-        pytester.makepyfile(test_fix_auto=AUTO_MODULE)
+        pytester.makepyfile(test_fix_auto=_unique_names(AUTO_MODULE, "fix_auto_", pytester))
         result = pytester.runpytest("--nsamples=auto", "-v")
         # seq: corner + 3x2 product; noseq (no sequence args): edge + 4 random
         result.assert_outcomes(passed=7 + 5)
@@ -52,7 +60,7 @@ class TestAutoModeIntegration:
         result.stdout.fnmatch_lines(["*test_noseq[[]code=500[]] PASSED*"])
 
     def test_auto_test_mode_runs_only_test_vectors(self, pytester):
-        pytester.makepyfile(test_fix_auto=AUTO_MODULE)
+        pytester.makepyfile(test_fix_auto=_unique_names(AUTO_MODULE, "fix_auto_", pytester))
         result = pytester.runpytest("--nsamples=auto", "--vector-mode=test", "-v")
         result.assert_outcomes(passed=2)
         result.stdout.fnmatch_lines(
@@ -60,7 +68,7 @@ class TestAutoModeIntegration:
         )
 
     def test_auto_directed_only_mode(self, pytester):
-        pytester.makepyfile(test_fix_auto=AUTO_MODULE)
+        pytester.makepyfile(test_fix_auto=_unique_names(AUTO_MODULE, "fix_auto_", pytester))
         result = pytester.runpytest("--nsamples=auto", "--vector-mode=directed_only", "-v")
         result.assert_outcomes(passed=2)
         result.stdout.fnmatch_lines(
@@ -68,7 +76,7 @@ class TestAutoModeIntegration:
         )
 
     def test_auto_vector_name_filters_across_strategies(self, pytester):
-        pytester.makepyfile(test_fix_auto=AUTO_MODULE)
+        pytester.makepyfile(test_fix_auto=_unique_names(AUTO_MODULE, "fix_auto_", pytester))
         result = pytester.runpytest("--nsamples=auto", "--vector-name=corner", "-v")
         # Only fix_auto_seq has "corner"; fix_auto_noseq gets an empty parameter set
         result.assert_outcomes(passed=1, skipped=1)
@@ -114,19 +122,19 @@ class TestVectorIndexIntegration:
     """--vector-index skips strategies that lack the index, like --vector-name does."""
 
     def test_index_valid_for_some_strategies(self, pytester):
-        pytester.makepyfile(test_fix_idx=INDEX_MODULE)
+        pytester.makepyfile(test_fix_idx=_unique_names(INDEX_MODULE, "fix_idx_", pytester))
         result = pytester.runpytest("--vector-index=1", "-v")
         # fix_idx_two has index 1 and test_plain is unaffected; the others are skipped
         result.assert_outcomes(passed=2, skipped=2)
         result.stdout.fnmatch_lines(["*test_two[[]y=10[]] PASSED*"])
 
     def test_index_zero_with_strategy_without_directed_vectors(self, pytester):
-        pytester.makepyfile(test_fix_idx=INDEX_MODULE)
+        pytester.makepyfile(test_fix_idx=_unique_names(INDEX_MODULE, "fix_idx_", pytester))
         result = pytester.runpytest("--vector-index=0")
         result.assert_outcomes(passed=3, skipped=1)
 
     def test_index_out_of_range_everywhere(self, pytester):
-        pytester.makepyfile(test_fix_idx=INDEX_MODULE)
+        pytester.makepyfile(test_fix_idx=_unique_names(INDEX_MODULE, "fix_idx_", pytester))
         result = pytester.runpytest("--vector-index=5")
         result.assert_outcomes(passed=1, skipped=3)
 
@@ -231,3 +239,51 @@ class TestLegacyTupleStrategiesIntegration:
                 "*test_two[[]a=3,b=3[]] PASSED*",
             ]
         )
+
+
+class TestDuplicateRegistrationIntegration:
+    """A strategy name taken over by a different function is reported."""
+
+    def test_name_clash_warns(self, pytester):
+        pytester.makepyfile(fix_dup_strategies="""
+            from pytest_strategy import Strategy
+
+            @Strategy.register("fix_dup_clash")
+            def from_strategies_file(nsamples):
+                return ("x",), [(1,)]
+            """)
+        pytester.makepyfile(test_fix_dup_clash="""
+            from pytest_strategy import Strategy
+
+            @Strategy.register("fix_dup_clash")
+            def from_test_module(nsamples):
+                return ("x",), [(2,)]
+
+            @Strategy.strategy("fix_dup_clash")
+            def test_clash(x):
+                assert x == 2
+            """)
+        result = pytester.runpytest()
+        result.assert_outcomes(passed=1, warnings=1)
+        result.stdout.fnmatch_lines(["*PytestStrategiesWarning: Strategy 'fix_dup_clash'*"])
+
+    def test_reloaded_strategies_file_is_silent(self, pytester):
+        pytester.makepyfile(fix_reload_strategies="""
+            from pytest_strategy import Strategy
+
+            @Strategy.register("fix_dup_reload")
+            def factory(nsamples):
+                return ("x",), [(1,)]
+            """)
+        pytester.makepyfile(test_fix_dup_reload="""
+            from pytest_strategy import Strategy
+
+            @Strategy.strategy("fix_dup_reload")
+            def test_reload(x):
+                pass
+            """)
+        # Each in-process run re-executes the strategies file under a new module name
+        for _ in range(2):
+            result = pytester.runpytest("-W", "error::UserWarning")
+            result.assert_outcomes(passed=1)
+            result.stdout.no_fnmatch_line("*PytestStrategiesWarning*")
