@@ -79,3 +79,39 @@ class TestDataclassModeDetection:
             """)
         result = pytester.runpytest_inprocess()
         result.assert_outcomes(passed=3)
+
+
+class TestDataclassConversion:
+    """Keyword-only and init=False dataclasses must be built end to end."""
+
+    def test_kw_only_and_init_false_dataclasses(self, pytester):
+        pytester.makepyfile(fi_dc_c_strategies=POINT_STRATEGY.format(name="fi_dc_c"))
+        pytester.makepyfile(test_fi_dc_c="""
+            from dataclasses import dataclass, field
+
+            from pytest_strategy import Strategy
+
+            @dataclass(kw_only=True)
+            class KwPoint:
+                x: int
+                y: int
+
+            @dataclass
+            class Computed:
+                x: int
+                y: int
+                total: int = field(init=False)
+
+                def __post_init__(self):
+                    self.total = self.x + self.y
+
+            @Strategy.strategy("fi_dc_c")
+            def test_kw_only(p: KwPoint):
+                assert isinstance(p, KwPoint)
+
+            @Strategy.strategy("fi_dc_c")
+            def test_init_false(p: Computed):
+                assert p.total == p.x + p.y
+            """)
+        result = pytester.runpytest_inprocess()
+        result.assert_outcomes(passed=6)
