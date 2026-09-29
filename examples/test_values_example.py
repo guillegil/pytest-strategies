@@ -36,7 +36,8 @@ def test_api_responses(endpoint, status_code):
     Test API responses.
     
     With --vector-mode=test, this will run 4 tests (the test vectors).
-    With default mode, this will run test vectors + directed + random samples.
+    With default mode (--vector-mode=all), this runs only random samples (this
+    strategy has no directed vectors); test vectors are not included.
     """
     print(f"Testing {endpoint} with status {status_code}")
     assert endpoint.startswith("/")
@@ -70,7 +71,8 @@ def test_user_permissions(age, role):
     
     With --vector-mode=test, runs only test vectors (3 tests).
     With --vector-mode=directed_only, runs only directed vectors (2 tests).
-    With --vector-mode=all, runs directed + test + random samples.
+    With --vector-mode=all (default), runs directed + random samples (test vectors
+    are not included).
     """
     print(f"Testing user: age={age}, role={role}")
     assert 0 <= age <= 120

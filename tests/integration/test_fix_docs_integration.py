@@ -104,3 +104,16 @@ class TestDocumentedCliOptions:
 
         known = set(OPTION_RE.findall(pytester.runpytest("--help").stdout.str()))
         assert documented - known == set()
+
+
+class TestExamples:
+    """Every script in examples/ must pass, whatever the seed."""
+
+    @pytest.mark.parametrize("seed", [2, 4, 5])
+    @pytest.mark.parametrize("example", EXAMPLES, ids=lambda path: path.name)
+    def test_example_passes(self, pytester, example, seed):
+        """Seeds 2, 4 and 5 used to fail enum_example.py: its role strategy drew a
+        GUEST with POST/PUT, which test_role_based_access forbids."""
+        pytester.makepyfile(**{f"test_{example.stem}": example.read_text(encoding="utf-8")})
+        result = pytester.runpytest(f"--rng-seed={seed}")
+        assert result.ret == pytest.ExitCode.OK, result.stdout.str()

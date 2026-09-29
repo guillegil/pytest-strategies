@@ -10,6 +10,7 @@ Example files are parsed with ``ast`` rather than imported: importing one runs
 its ``@Strategy.strategy`` decorators and registers its strategies globally.
 """
 
+import ast
 import re
 from pathlib import Path
 
@@ -58,3 +59,30 @@ class TestMarkdownDocs:
             if line.startswith("| `--vector-index`")
         )
         assert "directed vector" in row
+
+
+# ---------------------------------------------------------------------------
+# Examples
+# ---------------------------------------------------------------------------
+
+
+class TestExampleDocstrings:
+    """Docstrings in examples/ must match what the library does."""
+
+    def test_test_values_example_does_not_promise_test_vectors_outside_test_mode(self):
+        """Test vectors only run with --vector-mode=test, never in the default "all" mode."""
+        tree = ast.parse(_read("examples/test_values_example.py"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            doc = " ".join((ast.get_docstring(node) or "").split())
+            for sentence in re.split(r"\s(?=With\s)", doc):
+                if "default" not in sentence and "--vector-mode=all" not in sentence:
+                    continue
+                claim = sentence.replace("test vectors are not included", "")
+                assert not re.search(r"\btest\b", claim), f"{node.name}: {sentence!r}"
+
+    def test_sequence_example_does_not_call_rngsequence_deterministic(self):
+        """Since 1.1.0a2 RNGSequence yields a random permutation under --nsamples=auto."""
+        tree = ast.parse(_read("examples/sequence_example.py"))
+        assert "deterministic" not in (ast.get_docstring(tree) or "").lower()

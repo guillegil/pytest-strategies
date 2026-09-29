@@ -1,8 +1,10 @@
 """
 Example of Sequence Testing with pytest-strategies.
 
-This example demonstrates how to use `RNGSequence` to test deterministic sequences
-of values, and how to combine them with random generation.
+This example demonstrates how to use `RNGSequence` to test every value of a
+sequence, and how to combine it with random generation. With --nsamples=auto
+each value is used exactly once, in random order; use `Series` instead when the
+order must be fixed.
 
 To run this example with exhaustive sequence generation:
     pytest examples/sequence_example.py --nsamples=auto -v
@@ -36,11 +38,11 @@ def test_permissions(role, active):
 
 
 # 2. Mixed Sequence and Random Strategy
-# This strategy combines a deterministic sequence (endpoints) with random data (payloads).
+# This strategy combines a sequence (endpoints) with random data (payloads).
 @Strategy.register("api_endpoints")
 def api_endpoints_strategy(nsamples):
     return Parameter(
-        # Deterministic: We want to test ALL these endpoints
+        # Exhaustive: We want to test ALL these endpoints
         TestArg("endpoint", rng_type=RNGSequence(["/users", "/products", "/orders"])),
         # Random: We want random IDs and payloads for each endpoint
         TestArg("id", rng_type=RNGInteger(1, 1000)),
