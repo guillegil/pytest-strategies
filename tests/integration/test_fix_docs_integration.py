@@ -8,6 +8,7 @@ would run them. These documents went stale before (they called the renamed
 nothing ran examples/, so a flaky example went unnoticed.
 """
 
+import importlib.util
 import random
 import re
 import shlex
@@ -106,14 +107,53 @@ class TestDocumentedCliOptions:
         assert documented - known == set()
 
 
+def _load_example_factories(path: Path, monkeypatch) -> tuple:
+    """
+    Import an example file and return (module, registry of its strategy factories).
+
+    The example's ``@Strategy.strategy`` tests are not parametrized: only the
+    factories are needed, and they are registered in an empty registry so they
+    neither clash with nor leak into the session's strategies.
+    """
+    monkeypatch.setattr(Strategy, "_registry", {})
+    monkeypatch.setattr(Strategy, "strategy", staticmethod(lambda name, **kwargs: lambda fn: fn))
+    spec = importlib.util.spec_from_file_location(f"_example_{path.stem}", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module, dict(Strategy._registry)
+
+
 class TestExamples:
-    """Every script in examples/ must pass, whatever the seed."""
+    """Every script in examples/ must pass."""
 
     @pytest.mark.parametrize("seed", [2, 4, 5])
     @pytest.mark.parametrize("example", EXAMPLES, ids=lambda path: path.name)
     def test_example_passes(self, pytester, example, seed):
-        """Seeds 2, 4 and 5 used to fail enum_example.py: its role strategy drew a
-        GUEST with POST/PUT, which test_role_based_access forbids."""
+        """Run each example file as a test module with a few fixed seeds."""
         pytester.makepyfile(**{f"test_{example.stem}": example.read_text(encoding="utf-8")})
         result = pytester.runpytest(f"--rng-seed={seed}")
         assert result.ret == pytest.ExitCode.OK, result.stdout.str()
+
+    def test_role_strategy_never_draws_a_guest_with_a_write_method(self, monkeypatch):
+        """enum_example.py's role_based_strategy drew a GUEST with POST/PUT (which
+        test_role_based_access forbids) for about a third of the seeds.
+
+        Which seeds fail depends on the random stream key, which includes the test
+        file's path, so this checks the strategy itself over many seeds instead of
+        running the example file with a few.
+        """
+        module, factories = _load_example_factories(
+            REPO_ROOT / "examples" / "enum_example.py", monkeypatch
+        )
+        param = factories["role_based_strategy"](nsamples=10)
+
+        bad = []
+        for seed in range(100):
+            RNG.seed(seed)
+            bad.extend(
+                (seed, role, method)
+                for role, method in param.generate_vectors(20)
+                if role is module.UserRole.GUEST and method is not module.RequestMethod.GET
+            )
+        assert bad == []
