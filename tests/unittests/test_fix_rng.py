@@ -8,6 +8,7 @@ Tests cover:
 - RNGEnum rejecting non-Enum arguments and member-less Enums with RNGValueError
 - RNGEnum filtering members by the predicate up front instead of retrying draws
 - Series/RNGSequence rejecting unordered sets
+- RNG.string/RNGString validating length bounds and charset
 """
 
 import math
@@ -22,6 +23,7 @@ from pytest_strategy import (
     RNGFloat,
     RNGInteger,
     RNGSequence,
+    RNGString,
     RNGValueError,
     RNGWeightedFloat,
     RNGWeightedInteger,
@@ -365,3 +367,79 @@ class TestSequenceLikeRejectsSets:
     def test_ordered_iterables_still_accepted(self, sequence):
         """dict keys, generators and other ordered iterables keep working"""
         assert Series(sequence)._get_auto_sequence() == ["b", "a", "c"]
+
+
+class TestStringArgsValidation:
+    """RNG.string (ValueError) and RNGString (RNGValueError at construction) check their args"""
+
+    @pytest.mark.parametrize(
+        "kwargs, message",
+        [
+            ({"min_length": -3, "max_length": -1}, r"min_length cannot be negative"),
+            ({"min_length": -10, "max_length": 2}, r"min_length cannot be negative"),
+            ({"min_length": 5, "max_length": 2}, r"min_length \(5\) must be <= max_length \(2\)"),
+            ({"charset": ""}, r"charset cannot be empty unless the length is 0"),
+            ({"min_length": 0, "max_length": 3, "charset": ""}, r"charset cannot be empty"),
+            ({"length": 4, "charset": ""}, r"charset cannot be empty"),
+        ],
+        ids=[
+            "negative_range",
+            "negative_min",
+            "min_above_max",
+            "empty_charset",
+            "empty_charset_min_0",
+            "empty_charset_fixed_length",
+        ],
+    )
+    def test_rng_string_rejects_bad_args(self, kwargs, message):
+        """Negative min_length used to collapse to '', an empty charset failed only for some seeds"""
+        with pytest.raises(ValueError, match=f"^String {message}"):
+            RNG.string(**kwargs)
+
+    @pytest.mark.parametrize(
+        "kwargs, message",
+        [
+            ({"length": -2}, r"length cannot be negative \(got length=-2\)"),
+            ({"min_length": -10, "max_length": 2}, r"min_length cannot be negative"),
+            ({"min_length": 5, "max_length": 2}, r"min_length \(5\) must be <= max_length \(2\)"),
+            ({"charset": ""}, r"charset cannot be empty unless the length is 0"),
+            ({"min_length": 0, "max_length": 3, "charset": ""}, r"charset cannot be empty"),
+        ],
+        ids=[
+            "negative_length",
+            "negative_min",
+            "min_above_max",
+            "empty_charset",
+            "empty_charset_min_0",
+        ],
+    )
+    def test_rng_string_type_rejects_bad_args_at_construction(self, kwargs, message):
+        """RNGString fails when defined instead of at generate() for some seeds"""
+        with pytest.raises(RNGValueError, match=f"^RNGString {message}"):
+            RNGString(**kwargs)
+
+    def test_negative_fixed_length_keeps_value_error(self):
+        """RNG.string(length=-1) still raises ValueError, as documented"""
+        with pytest.raises(ValueError, match="String length cannot be negative"):
+            RNG.string(length=-1)
+
+    def test_empty_charset_allowed_for_zero_length(self):
+        """An empty charset is fine when the string is always empty"""
+        assert RNG.string(length=0, charset="") == ""
+        assert RNG.string(min_length=0, max_length=0, charset="") == ""
+        assert RNGString(length=0, charset="").generate() == ""
+
+    def test_min_max_ignored_with_fixed_length(self):
+        """min_length/max_length are not checked when a fixed length makes them unused"""
+        RNG.seed(0)
+        assert len(RNGString(length=3, min_length=10, max_length=2).generate()) == 3
+        assert len(RNG.string(length=3, min_length=-1)) == 3
+
+    def test_zero_min_length_uniform_lengths(self):
+        """A valid 0..2 range gives each length about a third of the time"""
+        RNG.seed(12345)
+        rng_type = RNGString(min_length=0, max_length=2)
+
+        lengths = [len(rng_type.generate()) for _ in range(3000)]
+
+        assert all(0.25 < lengths.count(n) / len(lengths) < 0.42 for n in (0, 1, 2))

@@ -80,6 +80,40 @@ class RNG:
 
         raise RNGValueError(f"No valid value found after {RNG._max_retries} attempts")
 
+    @staticmethod
+    def _string_args_error(
+        length: int | None, min_length: int, max_length: int, charset: str
+    ) -> str | None:
+        """
+        Describe what is wrong with string generation arguments, if anything.
+
+        min_length and max_length are only checked when length is None, since
+        they are ignored otherwise.
+
+        Args:
+            length: Fixed length, or None for a random length
+            min_length: Minimum length if length is None
+            max_length: Maximum length if length is None
+            charset: Characters to choose from
+
+        Returns:
+            An error message starting with the argument name, or None if the arguments are valid
+        """
+        if length is not None:
+            if length < 0:
+                return f"length cannot be negative (got length={length})"
+            longest = length
+        else:
+            if min_length < 0:
+                return f"min_length cannot be negative (got min_length={min_length})"
+            if min_length > max_length:
+                return f"min_length ({min_length}) must be <= max_length ({max_length})"
+            longest = max_length
+
+        if longest > 0 and not charset:
+            return "charset cannot be empty unless the length is 0"
+        return None
+
     # ====
     # Basic Generators
     # ====
@@ -185,7 +219,8 @@ class RNG:
             Random string of specified length
 
         Raises:
-            ValueError: If length is negative
+            ValueError: If length or min_length is negative, if min_length > max_length,
+                or if charset is empty while the length can be greater than 0
 
         Example:
             RNG.string(length=10)  # Fixed length of 10
@@ -193,8 +228,9 @@ class RNG:
             RNG.string(length=8, charset="0123456789")  # Numeric string
             RNG.string(length=6, charset="ABCDEF0123456789")  # Hex string
         """
-        if length is not None and length < 0:
-            raise ValueError("String length cannot be negative")
+        error = RNG._string_args_error(length, min_length, max_length, charset)
+        if error:
+            raise ValueError(f"String {error}")
 
         if length is None:
             length = random.randint(min_length, max_length)
@@ -611,6 +647,11 @@ class RNGString(RNGType):
         max_length: int = 20,
         charset: str = "abcdefghijklmnopqrstuvwxyz",
     ):
+        # Fail when the strategy is defined, not only for the seeds that hit the bad case
+        error = RNG._string_args_error(length, min_length, max_length, charset)
+        if error:
+            raise RNGValueError(f"RNGString {error}")
+
         self.length = length
         self.min_length = min_length
         self.max_length = max_length
