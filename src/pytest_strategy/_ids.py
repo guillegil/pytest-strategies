@@ -7,6 +7,19 @@ from dataclasses import fields
 from typing import Any
 
 
+def _value_repr(value: Any) -> str:
+    """
+    Return ``repr(value)``, or the type name when the repr embeds a memory address.
+
+    The default object repr (``<Foo object at 0x7f...>``) differs on every run,
+    so using it would make test IDs unstable across runs with the same seed.
+    """
+    val_str = repr(value)
+    if " at 0x" in val_str:
+        return type(value).__name__
+    return val_str
+
+
 def generate_test_ids(
     argnames: Sequence[str],
     samples: Sequence[Any],
@@ -28,14 +41,14 @@ def generate_test_ids(
     for sample in samples:
         if len(argnames) == 1:
             value = sample if not isinstance(sample, tuple) else sample[0]
-            val_str = repr(value)
+            val_str = _value_repr(value)
             if len(val_str) > max_length - len(argnames[0]) - 1:
                 val_str = val_str[: max_length - len(argnames[0]) - 4] + "..."
             ids.append(f"{argnames[0]}={val_str}")
         else:
             parts = []
             for arg_name, value in zip(argnames, sample):
-                val_str = repr(value)
+                val_str = _value_repr(value)
                 if len(val_str) > 20:
                     val_str = val_str[:17] + "..."
                 parts.append(f"{arg_name}={val_str}")
@@ -69,7 +82,7 @@ def generate_dataclass_ids(
         field_strs = []
         for f in fields(dc_type):
             val = getattr(dc_instance, f.name)
-            val_str = repr(val)
+            val_str = _value_repr(val)
             if len(val_str) > 20:
                 val_str = val_str[:17] + "..."
             field_strs.append(f"{f.name}={val_str}")

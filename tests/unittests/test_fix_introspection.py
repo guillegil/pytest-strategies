@@ -3,7 +3,7 @@ Regression tests for fixes in the introspection, dataclass and ID helpers.
 
 Each test here failed before its fix: dataclass mode detection with ``self``,
 custom fixtures and string annotations; conversion of keyword-only and
-``init=False`` dataclasses.
+``init=False`` dataclasses; test IDs that embedded memory addresses.
 """
 
 from dataclasses import KW_ONLY, dataclass, field
@@ -11,6 +11,7 @@ from dataclasses import KW_ONLY, dataclass, field
 import pytest
 
 from pytest_strategy._dataclass import convert_to_dataclass
+from pytest_strategy._ids import generate_dataclass_ids, generate_test_ids
 from pytest_strategy._introspection import detect_dataclass_mode, detect_dataclass_param
 
 # ---------------------------------------------------------------------------
@@ -57,6 +58,16 @@ class KwOnlySentinel:
     x: int
     _: KW_ONLY
     y: int
+
+
+class Codec:
+    """A value whose repr is the default ``<... object at 0x...>``."""
+
+
+@dataclass
+class Pipeline:
+    codec: Codec
+    level: int
 
 
 # ---------------------------------------------------------------------------
@@ -162,3 +173,29 @@ class TestConvertToDataclassKeywords:
     def test_init_false_field_supplied_is_rejected_clearly(self):
         with pytest.raises(ValueError, match="Missing in dataclass: \\['total'\\]"):
             convert_to_dataclass([(1, 2, 3)], ["x", "y", "total"], Computed)
+
+
+# ---------------------------------------------------------------------------
+# generate_test_ids / generate_dataclass_ids
+# ---------------------------------------------------------------------------
+
+
+class TestIdsWithoutMemoryAddresses:
+    def test_single_param_default_repr_uses_type_name(self):
+        assert generate_test_ids(["codec"], [(Codec(),), (Codec(),)]) == [
+            "codec=Codec",
+            "codec=Codec",
+        ]
+
+    def test_single_param_function_uses_type_name(self):
+        assert generate_test_ids(["fn"], [(lambda: None,)]) == ["fn=function"]
+
+    def test_multi_param_default_repr_uses_type_name(self):
+        assert generate_test_ids(["c", "n"], [(Codec(), 1)]) == ["c=Codec,n=1"]
+
+    def test_dataclass_field_default_repr_uses_type_name(self):
+        ids = generate_dataclass_ids([Pipeline(Codec(), 3)], Pipeline)
+        assert ids == ["codec=Codec,level=3"]
+
+    def test_custom_repr_is_kept(self):
+        assert generate_test_ids(["p"], [(Point(1, 2),)]) == ["p=Point(x=1, y=2)"]
