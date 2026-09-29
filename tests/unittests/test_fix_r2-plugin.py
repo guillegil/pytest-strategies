@@ -1,6 +1,7 @@
-"""Unit tests for plugin fixes: global random state, nested sessions and strategy
-file loading without the terminal plugin."""
+"""Unit tests for plugin fixes: global random state, nested sessions, strategy file
+loading without the terminal plugin, and the scope and order of discovery."""
 
+import os
 import random
 from pathlib import Path
 from types import SimpleNamespace
@@ -40,6 +41,13 @@ def _write(path, source=STRATEGY_SOURCE):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(source)
     return path
+
+
+def _make_virtualenv(path):
+    """Create a virtualenv-like directory holding a file that looks like a strategy file."""
+    (path / "lib").mkdir(parents=True)
+    (path / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    return _write(path / "lib" / "site-packages" / "pytest_strategy" / "strategy.py")
 
 
 def _config(rootpath, option=None):
@@ -220,3 +228,149 @@ class TestVerboseLoadOutsideRootdir:
         assert runtime.load_errors == []
         assert runtime.discovered_files == [strategy_file]
         assert f"pytest-strategies: Loaded {strategy_file}" in capsys.readouterr().out
+
+
+class TestDiscoverySkipsEnvironmentsAndIgnoredDirectories:
+    """Discovery prunes virtualenvs and norecursedirs, like pytest's own collection."""
+
+    def test_virtualenv_of_any_name_is_skipped(self, tmp_path):
+        project = tmp_path / "proj"
+        strategy_file = _write(project / "strategies.py")
+        _make_virtualenv(project / "venv")
+        _make_virtualenv(project / "myenv")
+
+        found = PytestStrategyPlugin()._discover_strategy_files([project])
+
+        assert found == [strategy_file]
+
+    def test_norecursedirs_patterns_are_skipped(self, tmp_path):
+        project = tmp_path / "proj"
+        strategy_file = _write(project / "tests" / "strategies.py")
+        _write(project / "build" / "strategies.py")
+        _write(project / "tests" / "old.egg" / "strategies.py")
+
+        found = PytestStrategyPlugin()._discover_strategy_files([project], ["build", "*.egg"])
+
+        assert found == [strategy_file]
+
+    def test_skipped_directory_given_as_search_path_is_searched(self, tmp_path):
+        strategy_file = _write(tmp_path / "build" / "strategies.py")
+        venv_file = _make_virtualenv(tmp_path / "venv")
+
+        plugin = PytestStrategyPlugin()
+
+        assert plugin._discover_strategy_files([tmp_path / "build"], ["build"]) == [strategy_file]
+        assert plugin._discover_strategy_files([tmp_path / "venv"]) == [venv_file]
+
+
+class _ReversedScandir:
+    """os.scandir with the entries in reverse name order, as some filesystems list them."""
+
+    real_scandir = os.scandir
+
+    def __init__(self, path="."):
+        with self.real_scandir(path) as entries:
+            self._entries = iter(sorted(entries, key=lambda e: e.name, reverse=True))
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._entries)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return None
+
+    def close(self):
+        pass
+
+
+class TestDiscoveryOrder:
+    """Strategy files are loaded in the same order on every filesystem."""
+
+    def test_files_are_sorted_by_path_below_the_search_path(self, tmp_path, monkeypatch):
+        project = tmp_path / "proj"
+        files = [
+            _write(project / rel)
+            for rel in ("a/strategies.py", "b/strategies.py", "b_strategies.py", "c/z_strategy.py")
+        ]
+        monkeypatch.setattr(os, "scandir", _ReversedScandir)
+
+        found = PytestStrategyPlugin()._discover_strategy_files([project])
+
+        assert found == files
+
+
+def _search_config(rootdir, testpaths=(), args=(), invocation_dir=None):
+    """A minimal config for _search_paths."""
+    ini = {"testpaths": list(testpaths)}
+    return SimpleNamespace(
+        rootpath=rootdir,
+        getini=ini.__getitem__,
+        args=list(args),
+        invocation_params=SimpleNamespace(dir=invocation_dir or rootdir),
+    )
+
+
+class TestSearchPaths:
+    """Search paths follow testpaths globs and the paths given on the command line."""
+
+    def test_testpaths_glob_patterns_are_expanded(self, tmp_path):
+        for name in ("beta", "alpha"):
+            (tmp_path / "pkgs" / name / "tests").mkdir(parents=True)
+
+        config = _search_config(tmp_path, testpaths=["pkgs/*/tests"])
+        paths = PytestStrategyPlugin()._search_paths(config)
+
+        assert paths == [
+            tmp_path / "pkgs" / "alpha" / "tests",
+            tmp_path / "pkgs" / "beta" / "tests",
+        ]
+
+    def test_literal_testpaths_are_kept(self, tmp_path):
+        (tmp_path / "tests").mkdir()
+
+        config = _search_config(tmp_path, testpaths=["tests", "../shared"])
+        paths = PytestStrategyPlugin()._search_paths(config)
+
+        assert paths == [tmp_path / "tests", tmp_path / "../shared"]
+
+    def test_command_line_paths_outside_the_search_paths_are_added(self, tmp_path):
+        (tmp_path / "tests").mkdir()
+        _write(tmp_path / "integration" / "test_integ.py", "def test_integ():\n    pass\n")
+        (tmp_path / "e2e").mkdir()
+
+        config = _search_config(
+            tmp_path,
+            testpaths=["tests"],
+            args=["integration/test_integ.py::test_integ", str(tmp_path / "e2e"), "tests"],
+        )
+        paths = PytestStrategyPlugin()._search_paths(config)
+
+        assert paths == [tmp_path / "tests", tmp_path / "integration", tmp_path / "e2e"]
+
+    def test_command_line_paths_are_relative_to_the_invocation_dir(self, tmp_path):
+        (tmp_path / "tests" / "sub").mkdir(parents=True)
+        (tmp_path / "other").mkdir()
+
+        config = _search_config(
+            tmp_path,
+            testpaths=["tests"],
+            args=["sub", "../other", "not.a.path"],
+            invocation_dir=tmp_path / "tests",
+        )
+        paths = PytestStrategyPlugin()._search_paths(config)
+
+        assert paths == [tmp_path / "tests", tmp_path / "other"]
+
+    def test_command_line_path_in_a_skipped_directory_is_added(self, tmp_path):
+        (tmp_path / "build" / "tests").mkdir(parents=True)
+        (tmp_path / ".hidden").mkdir()
+
+        config = _search_config(tmp_path, args=["build/tests", ".hidden"])
+        paths = PytestStrategyPlugin()._search_paths(config, ["build"])
+
+        assert paths == [tmp_path, tmp_path / "build" / "tests", tmp_path / ".hidden"]

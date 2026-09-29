@@ -3,9 +3,13 @@ Pytest plugin for pytest-strategies with auto-discovery of strategy definitions.
 """
 
 import argparse
+import fnmatch
+import glob
 import importlib.util
 import itertools
+import os
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -99,16 +103,11 @@ class PytestStrategyPlugin:
         from .rng import RNG
 
         config = session.config
-
-        # Get the root directory for tests
-        rootdir = Path(config.rootpath)
-        testpaths = config.getini("testpaths")
-
-        # Determine search paths
-        search_paths = [rootdir / path for path in testpaths] if testpaths else [rootdir]
+        norecursedirs = config.getini("norecursedirs")
 
         # Discover and load strategy files
-        strategy_files = self._discover_strategy_files(search_paths)
+        search_paths = self._search_paths(config, norecursedirs)
+        strategy_files = self._discover_strategy_files(search_paths, norecursedirs)
 
         if strategy_files:
             # Start the global random state from the seed, so draws made when a
@@ -180,7 +179,100 @@ class PytestStrategyPlugin:
 
     # ==== HELPER METHODS ====
 
-    def _discover_strategy_files(self, search_paths: list[Path]) -> list[Path]:
+    def _search_paths(self, config: Config, norecursedirs: Sequence[str] = ()) -> list[Path]:
+        """
+        Determine the directories to search for strategy files.
+
+        These are the testpaths ini entries, with glob patterns expanded as pytest
+        does (or the rootdir without testpaths), plus the directory of every path
+        given on the command line that they do not already cover.
+
+        Args:
+            config: Pytest config object
+            norecursedirs: Directory name patterns the search does not descend into
+
+        Returns:
+            List of directories to search
+        """
+        rootdir = Path(config.rootpath)
+        testpaths = config.getini("testpaths")
+
+        search_paths: list[Path] = []
+        for entry in testpaths:
+            if any(char in entry for char in "*?["):
+                # pytest expands wildcards in testpaths (e.g. "pkgs/*/tests")
+                matches = sorted(glob.glob(entry, root_dir=rootdir, recursive=True))
+                search_paths.extend(rootdir / match for match in matches)
+            else:
+                search_paths.append(rootdir / entry)
+        if not testpaths:
+            search_paths.append(rootdir)
+
+        # Paths named on the command line (or the testpaths pytest collects) may
+        # lie outside the search paths, or inside a directory the search skips.
+        invocation_dir = config.invocation_params.dir
+        for arg in config.args:
+            path = Path(os.path.abspath(invocation_dir / arg.split("::")[0]))
+            if not path.exists():
+                # Not a path, e.g. a module name given with --pyargs
+                continue
+            directory = path if path.is_dir() else path.parent
+            if not any(self._covers(base, directory, norecursedirs) for base in search_paths):
+                search_paths.append(directory)
+
+        return search_paths
+
+    def _covers(self, search_path: Path, directory: Path, norecursedirs: Sequence[str]) -> bool:
+        """
+        Check whether searching search_path also searches directory.
+
+        Args:
+            search_path: A directory that is searched
+            directory: An absolute, normalized directory
+            norecursedirs: Directory name patterns the search does not descend into
+
+        Returns:
+            True if directory is search_path or a directory the search enters
+        """
+        current = Path(os.path.abspath(search_path))
+        try:
+            rel_parts = directory.relative_to(current).parts
+        except ValueError:
+            return False
+        for part in rel_parts:
+            current = current / part
+            if self._skip_directory(current, norecursedirs):
+                return False
+        return True
+
+    def _skip_directory(self, path: Path, norecursedirs: Sequence[str]) -> bool:
+        """
+        Check whether discovery skips a directory below a search path.
+
+        Skipped, as in pytest's own collection: hidden and __pycache__ directories,
+        names matching the norecursedirs ini patterns (e.g. venv, build,
+        node_modules) and virtual environments (a directory containing pyvenv.cfg,
+        whatever its name). An installed pytest-strategies has files matching the
+        patterns in a virtual environment.
+
+        Args:
+            path: The directory
+            norecursedirs: Directory name patterns to skip
+
+        Returns:
+            True if the directory is skipped
+        """
+        name = path.name
+        return (
+            name.startswith(".")
+            or name == "__pycache__"
+            or any(fnmatch.fnmatch(name, pattern) for pattern in norecursedirs)
+            or (path / "pyvenv.cfg").is_file()
+        )
+
+    def _discover_strategy_files(
+        self, search_paths: list[Path], norecursedirs: Sequence[str] = ()
+    ) -> list[Path]:
         """
         Discover strategy definition files in the test directory.
 
@@ -191,41 +283,56 @@ class PytestStrategyPlugin:
         - **/*_strategies.py
         - **/*_strategy.py
 
+        Directories below a search path are skipped as described in
+        _skip_directory. Files are returned in a deterministic order.
+
         Args:
             search_paths: List of paths to search
+            norecursedirs: Directory name patterns not to descend into
 
         Returns:
             List of discovered strategy file paths
         """
-        strategy_files = []
+        strategy_files: list[Path] = []
 
         patterns = [
-            "**/strategies.py",
-            "**/strategy.py",
-            "**/*_strategies.py",
-            "**/*_strategy.py",
+            "strategies.py",
+            "strategy.py",
+            "*_strategies.py",
+            "*_strategy.py",
         ]
 
         for search_path in search_paths:
-            if not search_path.exists():
+            if not search_path.is_dir():
                 continue
 
-            for pattern in patterns:
-                for file_path in search_path.glob(pattern):
-                    # Skip __pycache__ and hidden directories. Only the parts below
-                    # the search path count: a project that lives under a dot
-                    # directory (~/.cache/proj, testpaths = ../shared) is searched.
-                    rel_parts = file_path.relative_to(search_path).parts
-                    if any(part.startswith(".") or part == "__pycache__" for part in rel_parts):
-                        continue
+            found: list[Path] = []
+            for dirpath, dirnames, filenames in os.walk(search_path):
+                directory = Path(dirpath)
+                # Prune in place so the walk never enters a skipped directory. Only
+                # the directories below the search path are filtered: a project that
+                # lives under a dot directory (~/.cache/proj, testpaths = ../shared)
+                # or a path given explicitly is searched.
+                dirnames[:] = [
+                    d for d in dirnames if not self._skip_directory(directory / d, norecursedirs)
+                ]
+                found.extend(
+                    directory / name
+                    for name in filenames
+                    if not name.startswith(".")
+                    and any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
+                )
 
-                    # Skip if already found
-                    if file_path in strategy_files:
-                        continue
+            # Load in a fixed order, not the filesystem's: import-time draws and
+            # which of two registrations of a name wins depend on the order.
+            for file_path in sorted(found, key=lambda p: p.relative_to(search_path).as_posix()):
+                # Skip if already found
+                if file_path in strategy_files:
+                    continue
 
-                    # Check if file contains strategy registrations
-                    if self._contains_strategy_registration(file_path):
-                        strategy_files.append(file_path)
+                # Check if file contains strategy registrations
+                if self._contains_strategy_registration(file_path):
+                    strategy_files.append(file_path)
 
         return strategy_files
 

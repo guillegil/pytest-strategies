@@ -210,3 +210,74 @@ class TestVerboseLoadOutsideRootdir:
         result.stdout.no_fnmatch_line("*Failed to load*")
         result.stdout.fnmatch_lines([f"pytest-strategies: Loaded {shared / 'strategies.py'}"])
         result.assert_outcomes(passed=3)
+
+
+class TestDiscoveryScope:
+    """Where strategy files are searched for."""
+
+    PLUGIN_LOOKALIKE = '''
+        """Usage:
+
+            @Strategy.register("name")
+        """
+        from ._missing_sibling import something
+        '''
+
+    def _make_virtualenv(self, pytester, name):
+        """A virtualenv with pytest-strategies installed: its strategy.py fails to load."""
+        pytester.makepyfile(
+            **{f"{name}/lib/site-packages/pytest_strategy/strategy": self.PLUGIN_LOOKALIKE}
+        )
+        (pytester.path / name / "pyvenv.cfg").write_text("home = /usr/bin\n")
+
+    def test_virtualenv_in_the_project_is_not_searched(self, pytester):
+        self._make_virtualenv(pytester, "venv")
+        self._make_virtualenv(pytester, "myenv")
+        pytester.makepyfile(strategies=STRATEGIES)
+        pytester.makepyfile(test_ints=TESTS)
+
+        result = pytester.runpytest_subprocess()
+
+        result.stdout.no_fnmatch_line("*Failed to load*")
+        result.assert_outcomes(passed=3)
+
+    def test_norecursedirs_is_honoured(self, pytester):
+        pytester.makeini("[pytest]\nnorecursedirs = legacy\n")
+        pytester.makepyfile(
+            **{"legacy/strategies": "# @Strategy.register\nraise RuntimeError('old code')\n"}
+        )
+        pytester.makepyfile(strategies=STRATEGIES)
+        pytester.makepyfile(test_ints=TESTS)
+
+        result = pytester.runpytest_subprocess()
+
+        result.stdout.no_fnmatch_line("*Failed to load*")
+        result.assert_outcomes(passed=3)
+
+    def test_skipped_directory_given_on_the_command_line_is_searched(self, pytester):
+        pytester.makepyfile(**{".checks/strategies": STRATEGIES, ".checks/test_ints": TESTS})
+
+        result = pytester.runpytest_subprocess(".checks")
+
+        result.assert_outcomes(passed=3)
+
+    def test_testpaths_glob_is_expanded(self, pytester):
+        pytester.makeini("[pytest]\ntestpaths = pkgs/*/tests\n")
+        pytester.makepyfile(
+            **{"pkgs/alpha/tests/strategies": STRATEGIES, "pkgs/alpha/tests/test_ints": TESTS}
+        )
+
+        result = pytester.runpytest_subprocess()
+
+        result.assert_outcomes(passed=3)
+
+    def test_strategies_next_to_a_command_line_path_are_loaded(self, pytester):
+        pytester.makeini("[pytest]\ntestpaths = tests\n")
+        pytester.makepyfile(**{"tests/test_plain": "def test_plain():\n    pass\n"})
+        pytester.makepyfile(
+            **{"integration/strategies": STRATEGIES, "integration/test_integ": TESTS}
+        )
+
+        result = pytester.runpytest_subprocess("integration/test_integ.py::test_ints")
+
+        result.assert_outcomes(passed=3)
