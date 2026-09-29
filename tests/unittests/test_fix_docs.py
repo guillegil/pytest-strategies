@@ -141,3 +141,19 @@ class TestPackagingMetadata:
         """black must not target Python versions the package does not support."""
         minors = [int(t[len("py3") :]) for t in pyproject["tool"]["black"]["target-version"]]
         assert min(minors) == 10
+
+
+# ---------------------------------------------------------------------------
+# Continuous integration
+# ---------------------------------------------------------------------------
+
+
+class TestContinuousIntegration:
+    def test_workflow_runs_on_main_line_branch(self):
+        """All development happens on ``migration``; CI must run for it."""
+        workflow = _read(".github/workflows/tests.yml")
+        for event in ("push", "pull_request"):
+            match = re.search(rf"^  {event}:\n    branches: \[([^\]]*)\]", workflow, re.M)
+            assert match is not None, f"no branch filter found for {event}"
+            branches = [b.strip() for b in match.group(1).split(",")]
+            assert "migration" in branches, f"{event} does not run on migration: {branches}"
