@@ -6,12 +6,13 @@ directly and inspect the pytest.mark.parametrize it applies.
 """
 
 import inspect
+import json
 from unittest.mock import MagicMock
 
 import pytest
 
-from pytest_strategy import RNGInteger
-from pytest_strategy._resolver import resolve_and_parametrize
+from pytest_strategy import RNGInteger, Strategy
+from pytest_strategy._resolver import call_factory, resolve_and_parametrize
 from pytest_strategy.parameters import Parameter
 from pytest_strategy.rng import Series
 from pytest_strategy.test_args import TestArg
@@ -250,3 +251,175 @@ class TestVectorIndexOutOfRange:
         param = BrokenParameter(TestArg("w", rng_type=RNGInteger(0, 9)))
         with pytest.raises(ValueError, match="Error generating samples for strategy 'strat'"):
             _resolve(lambda nsamples: param, ["w"])
+
+
+# ---------------------------------------------------------------------------
+# Factory calling: chosen from the signature, called once, real errors surfaced
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def restore_registry():
+    """Restore Strategy._registry after a test that registers strategies."""
+    saved = dict(Strategy._registry)
+    yield
+    Strategy._registry.clear()
+    Strategy._registry.update(saved)
+
+
+class TestCallFactory:
+    """call_factory passes nsamples the way the factory's signature accepts it."""
+
+    def test_keyword_only_parameter(self):
+        def factory(*, nsamples):
+            return nsamples
+
+        assert call_factory("s", factory, 3) == 3
+
+    def test_var_keyword(self):
+        def factory(**kwargs):
+            return kwargs
+
+        assert call_factory("s", factory, 3) == {"nsamples": 3}
+
+    def test_positional_parameter_with_another_name(self):
+        def factory(n):
+            return n
+
+        assert call_factory("s", factory, 3) == 3
+
+    def test_positional_only_parameter(self):
+        def factory(nsamples, /):
+            return nsamples
+
+        assert call_factory("s", factory, 3) == 3
+
+    def test_var_positional(self):
+        def factory(*args):
+            return args
+
+        assert call_factory("s", factory, 3) == (3,)
+
+    def test_zero_argument_factory(self):
+        def factory():
+            return "called"
+
+        assert call_factory("s", factory, 3) == "called"
+
+    def test_unsupported_signature_is_not_called(self):
+        calls = []
+
+        def factory(a, b):
+            calls.append((a, b))
+
+        with pytest.raises(ValueError, match="Strategy factory 's'.*nsamples"):
+            call_factory("s", factory, 3)
+        assert calls == []
+
+    def test_type_error_in_body_is_reported_once(self):
+        calls = []
+
+        def factory(nsamples):
+            calls.append(nsamples)
+            return None + 1
+
+        with pytest.raises(ValueError) as exc_info:
+            call_factory("buggy", factory, 10)
+
+        assert calls == [10]
+        message = str(exc_info.value)
+        assert "'buggy'" in message
+        assert "TypeError" in message
+        assert "unsupported operand" in message
+        assert "should accept" not in message
+        assert isinstance(exc_info.value.__cause__, TypeError)
+
+    def test_transient_error_is_not_retried(self):
+        calls = []
+
+        def factory(nsamples):
+            calls.append(nsamples)
+            if len(calls) == 1:
+                raise TypeError("transient")
+            return "second call"
+
+        with pytest.raises(ValueError, match="transient"):
+            call_factory("s", factory, 10)
+        assert calls == [10]
+
+
+class TestResolverFactoryCalling:
+    """resolve_and_parametrize goes through call_factory."""
+
+    def test_type_error_in_body_is_reported_once(self):
+        calls = []
+
+        def factory(nsamples):
+            calls.append(nsamples)
+            return (0, 1) + None
+
+        with pytest.raises(ValueError) as exc_info:
+            _resolve(factory, ["x"])
+
+        assert calls == [10]
+        assert "TypeError" in str(exc_info.value)
+        assert "should accept" not in str(exc_info.value)
+
+    def test_zero_argument_factory(self):
+        def factory():
+            return Parameter(TestArg("x", rng_type=RNGInteger(0, 9)), nsamples=3)
+
+        _, samples, _ = _resolve(factory, ["x"])
+        assert len(samples) == 3
+
+    def test_legacy_factory_under_auto_reports_real_error(self):
+        calls = []
+
+        def factory(nsamples):
+            calls.append(nsamples)
+            return ("x",), [(i,) for i in range(nsamples)]
+
+        with pytest.raises(ValueError) as exc_info:
+            _resolve(factory, ["x"], nsamples="auto")
+
+        assert calls == ["auto"]
+        message = str(exc_info.value)
+        assert "nsamples='auto'" in message
+        assert "TypeError" in message
+        assert "should accept" not in message
+
+
+class TestExportStrategiesFactoryCalling:
+    """export_strategies calls factories the same way the resolver does."""
+
+    def test_keyword_only_var_keyword_and_zero_arg_factories(self, restore_registry):
+        received = []
+
+        @Strategy.register("fix_export_kwonly")
+        def kwonly(*, nsamples):
+            received.append(nsamples)
+            return Parameter(TestArg("x", rng_type=RNGInteger(0, 9)))
+
+        @Strategy.register("fix_export_varkw")
+        def varkw(**kwargs):
+            return Parameter(TestArg("x", rng_type=RNGInteger(0, 9)))
+
+        @Strategy.register("fix_export_noargs")
+        def noargs():
+            return ("x",), [(1,)]
+
+        data = json.loads(Strategy.export_strategies())
+
+        assert received == [1]
+        assert data["fix_export_kwonly"]["arguments"][0]["name"] == "x"
+        assert data["fix_export_varkw"]["arguments"][0]["name"] == "x"
+        assert data["fix_export_noargs"] == {"type": "legacy_tuple", "argnames": ["x"]}
+
+    def test_factory_error_is_still_recorded(self, restore_registry):
+        @Strategy.register("fix_export_broken")
+        def broken(nsamples):
+            raise RuntimeError("boom")
+
+        data = json.loads(Strategy.export_strategies())
+
+        assert "RuntimeError: boom" in data["fix_export_broken"]["error"]

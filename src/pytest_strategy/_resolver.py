@@ -21,6 +21,64 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
+def _accepts(sig: inspect.Signature, *args: Any, **kwargs: Any) -> bool:
+    """Return True if a callable with signature ``sig`` can be called with these arguments."""
+    try:
+        sig.bind(*args, **kwargs)
+    except TypeError:
+        return False
+    return True
+
+
+def call_factory(name: str, factory: Callable[..., Any], nsamples: int | str) -> Any:
+    """
+    Call a strategy factory exactly once, passing ``nsamples`` the way it accepts it.
+
+    The calling convention is chosen from the factory's signature, never by retrying
+    after a failure: ``factory(nsamples=...)`` when it accepts that keyword (a named
+    parameter or ``**kwargs``), ``factory(nsamples)`` when it has a positional
+    parameter, and ``factory()`` when it takes no arguments.
+
+    Args:
+        name: Name of the strategy (for error messages)
+        factory: The registered factory function
+        nsamples: Value to pass as the factory's ``nsamples``
+
+    Returns:
+        Whatever the factory returns
+
+    Raises:
+        ValueError: If the signature cannot accept any of these calls, or if the
+            factory itself raises (chained to the original exception)
+    """
+    args: tuple[Any, ...] = ()
+    kwargs: dict[str, Any] = {"nsamples": nsamples}
+    try:
+        sig: inspect.Signature | None = inspect.signature(factory)
+    except (TypeError, ValueError):
+        # No introspectable signature (e.g. some builtins): keep the keyword call
+        sig = None
+
+    if sig is not None and not _accepts(sig, nsamples=nsamples):
+        if _accepts(sig, nsamples):
+            args, kwargs = (nsamples,), {}
+        elif _accepts(sig):
+            kwargs = {}
+        else:
+            raise ValueError(
+                f"Strategy factory '{name}' cannot be called with its signature {sig}. "
+                f"Factory should accept an 'nsamples' parameter (or no parameters)."
+            )
+
+    try:
+        return factory(*args, **kwargs)
+    except Exception as e:
+        raise ValueError(
+            f"Error calling strategy factory '{name}' (nsamples={nsamples!r}): "
+            f"{type(e).__name__}: {e}"
+        ) from e
+
+
 def resolve_and_parametrize(
     name: str,
     test_fn: Callable,
@@ -38,7 +96,8 @@ def resolve_and_parametrize(
     vector_index = config.getoption("vector_index") if config else None
 
     # Compute the legacy-safe nsamples to pass to the factory.
-    # The factory must always receive an int (FR-8: never None).
+    # The factory must always receive an int (FR-8: never None), or the string
+    # "auto" when --nsamples=auto is given.
     # At this point we don't yet know whether the factory returns a Parameter
     # or a legacy tuple, so we use the CLI value if explicit, otherwise 10 as
     # a safe sentinel. The real per-strategy override is applied AFTER the
@@ -58,18 +117,8 @@ def resolve_and_parametrize(
     # Refresh the random number generator seed
     RNG.refresh_seed()
 
-    # Call factory function with keyword argument
-    try:
-        result = factory(nsamples=factory_nsamples)
-    except TypeError as e:
-        # Try positional for backward compatibility
-        try:
-            result = factory(factory_nsamples)
-        except Exception as inner_e:
-            raise ValueError(
-                f"Error calling strategy factory '{name}': {e}. "
-                f"Factory should accept 'nsamples' parameter."
-            ) from inner_e
+    # Call factory function exactly once, the way its signature accepts nsamples
+    result = call_factory(name, factory, factory_nsamples)
 
     # Detect if result is a Parameter instance or tuple
     if isinstance(result, Parameter):

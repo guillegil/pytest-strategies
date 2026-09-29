@@ -7,7 +7,7 @@ from ._dataclass import convert_to_dataclass
 from ._ids import generate_dataclass_ids, generate_test_ids
 from ._introspection import PYTEST_FIXTURES as _PYTEST_FIXTURES
 from ._introspection import detect_dataclass_mode, validate_signature
-from ._resolver import resolve_and_parametrize
+from ._resolver import call_factory, resolve_and_parametrize
 from ._runtime import runtime
 from .parameters import Parameter
 
@@ -44,7 +44,7 @@ class Strategy:
             try:
                 # Instantiate parameter with dummy count to get metadata
                 # We handle both tuple-returning and Parameter-returning factories
-                result = factory(1)
+                result = call_factory(name, factory, 1)
 
                 if isinstance(result, Parameter):
                     strategies_data[name] = result.to_dict()
