@@ -7,7 +7,9 @@ read CLI options, call the factory, generate vectors, and apply
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, cast
+import inspect
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
