@@ -379,3 +379,45 @@ class TestDataclassModeSamples:
 
         result.assert_outcomes(passed=2)
         result.stdout.fnmatch_lines(["*test_rect[[]width=1,height=2[]] PASSED*"])
+
+    def test_pytest_param_marks_and_id(self, pytester):
+        pytester.makeini("[pytest]\nmarkers =\n    slow: slow tests\n")
+        pytester.makepyfile(point_strategies="""
+            import pytest
+
+            from pytest_strategy import Strategy
+
+            @Strategy.register("r2_points")
+            def points(nsamples):
+                return ("x", "y"), [
+                    (1, 2),
+                    pytest.param(3, 4, marks=pytest.mark.slow),
+                    pytest.param(5, 6, marks=pytest.mark.xfail(strict=True)),
+                    pytest.param(7, 8, marks=pytest.mark.skip),
+                    pytest.param(9, 10, id="custom"),
+                ]
+            """)
+        pytester.makepyfile(test_points="""
+            from dataclasses import dataclass
+
+            from pytest_strategy import Strategy
+
+            @dataclass
+            class P:
+                x: int
+                y: int
+
+            @Strategy.strategy("r2_points")
+            def test_dc(p: P):
+                assert isinstance(p.x, int) and isinstance(p.y, int)
+                assert p.x != 5
+            """)
+
+        result = pytester.runpytest_inprocess("-v")
+        result.assert_outcomes(passed=3, xfailed=1, skipped=1)
+        result.stdout.fnmatch_lines(
+            ["*test_dc[[]x=3,y=4[]] PASSED*", "*test_dc[[]custom[]] PASSED*"], consecutive=False
+        )
+
+        slow = pytester.runpytest_inprocess("-m", "slow")
+        slow.assert_outcomes(passed=1, deselected=4)

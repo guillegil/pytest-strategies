@@ -270,7 +270,13 @@ def resolve_and_parametrize(
         # DATACLASS MODE: Convert samples to dataclass instances
         assert dc_type is not None and dc_param is not None  # guaranteed when is_dc_mode is True
         try:
-            dataclass_samples = convert_to_dataclass(samples, argnames, dc_type)
+            # A pytest.param() sample is converted from its values; its marks and id
+            # are re-attached to the instance below
+            dataclass_samples = convert_to_dataclass(
+                [tuple(s.values) if isinstance(s, _ParameterSet) else s for s in samples],
+                argnames,
+                dc_type,
+            )
         except Exception as e:
             raise ValueError(
                 f"Error converting samples to dataclass for strategy '{name}': {e}"
@@ -279,10 +285,13 @@ def resolve_and_parametrize(
         # Generate test IDs for dataclass mode
         ids = generate_dataclass_ids(dataclass_samples, dc_type)
 
+        params = [
+            pytest.param(inst, marks=s.marks, id=s.id) if isinstance(s, _ParameterSet) else inst
+            for s, inst in zip(samples, dataclass_samples)
+        ]
+
         # Apply pytest parametrize to the dataclass parameter chosen by detection
-        return cast(
-            Callable, pytest.mark.parametrize(dc_param, dataclass_samples, ids=ids)(test_fn)
-        )
+        return cast(Callable, pytest.mark.parametrize(dc_param, params, ids=ids)(test_fn))
 
     else:
         # NAMED PARAMETERS MODE: Standard behavior

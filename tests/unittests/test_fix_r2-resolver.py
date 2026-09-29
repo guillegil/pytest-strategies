@@ -712,3 +712,51 @@ class TestConvertCustomInit:
         _, samples, ids = _parametrize(lambda nsamples: (("width", "height"), [(1, 2)]), test_rect)
         assert [(r.width, r.height) for r in samples] == [(1, 2)]
         assert ids == ["width=1,height=2"]
+
+
+# ---------------------------------------------------------------------------
+# pytest.param samples in dataclass mode
+# ---------------------------------------------------------------------------
+
+
+class TestDataclassModePytestParam:
+    """A pytest.param sample is converted from its values and keeps its marks and id."""
+
+    def test_values_marks_and_id_are_kept(self):
+        slow = pytest.mark.slow
+
+        def test_point(p: Point):
+            pass
+
+        argstr, samples, ids = _parametrize(
+            lambda nsamples: (
+                ("x", "y"),
+                [(1, 2), pytest.param(3, 4, marks=slow), pytest.param(5, 6, id="custom")],
+            ),
+            test_point,
+        )
+
+        assert argstr == "p"
+        assert samples[0] == Point(1, 2)
+        assert samples[1] == pytest.param(Point(3, 4), marks=slow)
+        assert samples[2] == pytest.param(Point(5, 6), id="custom")
+        assert ids == ["x=1,y=2", "x=3,y=4", "x=5,y=6"]
+
+    def test_parameter_rows_are_still_converted(self):
+        """Guards behaviour that already worked for rows that are not pytest.param."""
+
+        def test_point(p: Point):
+            pass
+
+        param = Parameter(
+            TestArg("x", rng_type=RNGInteger(0, 9)),
+            TestArg("y", rng_type=RNGInteger(0, 9)),
+            directed_vectors={"origin": (0, 0)},
+        )
+        _, samples, ids = _parametrize(
+            lambda nsamples: param,
+            test_point,
+            config=_make_config(vector_mode="directed_only"),
+        )
+        assert samples == [Point(0, 0)]
+        assert ids == ["x=0,y=0"]
