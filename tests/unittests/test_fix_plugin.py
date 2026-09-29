@@ -1,5 +1,9 @@
-"""Unit tests for plugin fixes: strategy file discovery."""
+"""Unit tests for plugin fixes: discovery, seeding and xdist support."""
 
+import random
+from types import SimpleNamespace
+
+from pytest_strategy import RNG
 from pytest_strategy.plugin import PytestStrategyPlugin
 
 STRATEGY_SOURCE = """
@@ -50,3 +54,29 @@ class TestDiscoveryHiddenDirectories:
         found = PytestStrategyPlugin()._discover_strategy_files([search_path])
 
         assert [p.name for p in found] == ["strategies.py"]
+
+
+class TestSeedNone:
+    """RNG.seed(None) keeps the seed but still refreshes the random state."""
+
+    def test_seed_none_reseeds_random_from_current_seed(self):
+        RNG.seed(1234)
+        expected = [random.random() for _ in range(3)]
+
+        random.seed()  # state from OS entropy, as in a fresh unseeded process
+        RNG.seed(None)
+
+        assert RNG.get_seed() == 1234
+        assert [random.random() for _ in range(3)] == expected
+
+
+class TestXdistConfigureNode:
+    """The controller hands its seed to every xdist worker."""
+
+    def test_configure_node_sends_current_seed(self):
+        RNG.seed(98765)
+        node = SimpleNamespace(workerinput={})
+
+        PytestStrategyPlugin().pytest_configure_node(node)
+
+        assert node.workerinput["pytest_strategies_seed"] == 98765

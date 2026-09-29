@@ -29,10 +29,15 @@ class RNG:
 
     @staticmethod
     def seed(seed: int | None = None):
-        """Set the random seed and refresh the random state"""
+        """Set the random seed and refresh the random state.
+
+        With ``None`` the current seed is kept, but the random state is still
+        refreshed from it, so an unseeded run starts from the same state as a
+        run given ``--rng-seed=<that seed>``.
+        """
         if seed is not None:
             RNG._seed = seed
-            random.seed(RNG._seed)
+        random.seed(RNG._seed)
 
     @staticmethod
     def get_seed():

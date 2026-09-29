@@ -43,6 +43,13 @@ class PytestStrategyPlugin:
         # Get CLI options
         rng_seed = config.getoption("--rng-seed", None)
 
+        # A pytest-xdist worker without --rng-seed uses the controller's seed
+        # (see pytest_configure_node). Workers must generate identical vectors,
+        # or xdist aborts with "Different tests were collected".
+        workerinput = getattr(config, "workerinput", None)
+        if rng_seed is None and workerinput is not None:
+            rng_seed = workerinput.get("pytest_strategies_seed")
+
         # Configure Strategy and RNG
         Strategy.set_config(config)
         RNG.seed(rng_seed)
@@ -54,6 +61,17 @@ class PytestStrategyPlugin:
     def pytest_unconfigure(self, config: Config) -> None:
         """Clean up when pytest is unconfiguring."""
         pass
+
+    @pytest.hookimpl(optionalhook=True)
+    def pytest_configure_node(self, node) -> None:
+        """
+        Send the controller's RNG seed to a pytest-xdist worker.
+
+        Optional hook: only called when pytest-xdist is installed.
+        """
+        from .rng import RNG
+
+        node.workerinput["pytest_strategies_seed"] = RNG.get_seed()
 
     # ==== SESSION HOOKS ====
 
