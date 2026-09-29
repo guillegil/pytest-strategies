@@ -5,6 +5,7 @@ Tests cover:
 - Weighted generators with a predicate re-choosing the range on every retry
 - RNGInteger/RNGFloat rejecting min > max at construction
 - Weights of weighted types and RNGEnum validated at construction
+- RNGEnum rejecting non-Enum arguments and member-less Enums with RNGValueError
 """
 
 import math
@@ -225,3 +226,27 @@ class TestWeightsValidation:
         rng_enum = RNGEnum(Shade, weights={Shade.LIGHT: 0, Shade.DARK: 1})
 
         assert {rng_enum.generate() for _ in range(50)} == {Shade.DARK}
+
+
+class TestRNGEnumClassValidation:
+    """RNGEnum raises RNGValueError, not TypeError/IndexError, for a bad enum_class"""
+
+    @pytest.mark.parametrize("bad", [Shade.LIGHT, "Shade", 42, None])
+    def test_non_class_rejected(self, bad):
+        """issubclass() used to raise TypeError before the RNGValueError branch could run"""
+        with pytest.raises(RNGValueError, match="is not an Enum class"):
+            RNGEnum(bad)
+
+    def test_non_enum_class_still_rejected(self):
+        """A class that is not an Enum keeps raising RNGValueError"""
+        with pytest.raises(RNGValueError, match="is not an Enum class"):
+            RNGEnum(int)
+
+    def test_enum_without_members_rejected(self):
+        """A member-less Enum used to build fine and fail with IndexError at generate()"""
+
+        class Empty(Enum):
+            pass
+
+        with pytest.raises(RNGValueError, match="Empty has no members"):
+            RNGEnum(Empty)

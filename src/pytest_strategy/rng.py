@@ -450,11 +450,15 @@ class RNGEnum(RNGType):
             predicate: Optional function to filter valid enum values
 
         Raises:
-            RNGValueError: If enum_class is not an Enum, if weights reference non-existent members,
-                or if weights are empty, negative, non-finite or all zero
+            RNGValueError: If enum_class is not an Enum class or has no members, if weights
+                reference non-existent members, or if weights are empty, negative,
+                non-finite or all zero
         """
-        if not issubclass(enum_class, Enum):
-            raise RNGValueError(f"{enum_class} is not an Enum class")
+        # isinstance guard first: issubclass raises TypeError for non-classes (e.g. a member)
+        if not (isinstance(enum_class, type) and issubclass(enum_class, Enum)):
+            raise RNGValueError(f"{enum_class!r} is not an Enum class")
+        if len(enum_class) == 0:
+            raise RNGValueError(f"{enum_class.__name__} has no members")
 
         self.enum_class = enum_class
         self.weights = weights
