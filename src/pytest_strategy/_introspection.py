@@ -141,6 +141,8 @@ def detect_dataclass_param(
         annotation = hints.get(name, param.annotation)
         if isinstance(annotation, str):
             annotation = _eval_annotation(test_fn, annotation)
+        if param.default is None:
+            annotation = _strip_implicit_optional(test_fn, annotation, param.annotation)
         if isinstance(annotation, type) and is_dataclass(annotation):
             candidates.append((name, annotation))
 
@@ -172,6 +174,25 @@ def detect_dataclass_mode(
     """
     is_dc_mode, dc_type, _ = detect_dataclass_param(test_fn, argnames, pytest_fixtures)
     return is_dc_mode, dc_type
+
+
+def _strip_implicit_optional(test_fn, hint: Any, written: Any) -> Any:
+    """
+    Undo the ``Optional[...]`` that ``typing.get_type_hints`` adds on Python 3.10.
+
+    Python 3.10 turns ``p: DC = None`` into ``Optional[DC]`` (3.11+ keeps ``DC``).
+    Only that implicit wrapping is removed: ``Optional[X]``/``Union[X, None]`` is
+    unwrapped to ``X`` when the annotation as written is ``X`` itself, so an
+    explicit ``Optional[DC]`` annotation is kept as written.
+    """
+    if typing.get_origin(hint) is not typing.Union:
+        return hint
+    args = [a for a in typing.get_args(hint) if a is not type(None)]
+    if len(args) != 1:
+        return hint
+    if isinstance(written, str):
+        written = _eval_annotation(test_fn, written)
+    return args[0] if written is args[0] else hint
 
 
 def _eval_annotation(test_fn, annotation: str) -> Any:

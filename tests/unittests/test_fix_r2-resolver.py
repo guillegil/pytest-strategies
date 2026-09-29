@@ -14,9 +14,11 @@ import random
 import subprocess
 import sys
 import textwrap
+import typing
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 from unittest import mock
 from unittest.mock import MagicMock
 
@@ -595,3 +597,56 @@ class TestIdsOfSets:
             for hash_seed in ("1", "2", "3", "4")
         }
         assert len(outputs) == 1
+
+
+# ---------------------------------------------------------------------------
+# Python 3.10: get_type_hints wraps `p: DC = None` in Optional
+# ---------------------------------------------------------------------------
+
+
+def _py310_get_type_hints(real):
+    """Emulate Python 3.10's get_type_hints, which adds Optional for a None default."""
+
+    def get_type_hints(obj, *args, **kwargs):
+        hints = real(obj, *args, **kwargs)
+        for name, param in inspect.signature(obj).parameters.items():
+            if param.default is None and name in hints:
+                hints[name] = Optional[hints[name]]  # noqa: UP045 (what 3.10 does)
+        return hints
+
+    return get_type_hints
+
+
+@pytest.fixture
+def py310_type_hints(monkeypatch):
+    monkeypatch.setattr(typing, "get_type_hints", _py310_get_type_hints(typing.get_type_hints))
+
+
+class TestNoneDefaultDataclassParam:
+    """``p: DC = None`` is detected whether or not get_type_hints adds Optional."""
+
+    def test_none_default(self):
+        def test_fn(p: Point = None):
+            pass
+
+        assert detect_dataclass_param(test_fn, ["x", "y"]) == (True, Point, "p")
+
+    def test_none_default_with_implicit_optional(self, py310_type_hints):
+        def test_fn(p: Point = None):
+            pass
+
+        assert detect_dataclass_param(test_fn, ["x", "y"]) == (True, Point, "p")
+
+    def test_quoted_annotation_with_implicit_optional(self, py310_type_hints):
+        def test_fn(p: "Point" = None):
+            pass
+
+        assert detect_dataclass_param(test_fn, ["x", "y"]) == (True, Point, "p")
+
+    def test_explicit_optional_is_not_dataclass_mode(self, py310_type_hints):
+        """An Optional written by the user is kept, as on Python 3.11+."""
+
+        def test_fn(p: Optional[Point] = None):  # noqa: UP045
+            pass
+
+        assert detect_dataclass_param(test_fn, ["x", "y"]) == (False, None, None)
