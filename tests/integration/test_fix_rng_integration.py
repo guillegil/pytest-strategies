@@ -13,7 +13,18 @@ test_session_isolation_integration.py for rationale).
 
 import pytest
 
+from pytest_strategy import Strategy
+
 pytest_plugins = ["pytester"]
+
+
+@pytest.fixture(autouse=True)
+def _restore_registry():
+    """Drop what each in-process run registers, so reruns don't trip the duplicate-name warning."""
+    registry = dict(Strategy._registry)
+    yield
+    Strategy._registry.clear()
+    Strategy._registry.update(registry)
 
 
 class TestSelectivePredicatesCollect:
