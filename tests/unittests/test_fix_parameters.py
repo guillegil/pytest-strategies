@@ -9,6 +9,7 @@ import pytest
 from pytest_strategy import RNGInteger, Series
 from pytest_strategy.parameters import Parameter
 from pytest_strategy.rng import RNG, RNGSequence
+from pytest_strategy.strategy import PytestStrategiesWarning
 from pytest_strategy.test_args import TestArg
 
 
@@ -160,14 +161,18 @@ class TestSeriesFiniteConstraintsSkipCombinations:
         assert param.generate_vectors(3, mode="random_only") == [(1,), (3,), (1,)]
 
     def test_series_plus_random_constraint_on_series_value_only(self):
-        """Redrawing the random arg cannot fix a rejected Series value; it is skipped."""
+        """Redrawing the random arg cannot fix a rejected Series value; it is skipped.
+
+        With a random arg the skip cannot be told apart from unlucky draws, so it warns.
+        """
         RNG.seed(0)
         param = Parameter(
             TestArg("s", rng_type=Series([1, 2, 3])),
             TestArg("i", rng_type=RNGInteger(0, 5)),
             vector_constraints=[lambda v: v[0] != 1],
         )
-        samples = param.generate_vectors(4)
+        with pytest.warns(PytestStrategiesWarning, match=r"combination \(s=1\) skipped"):
+            samples = param.generate_vectors(4)
         assert [s[0] for s in samples] == [2, 3, 2, 3]
         assert all(0 <= s[1] <= 5 for s in samples)
 
@@ -250,7 +255,8 @@ class TestExhaustiveRetriesRandomPositions:
         samples = param.generate_exhaustive()
         assert [s[:2] for s in samples] == [(1, 2), (1, 3), (2, 3)]
 
-    def test_unsatisfiable_random_constraint_drops_after_max_retries(self):
+    def test_unsatisfiable_random_constraint_raises_after_max_retries(self):
+        """Each combination gets max_retries attempts; rejecting all of them raises."""
         calls = []
 
         def never(v):
@@ -263,7 +269,8 @@ class TestExhaustiveRetriesRandomPositions:
             vector_constraints=[never],
             max_retries=3,
         )
-        assert param.generate_exhaustive() == []
+        with pytest.raises(ValueError, match="none of the 2 sequence combinations"):
+            param.generate_exhaustive()
         assert [v[0] for v in calls] == [1, 1, 1, 2, 2, 2]
 
     def test_no_random_args_checks_each_combination_once(self):

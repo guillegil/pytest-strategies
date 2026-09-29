@@ -2,9 +2,11 @@
 
 import itertools
 import math
+import warnings
 from collections.abc import Callable
 from typing import Any
 
+from ._warnings import PytestStrategiesWarning
 from .rng import SequenceLike, Series
 from .test_args import TestArg
 
@@ -28,7 +30,7 @@ class Parameter:
         always_include_directed: bool = True,
         vector_constraints: list[Callable[[tuple], bool]] | None = None,
         max_retries: int = 100,
-        nsamples: int | None = None,
+        nsamples: int | str | None = None,
     ):
         """
         Initialize a Parameter container.
@@ -39,8 +41,12 @@ class Parameter:
             test_vectors: Dictionary mapping test vector names to value tuples (for test mode)
             always_include_directed: If True, directed vectors are included in "mixed" mode
             vector_constraints: List of functions that validate entire parameter vectors
-            max_retries: Maximum attempts to satisfy vector_constraints before raising (>= 1)
-            nsamples: Default number of random samples for this strategy (None or >= 0)
+            max_retries: Maximum attempts to satisfy vector_constraints before raising (>= 1).
+                In finite mode with Series args, a Series combination whose random args
+                exhaust max_retries is skipped with a PytestStrategiesWarning; the call
+                raises only when a whole cycle of combinations yields no vector.
+            nsamples: Default number of random samples for this strategy (None, "auto"
+                for exhaustive generation, or an int >= 0)
 
         Raises:
             ValueError: If directed vectors don't match the number of test args
@@ -63,11 +69,14 @@ class Parameter:
                 }
             )
         """
-        # Validate counts up front (bool is an int subclass, so reject it explicitly)
-        if nsamples is not None and (
-            not isinstance(nsamples, int) or isinstance(nsamples, bool) or nsamples < 0
+        # Validate counts up front (bool is an int subclass, so reject it explicitly).
+        # "auto" is the value factories receive for --nsamples=auto and pass through.
+        if (
+            nsamples is not None
+            and nsamples != "auto"
+            and (not isinstance(nsamples, int) or isinstance(nsamples, bool) or nsamples < 0)
         ):
-            raise ValueError(f"nsamples must be None or an int >= 0, got {nsamples!r}")
+            raise ValueError(f'nsamples must be None or an int >= 0 (or "auto"), got {nsamples!r}')
         if not isinstance(max_retries, int) or isinstance(max_retries, bool) or max_retries < 1:
             raise ValueError(f"max_retries must be an int >= 1, got {max_retries!r}")
 
@@ -284,7 +293,7 @@ class Parameter:
         Generate parameter vectors.
 
         Args:
-            n: Number of random samples to generate (>= 0)
+            n: Number of random samples to generate (an int >= 0)
             mode: Sampling mode
                 - "all": All directed vectors + n random samples (default)
                 - "random_only": Only n random samples, no directed
@@ -296,6 +305,14 @@ class Parameter:
 
         Returns:
             List of parameter vectors (tuples)
+
+        Raises:
+            ValueError: If n is not an int >= 0 in a mode that generates samples
+            ValueError: If the vector constraints reject every generated vector
+
+        Warns:
+            PytestStrategiesWarning: If a Series combination is skipped because its
+                random args did not satisfy the constraints within max_retries draws
 
         Examples:
             # All directed + 10 random
@@ -335,7 +352,10 @@ class Parameter:
         if mode == "directed_only":
             return list(self.directed_vectors.values())
 
-        # The remaining modes generate n random samples
+        # The remaining modes generate n random samples. A non-int n would never equal
+        # the Series row count below (bool is an int subclass, so reject it explicitly).
+        if not isinstance(n, int) or isinstance(n, bool):
+            raise ValueError(f"n must be an int, got {n!r}")
         if n < 0:
             raise ValueError(f"n must be >= 0, got {n}")
 
@@ -362,8 +382,11 @@ class Parameter:
                 num_combos = math.prod(len(seq) for seq in series_seqs)
                 series_rows = 0
                 misses = 0
-                for combo in itertools.cycle(itertools.product(*series_seqs)):
-                    if series_rows == n:
+                # Combinations skipped after redrawing their random args, keyed by their
+                # index in the product (Series values need not be hashable)
+                skipped: dict[int, tuple] = {}
+                for k, combo in enumerate(itertools.cycle(itertools.product(*series_seqs))):
+                    if series_rows >= n:
                         break
                     vec: list = [None] * len(self.test_args)
                     # Series values skip arg.generate(), so apply the arg's validator here
@@ -390,6 +413,24 @@ class Parameter:
                                 f"constraints ({attempts} attempt(s) each). "
                                 "Check your constraints."
                             )
+                        # With random args the rejection may just be unlucky draws of a
+                        # valid combination, so the skip must not go unnoticed
+                        if random_indices:
+                            skipped.setdefault(k % num_combos, combo)
+                # Warn once per skipped combination, and only when no error was raised
+                for combo in skipped.values():
+                    values = ", ".join(
+                        f"{self.test_args[idx].name}={value!r}"
+                        for idx, value in zip(series_indices, combo)
+                    )
+                    warnings.warn(
+                        f"Series combination ({values}) skipped: the vector constraints "
+                        f"rejected max_retries={attempts} draws of the non-Series args. "
+                        "Raise max_retries, or relax the constraints if this combination "
+                        "should be tested.",
+                        PytestStrategiesWarning,
+                        stacklevel=2,
+                    )
             else:
                 for _ in range(n):
                     samples.append(self.generate_vector())
@@ -407,6 +448,7 @@ class Parameter:
         Raises:
             ValueError: If no sequence arguments are present
             ValueError: If a sequence value fails its argument's validator
+            ValueError: If the vector constraints reject every combination
         """
         # Identify sequence args and their indices
         sequence_indices = []
@@ -453,6 +495,18 @@ class Parameter:
                 if self._validate_vector(vector_tuple):
                     samples.append(vector_tuple)
                     break
+
+        # No samples from a non-empty product means the constraints rejected every
+        # combination. Fail like finite mode does instead of yielding an empty parameter
+        # set, which pytest would silently skip.
+        num_combos = math.prod(len(seq) for seq in sequences)
+        if num_combos and not samples:
+            raise ValueError(
+                "Could not generate valid vector: none of the "
+                f"{num_combos} sequence combinations satisfied the vector "
+                f"constraints ({attempts} attempt(s) each). "
+                "Check your constraints."
+            )
 
         return samples
 

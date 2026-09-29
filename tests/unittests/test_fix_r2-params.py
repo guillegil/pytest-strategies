@@ -1,0 +1,276 @@
+"""
+Regression tests for Parameter review fixes.
+
+Covers:
+- Parameter(nsamples="auto") accepted again (factories pass --nsamples=auto through)
+- generate_vectors rejecting a non-int n instead of looping forever on Series args
+- Finite-mode Series warning when a combination is skipped after random redraws
+- generate_exhaustive raising when the constraints reject every combination
+"""
+
+import random
+import warnings
+from unittest.mock import MagicMock
+
+import pytest
+
+from pytest_strategy import (
+    RNG,
+    Parameter,
+    RNGInteger,
+    RNGSequence,
+    Series,
+    Strategy,
+    TestArg,
+)
+from pytest_strategy._resolver import resolve_and_parametrize
+from pytest_strategy.strategy import PytestStrategiesWarning
+
+
+@pytest.fixture(autouse=True)
+def _restore_global_state():
+    """Undo global changes: the strategy registry, the RNG seed and the random state."""
+    registry = dict(Strategy._registry)
+    seed = RNG.get_seed()
+    state = random.getstate()
+    yield
+    Strategy._registry.clear()
+    Strategy._registry.update(registry)
+    RNG.seed(seed)
+    random.setstate(state)
+
+
+def _strategy_skip_warnings(record):
+    return [w for w in record if issubclass(w.category, PytestStrategiesWarning)]
+
+
+class TestNsamplesAutoAccepted:
+    """Parameter(nsamples="auto") works again, so factories can forward --nsamples=auto."""
+
+    def test_auto_accepted(self):
+        param = Parameter(TestArg("x", rng_type=Series([1, 2, 3])), nsamples="auto")
+        assert param.nsamples == "auto"
+        assert param.to_dict()["nsamples"] == "auto"
+
+    @pytest.mark.parametrize("nsamples", ["AUTO", "all", "10", "", 1.0])
+    def test_other_values_still_rejected(self, nsamples):
+        with pytest.raises(
+            ValueError, match='nsamples must be None or an int >= 0 \\(or "auto"\\)'
+        ):
+            Parameter(TestArg("x", rng_type=RNGInteger(0, 10)), nsamples=nsamples)
+
+    @staticmethod
+    def _resolve(factory, cli_nsamples):
+        config = MagicMock()
+        config.getoption.side_effect = lambda opt, default=None: {
+            "nsamples": cli_nsamples,
+            "vector_mode": "all",
+            "vector_name": None,
+            "vector_index": None,
+        }.get(opt, default)
+
+        def test_fn(x):
+            pass
+
+        marked = resolve_and_parametrize(
+            "fix_r2_auto",
+            test_fn,
+            registry={"fix_r2_auto": factory},
+            config=config,
+            pytest_fixtures=set(),
+        )
+        return list(marked.pytestmark[0].args[1])
+
+    def test_factory_forwarding_cli_auto_is_exhaustive(self):
+        """--nsamples=auto reaches the factory as "auto"; forwarding it used to raise."""
+
+        def forward(nsamples):
+            return Parameter(TestArg("x", rng_type=Series([1, 2, 3])), nsamples=nsamples)
+
+        assert self._resolve(forward, "auto") == [1, 2, 3]
+        assert self._resolve(forward, "5") == [1, 2, 3, 1, 2]
+
+    def test_per_strategy_auto_default_is_exhaustive(self):
+        """A strategy defaulting to "auto" enumerates its Series without any CLI flag."""
+
+        def auto_default(nsamples):
+            return Parameter(TestArg("x", rng_type=Series(["a", "b"])), nsamples="auto")
+
+        assert self._resolve(auto_default, None) == ["a", "b"]
+
+
+class TestGenerateVectorsRejectsNonIntN:
+    """A non-int n used to make the Series loop spin forever with growing memory."""
+
+    @staticmethod
+    def _param_with_loop_guard(*extra_args):
+        calls = []
+
+        def guard(vector):
+            calls.append(vector)
+            if len(calls) > 1000:
+                raise RuntimeError("generate_vectors kept looping")
+            return True
+
+        return Parameter(
+            TestArg("s", rng_type=Series([1, 2, 3])),
+            *extra_args,
+            vector_constraints=[guard],
+        )
+
+    @pytest.mark.parametrize("n", [2.5, 3.0, "3", None, True, False])
+    @pytest.mark.parametrize("mode", ["all", "random_only", "mixed"])
+    def test_series_non_int_n_raises(self, n, mode):
+        param = self._param_with_loop_guard(TestArg("r", rng_type=RNGInteger(0, 9)))
+        with pytest.raises(ValueError, match="n must be an int, got"):
+            param.generate_vectors(n, mode=mode)
+
+    def test_series_only_non_int_n_raises(self):
+        param = self._param_with_loop_guard()
+        with pytest.raises(ValueError, match="n must be an int, got 2.5"):
+            param.generate_vectors(2.5, mode="random_only")
+
+    @pytest.mark.parametrize("n", [2.5, 3.0, True])
+    def test_random_path_raises_the_same_error(self, n):
+        """Both generation paths reject a non-int n the same way."""
+        param = Parameter(TestArg("r", rng_type=RNGInteger(0, 9)))
+        with pytest.raises(ValueError, match="n must be an int, got"):
+            param.generate_vectors(n, mode="random_only")
+
+    def test_int_n_still_works(self):
+        param = self._param_with_loop_guard(TestArg("r", rng_type=RNGInteger(0, 9)))
+        assert [v[0] for v in param.generate_vectors(4, mode="random_only")] == [1, 2, 3, 1]
+
+
+class TestSeriesSkipAfterRedrawsWarns:
+    """A Series combination skipped after max_retries unlucky redraws is reported."""
+
+    @staticmethod
+    def _rare_constraint_param():
+        return Parameter(
+            TestArg("mode", rng_type=Series(["a", "b", "c"])),
+            TestArg("x", rng_type=RNGInteger(0, 99)),
+            vector_constraints=[lambda v: v[1] > 97],
+        )
+
+    def test_wrong_series_rows_never_silent(self):
+        """Over 200 seeds, 68 used to return wrong Series rows with no error or warning."""
+        warned_seeds = 0
+        for seed in range(200):
+            RNG.seed(seed)
+            with warnings.catch_warnings(record=True) as record:
+                warnings.simplefilter("always")
+                try:
+                    rows = [v[0] for v in self._rare_constraint_param().generate_vectors(3)]
+                except ValueError:
+                    continue
+            messages = [str(w.message) for w in _strategy_skip_warnings(record)]
+            if rows != ["a", "b", "c"]:
+                assert messages, f"seed {seed}: rows {rows} without a warning"
+                warned_seeds += 1
+            # Every Series value left untested is named by a warning
+            for value in {"a", "b", "c"} - set(rows):
+                assert any(f"(mode={value!r}) skipped" in m for m in messages), seed
+        assert warned_seeds > 0
+
+    def test_one_warning_per_combination_per_call(self):
+        """A combination skipped on every cycle is reported once, naming it and max_retries."""
+        RNG.seed(0)
+        param = Parameter(
+            TestArg("mode", rng_type=Series(["a", "b", "c"])),
+            TestArg("x", rng_type=RNGInteger(0, 9)),
+            vector_constraints=[lambda v: v[0] != "a"],
+            max_retries=5,
+        )
+        with pytest.warns(PytestStrategiesWarning) as record:
+            samples = param.generate_vectors(6)
+        assert [s[0] for s in samples] == ["b", "c"] * 3
+        messages = [str(w.message) for w in _strategy_skip_warnings(record)]
+        assert len(messages) == 1
+        assert "Series combination (mode='a') skipped" in messages[0]
+        assert "max_retries=5" in messages[0]
+
+        # A second call warns again
+        with pytest.warns(PytestStrategiesWarning, match=r"\(mode='a'\)"):
+            param.generate_vectors(2)
+
+    def test_warning_names_every_series_arg(self):
+        RNG.seed(0)
+        param = Parameter(
+            TestArg("lo", rng_type=Series([1, 2])),
+            TestArg("pad", rng_type=RNGInteger(0, 9)),
+            TestArg("hi", rng_type=Series(["x", "y"])),
+            vector_constraints=[lambda v: (v[0], v[2]) != (2, "x")],
+        )
+        with pytest.warns(PytestStrategiesWarning, match=r"\(lo=2, hi='x'\) skipped"):
+            param.generate_vectors(3)
+
+    def test_series_only_constraint_skips_silently(self):
+        """Without random args no redraw happens, so the skip stays silent."""
+        param = Parameter(
+            TestArg("lo", rng_type=Series([1, 2, 3])),
+            TestArg("hi", rng_type=Series([1, 2, 3])),
+            vector_constraints=[lambda v: v[0] < v[1]],
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert param.generate_vectors(3) == [(1, 2), (1, 3), (2, 3)]
+
+    def test_no_warning_when_every_combination_fails(self):
+        """The ValueError already explains an unsatisfiable constraint."""
+        param = Parameter(
+            TestArg("s", rng_type=Series([1, 2, 3])),
+            TestArg("i", rng_type=RNGInteger(0, 9)),
+            vector_constraints=[lambda v: False],
+            max_retries=2,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(ValueError, match="none of the 3 Series combinations"):
+                param.generate_vectors(4)
+
+    def test_no_warning_when_redraws_succeed(self):
+        RNG.seed(0)
+        param = Parameter(
+            TestArg("role", rng_type=Series(["admin", "user", "guest"])),
+            TestArg("uid", rng_type=RNGInteger(1, 1000)),
+            vector_constraints=[lambda v: v[1] > 500],
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            samples = param.generate_vectors(6)
+        assert [s[0] for s in samples] == ["admin", "user", "guest"] * 2
+
+
+class TestExhaustiveUnsatisfiableRaises:
+    """--nsamples=auto used to yield an empty parameter set that pytest silently skipped."""
+
+    def test_all_series_unsatisfiable_raises(self):
+        param = Parameter(
+            TestArg("x", rng_type=Series([1, 2, 3])),
+            TestArg("y", rng_type=Series([1, 2])),
+            vector_constraints=[lambda v: v[0] + v[1] > 100],
+        )
+        with pytest.raises(
+            ValueError,
+            match=r"none of the 6 sequence combinations satisfied the vector "
+            r"constraints \(1 attempt\(s\) each\)",
+        ):
+            param.generate_exhaustive()
+
+    def test_sequence_plus_random_unsatisfiable_raises(self):
+        param = Parameter(
+            TestArg("s", rng_type=RNGSequence([1, 2, 3])),
+            TestArg("i", rng_type=RNGInteger(0, 9)),
+            vector_constraints=[lambda v: v[1] > 50],
+            max_retries=4,
+        )
+        with pytest.raises(ValueError, match=r"none of the 3 sequence combinations.*4 attempt"):
+            param.generate_exhaustive()
+
+    def test_partially_satisfiable_still_filters(self):
+        param = Parameter(
+            TestArg("x", rng_type=Series([1, 2, 3])),
+            vector_constraints=[lambda v: v[0] == 3],
+        )
+        assert param.generate_exhaustive() == [(3,)]

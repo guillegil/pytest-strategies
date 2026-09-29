@@ -10,11 +10,8 @@ from ._introspection import PYTEST_FIXTURES as _PYTEST_FIXTURES
 from ._introspection import detect_dataclass_mode, validate_signature
 from ._resolver import call_factory, resolve_and_parametrize
 from ._runtime import runtime
+from ._warnings import PytestStrategiesWarning
 from .parameters import Parameter
-
-
-class PytestStrategiesWarning(UserWarning):
-    """Warning category for pytest-strategies (e.g. a strategy name registered twice)."""
 
 
 def _factory_origin(fn: Callable[..., Any]) -> tuple[str | None, str | None]:
