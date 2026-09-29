@@ -20,7 +20,7 @@
 - **Fixture Integration**: Works out-of-the-box with standard pytest fixtures (custom, parametrized, or built-in).
 - **Reproducibility**: Deterministic generation via seed control for debugging failures.
 - **CLI Control**: Filter strategies, change generation modes, or increase sample sizes directly from the command line.
-- **Per-Strategy Sample Count**: Let a strategy declare its own vector count as a soft default that `--nsamples` can still override.
+- **Per-Strategy Sample Count**: Let a strategy declare its own vector count as a soft default that an integer `--nsamples` can still override.
 
 ## 📦 Installation
 
@@ -69,6 +69,8 @@ Run it:
 pytest test_users.py
 ```
 
+Strategies can be registered in the test module that uses them, as here, or in separate strategy files that the plugin imports for you (see [Strategy Files](#10-strategy-files)).
+
 ## 📖 Core Concepts
 
 ### 1. Strategies & Parameters
@@ -87,6 +89,12 @@ def math_strategy(nsamples: int):
     )
 ```
 
+The factory is called once for each test that uses the strategy, when pytest collects that test. It receives the run's sample count as `nsamples`: an integer (the `--nsamples` value, or 10 when the option is not given), or the string `"auto"` under `--nsamples=auto`. The factory may take it as a keyword or positional parameter, or take no parameters at all; the plugin reads the signature to decide how to call it. A factory that returns a `Parameter` does not need to use `nsamples`, because the plugin generates the vectors itself.
+
+Strategy names share one registry. If a different function registers a name that is already taken, the plugin emits a `PytestStrategiesWarning` naming both functions, and the last registration wins. Running the same function's registration again (for example, the same file imported twice) is silent.
+
+`PytestStrategiesWarning` is a `UserWarning` subclass that you can import from `pytest_strategy.strategy`. To turn it into an error, add `error::pytest_strategy.strategy.PytestStrategiesWarning` to your `filterwarnings` setting.
+
 ### 2. RNG Types
 `pytest-strategies` provides rich, type-safe generators:
 
@@ -102,6 +110,15 @@ def math_strategy(nsamples: int):
 | `RNGEnum`      | Python Enum members       | `RNGEnum(MyEnum)`                                  |
 | `RNGWeighted*` | Weighted ranges           | `RNGWeightedInteger({(0,10): 0.9, (11,100): 0.1})` |
 
+RNG types check their arguments when they are constructed. A misconfigured strategy fails at collection with an `RNGValueError` (from `pytest_strategy.rng`) instead of drawing wrong values later. These cases are rejected:
+- `RNGInteger` or `RNGFloat` with `min > max`. This includes a single bound that crosses the other bound's default: `RNGFloat(min=5.0)` fails because `max` defaults to 1.0.
+- Weights of `RNGWeightedInteger`, `RNGWeightedFloat` or `RNGEnum` that are empty, negative, not finite or all zero. Some zero weights are allowed.
+- `RNGEnum` given something that is not an `Enum` class, an `Enum` with no members, or a predicate that no member satisfies.
+- `RNGString` with an empty `charset` (unless the length is 0), a negative length, or `min_length > max_length`.
+- A `set` or `frozenset` passed to `Series` or `RNGSequence`. Their iteration order is not reproducible, so pass `sorted(...)` or a list instead.
+
+`Parameter` raises `ValueError` when `nsamples` is not `None`, `"auto"` or an integer >= 0, or when `max_retries` is not an integer >= 1.
+
 ### 3. Enums & Weighted Generation
 The `RNGEnum` class supports standard Python Enums, including weighted selection and predicates.
 
@@ -112,14 +129,15 @@ class Status(Enum):
     FAILED = "failed"
     PENDING = "pending"
 
-# 70% Success, 20% Pending, 10% Failed
-# Exclude PENDING state entirely via predicate
+# Weights: 70% SUCCESS, 10% FAILED, 20% PENDING.
+# The predicate excludes PENDING, so SUCCESS and FAILED are drawn 7:1.
 arg = TestArg("status", rng_type=RNGEnum(
     Status,
     weights={Status.SUCCESS: 0.7, Status.FAILED: 0.1, Status.PENDING: 0.2},
     predicate=lambda s: s != Status.PENDING
 ))
 ```
+With a predicate, each draw picks among the members that the predicate accepts, and they keep their relative weights.
 
 ### 4. Constraints
 You can enforce rules on generated data:
@@ -140,6 +158,7 @@ Parameter(
     ]
 )
 ```
+A random vector that fails a constraint is drawn again, up to `max_retries` times (a `Parameter` argument, default 100). If no valid vector turns up, collecting the test fails with "Could not generate valid vector".
 
 ### 5. Sequence Testing & Exhaustive Generation (New in v1.1.0)
 
@@ -147,7 +166,7 @@ There are two sequence types. Both walk a fixed set of values, but they differ i
 
 | Type          | `--nsamples=auto`                                   | `--nsamples=K` (finite)                                              |
 | ------------- | --------------------------------------------------- | ------------------------------------------------------------------- |
-| `Series`      | Values in **declaration order** (Cartesian product) | Cycles through the product in order (`K >= len`) or takes the first `K` (`K < len`) |
+| `Series`      | Values in **declaration order** (Cartesian product) | Cycles through the product in order (`K >= len`) or takes the first `K` (`K < len`), skipping combinations that the constraints reject |
 | `RNGSequence` | A **random permutation** (each value once)          | Random picks, like `RNGChoice`                                      |
 
 > **Rule of thumb:** the `RNG` prefix means random. `Series` is deterministic and ordered; `RNGSequence` is randomized.
@@ -196,6 +215,17 @@ Both sequence types accept a `predicate` argument to exclude values before gener
 TestArg("evens", rng_type=Series(range(10), predicate=lambda x: x % 2 == 0))
 ```
 
+**What `--nsamples=auto` does:**
+`auto` replaces a strategy's random samples with the combinations of its sequence arguments. Everything else works as it does with a finite count:
+- Only `Series` and `RNGSequence` arguments are enumerated. Every other argument (`RNGInteger`, `RNGEnum`, `RNGChoice`, `RNGBoolean`, ...) gets a fresh random value for each combination.
+- Combinations that `vector_constraints` reject are left out. Random arguments are redrawn up to `max_retries` times before a combination is dropped. If the constraints reject every combination, collecting the test fails.
+- Directed vectors are placed before the combinations in the default `all` mode. In `mixed` mode they are included when `always_include_directed` is set (the default). `random_only` gives only the combinations.
+- `--vector-mode=test`, `--vector-mode=directed_only`, `--vector-name` and `--vector-index` take precedence: they select only those vectors, and no combinations are generated.
+- A strategy with no `Series` or `RNGSequence` argument has nothing to enumerate. It falls back to its own `nsamples` (see [Per-Strategy Sample Count](#8-per-strategy-sample-count-new-in-v110)), or 10 random samples.
+
+**Constraints on `Series` in finite mode:**
+With a finite `--nsamples`, a `Series` combination that the constraints reject is skipped, and the cycle continues with the next combination. If the strategy also has random arguments, they are redrawn up to `max_retries` times before the combination is skipped. Each such skip emits a `PytestStrategiesWarning`: raise `max_retries`, or relax the constraint if that combination should be tested. If a whole cycle of combinations yields no valid vector, collecting the test fails.
+
 ### 6. Metadata Export (New in v1.0.0)
 
 You can export all registered strategies and their metadata (parameters, RNG types, constraints) to JSON for analysis or integration with other tools.
@@ -242,14 +272,73 @@ def edge_heavy_strategy(nsamples):
     )
 ```
 
-This is a **soft default**: an explicit `--nsamples` on the command line still wins, so you can always scale a whole run from the CLI.
+This is a **soft default**: an explicit integer `--nsamples` on the command line still wins, so you can always scale a whole run from the CLI.
 
-| `--nsamples` (CLI) | `Parameter(nsamples=...)` | Vectors generated              |
-| ------------------ | ------------------------- | ------------------------------ |
-| not passed         | `25`                      | 25 (strategy value)            |
-| not passed         | unset                     | 10 (global default)            |
-| `--nsamples=5`     | `25`                      | 5 (CLI overrides)              |
-| `--nsamples=auto`  | any                       | exhaustive (auto always wins)  |
+| `--nsamples` (CLI) | `Parameter(nsamples=...)` | Random vectors generated |
+| ------------------ | ------------------------- | ------------------------ |
+| not passed         | `25`                      | 25 (strategy value)      |
+| not passed         | unset                     | 10 (global default)      |
+| `--nsamples=5`     | `25`                      | 5 (CLI overrides)        |
+| `--nsamples=auto`  | any                       | Every `Series`/`RNGSequence` combination. A strategy without such arguments uses its own value (here 25), or 10 when unset |
+| not passed         | `"auto"`                  | Same as `--nsamples=auto` |
+
+Directed vectors are added on top of these, according to `--vector-mode`.
+
+### 9. Dataclass Parameters
+
+Instead of one test parameter per strategy argument, a test can take a single dataclass whose fields are the strategy's arguments:
+
+```python
+from dataclasses import dataclass
+
+import pytest
+
+from pytest_strategy import Strategy, Parameter, TestArg, RNGInteger
+
+
+@dataclass
+class Point:
+    x: int
+    y: int
+
+
+@Strategy.register("points")
+def points_strategy(nsamples):
+    return Parameter(
+        TestArg("x", rng_type=RNGInteger(0, 10)),
+        TestArg("y", rng_type=RNGInteger(0, 10)),
+    )
+
+
+@pytest.fixture
+def scale():
+    return 2
+
+
+class TestPoints:
+    @Strategy.strategy("points")
+    def test_scaled(self, point: Point, scale):
+        assert 0 <= point.x * scale <= 20
+```
+
+Dataclass mode is used when all of these are true:
+- the strategy has at least two arguments;
+- none of the arguments is a parameter of the test;
+- exactly one test parameter is annotated with a dataclass whose `__init__` fields are the strategy's argument names.
+
+Fields with `init=False` are not counted, and `kw_only` fields work. The other parameters (`self`, `cls`, fixtures) are left alone, in any position. String annotations (`from __future__ import annotations` or quoted names) work too, as long as the dataclass is defined at module level. If a single parameter has a dataclass annotation but its fields do not match, collection fails with a message that lists the missing and extra fields.
+
+### 10. Strategy Files
+
+Strategies do not have to be registered in the test module. The plugin imports strategy files when the session starts, before any test module is collected. A file is loaded when both of these are true:
+- its name is `strategies.py`, `strategy.py`, `*_strategies.py` or `*_strategy.py`, and
+- it contains the text `@Strategy.register`.
+
+The plugin searches the `testpaths` directories from your pytest configuration, expanding glob patterns such as `pkgs/*/tests`. When `testpaths` is not set, it searches the rootdir. It also searches the directory of each path given on the command line. Below these directories it skips what pytest's collection skips: hidden directories (names starting with `.`), `__pycache__`, directories matching `norecursedirs` (by default these include `build`, `dist`, `venv` and `node_modules`), and virtual environments (any directory containing a `pyvenv.cfg` file). A directory named on the command line is always searched. Files are loaded in sorted path order, so the same file wins a duplicate strategy name on every machine.
+
+Each strategy file is imported as a standalone module, not as part of a package. Relative imports do not work in it, and a sibling module can only be imported if its directory is on `sys.path`.
+
+A strategy file that fails to import does not stop the run. The plugin prints `pytest-strategies: Warning - Failed to load <path>: <error>` when the session starts. A file that calls `pytest.skip(..., allow_module_level=True)` or `pytest.importorskip()` at module level is skipped, and that is reported with `-v`. Any "Strategy 'name' not found" error lists the files that failed to load or were skipped. `pytest -vv` prints each loaded file, and `pytest --list-strategies` lists the registered strategy names and exits.
 
 ## 🔌 Fixture Integration
 
@@ -271,13 +360,16 @@ def test_db_insert(username, age, database): # 'database' is a fixture
 
 Control test generation directly from the command line:
 
-| Option           | Description                                                             | Example                                     |
-| ---------------- | ----------------------------------------------------------------------- | ------------------------------------------- |
-| `--nsamples`     | Number of samples (default 10), or "auto" for exhaustive. Overrides a strategy's own `nsamples`. | `pytest --nsamples=50` or `--nsamples=auto` |
-| `--vector-mode`  | Generation mode: `all`, `random_only`, `directed_only`, `mixed`, `test` | `pytest --vector-mode=test`                 |  |
-| `--vector-name`  | Run only a specific directed vector by name                             | `pytest --vector-name=edge_case_1`          |
-| `--vector-index` | Run only the directed vector at this index                              | `pytest --vector-index=0`                   |
-| `--rng-seed`     | Set seed for reproducibility                                            | `pytest --rng-seed=42`                      |
+| Option              | Description                                                             | Example                                     |
+| ------------------- | ----------------------------------------------------------------------- | ------------------------------------------- |
+| `--nsamples`        | Number of random samples per strategy (default 10). An integer overrides a strategy's own `nsamples`. `auto` enumerates the `Series`/`RNGSequence` arguments (see [What `--nsamples=auto` does](#5-sequence-testing--exhaustive-generation-new-in-v110)). Any other value is a usage error. | `pytest --nsamples=50` or `--nsamples=auto` |
+| `--vector-mode`     | Generation mode: `all`, `random_only`, `directed_only`, `mixed`, `test` | `pytest --vector-mode=test`                 |
+| `--vector-name`     | Run only the directed vector with this name                             | `pytest --vector-name=edge_case_1`          |
+| `--vector-index`    | Run only the directed vector at this index (0-based, in definition order) | `pytest --vector-index=0`                 |
+| `--rng-seed`        | Set seed for reproducibility                                            | `pytest --rng-seed=42`                      |
+| `--list-strategies` | List the registered strategy names and exit                             | `pytest --list-strategies`                  |
+
+`--vector-name` and `--vector-index` take precedence over `--vector-mode` and `--nsamples`. A strategy without the requested directed vector yields no vectors, so the tests that use it are skipped ("got empty parameter set"). If no strategy in the run has the vector, for example because of a typo or an index that is out of range everywhere, pytest stops with a usage error that lists each strategy's directed vectors. It does not skip every test.
 
 ## 🔄 Reproducibility
 
@@ -287,10 +379,21 @@ pytest-strategies: RNG seed = 1763926297314361000
 ```
 pytest does not show the header with `-q` or `--no-header`, so drop those flags (or pass your own `--rng-seed`) when you need the seed, e.g. in CI.
 
-If a test fails, you can reproduce the exact same data sequence by passing this seed:
+If a test fails, pass this seed to generate the same test vectors again:
 ```bash
 pytest --rng-seed=1763926297314361000
 ```
+
+Each strategy and test pair draws from its own random stream. The stream is derived from the seed, the strategy name, the test's file path relative to the rootdir, and the test's qualified name. As a result:
+- A test gets the same vectors and node IDs whether you run the whole suite, one file or one test, in any collection order and with any `--import-mode`.
+- Two tests that use the same strategy get different random vectors.
+- Values that a strategy factory draws itself are reproduced too.
+
+The seed reproduces the generated test parameters, not random draws made inside test bodies. A test body that draws from `RNG` or `random` gets whatever state the global generator is in when the test runs. That state depends on the tests collected and run before it, so it changes when you rerun a single test or run under pytest-xdist. Seed such draws in the test itself (see [docs/dev.md](docs/dev.md#reproducibility)).
+
+For the same seed, the generated values differ from those of 1.1.0a2 and earlier, so a seed recorded with an older version does not reproduce that run. Also keep the same rootdir, because the test's path relative to the rootdir is part of the stream. pytest uses the directory of your ini file (such as `pytest.ini`) as the rootdir when there is one.
+
+**pytest-xdist:** runs with `-n` work with or without `--rng-seed`. The controller sends its seed to the workers, so they all generate the same tests.
 
 ## 📝 License
 

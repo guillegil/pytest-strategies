@@ -3,8 +3,14 @@ Example of Sequence Testing with pytest-strategies.
 
 This example demonstrates how to use `RNGSequence` to test every value of a
 sequence, and how to combine it with random generation. With --nsamples=auto
-each value is used exactly once, in random order; use `Series` instead when the
-order must be fixed.
+each RNGSequence is walked in a random order, and the RNGSequence args of one
+strategy form a Cartesian product: every combination of their values that
+passes the vector constraints runs once. A single RNGSequence arg therefore
+uses each value exactly once, while with two or more args a value appears once
+for each combination of the other args' values. Other args get a fresh random
+value for each combination. Use `Series` instead when the order must be fixed.
+
+With a finite --nsamples, RNGSequence args are drawn at random, like RNGChoice.
 
 To run this example with exhaustive sequence generation:
     pytest examples/sequence_example.py --nsamples=auto -v
@@ -63,7 +69,7 @@ def test_api_stability(endpoint, id, load_factor):
     assert 0.0 <= load_factor <= 1.0
 
 
-# 3. Single Sequence with Constraints
+# 3. Sequences with Constraints
 @Strategy.register("constrained_sequence")
 def constrained_sequence_strategy(nsamples):
     return Parameter(

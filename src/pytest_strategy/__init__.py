@@ -14,6 +14,11 @@ Main Components:
 - RNG: Random number generation with seed management
 - RNGType classes: Type-safe random generators (RNGInteger, RNGFloat, etc.)
 
+Strategies can be registered in the test module, as in the example below, or
+in files named strategies.py, strategy.py, *_strategies.py or *_strategy.py
+that contain @Strategy.register; the plugin imports those when the session
+starts.
+
 Example Usage:
     from pytest_strategy import Strategy, Parameter, TestArg
     from pytest_strategy.rng import RNGInteger
@@ -47,9 +52,11 @@ Dataclass Support:
 
 CLI Options:
     pytest --nsamples 50              # Generate 50 random samples
+    pytest --nsamples auto            # Enumerate Series/RNGSequence args
     pytest --rng-seed 42              # Set random seed for reproducibility
     pytest --vector-mode directed_only # Run only directed test vectors
     pytest --vector-name "zeros"      # Run specific directed vector
+    pytest --vector-index 0           # Run the directed vector at index 0
 """
 
 __version__ = "1.1.0a2"

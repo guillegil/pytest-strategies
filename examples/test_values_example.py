@@ -80,14 +80,16 @@ def test_user_permissions(age, role):
 
 
 # 3. Test Values in TestArg
-# You can also define test values at the TestArg level.
+# TestArg also accepts test_values. A Parameter does not generate vectors from
+# them (only its test_vectors run in test mode); they are recorded as
+# "has_test_values" in Strategy.export_strategies().
 @Strategy.register("payment_test")
 def payment_test_strategy(nsamples):
     return Parameter(
-        # Test values: specific amounts to test
+        # Test values: documentation of the amounts worth testing
         TestArg("amount", rng_type=RNGInteger(1, 10000), test_values=[0, 1, 100, 9999]),
         TestArg("currency", rng_type=RNGChoice(["USD", "EUR", "GBP"]), test_values=["USD"]),
-        # Test vectors combine the test values
+        # Test vectors: the scenarios that actually run with --vector-mode=test
         test_vectors={
             "zero_amount": (0, "USD"),
             "large_amount": (9999, "EUR")
