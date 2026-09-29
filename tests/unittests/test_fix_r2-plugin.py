@@ -1,11 +1,26 @@
-"""Unit tests for plugin fixes: global random state and nested sessions."""
+"""Unit tests for plugin fixes: global random state, nested sessions and strategy
+file loading without the terminal plugin."""
 
 import random
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from pytest_strategy import RNG, Strategy
-from pytest_strategy._runtime import StrategyRuntime
+from pytest_strategy._runtime import StrategyRuntime, runtime
+from pytest_strategy.plugin import PytestStrategyPlugin
+
+STRATEGY_SOURCE = """
+from pytest_strategy import Strategy
+
+@Strategy.register("r2_unit_strat")
+def r2_unit_strat(nsamples):
+    return ("x",), [(1,)]
+"""
+
+MISSING_MODULE = "pytest_strategies_missing_module"
+SKIP_REASON = f"could not import '{MISSING_MODULE}': No module named '{MISSING_MODULE}'"
 
 
 @pytest.fixture(autouse=True)
@@ -19,6 +34,31 @@ def _restore_global_state():
     random.setstate(state)
     Strategy._registry.clear()
     Strategy._registry.update(registry)
+
+
+def _write(path, source=STRATEGY_SOURCE):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source)
+    return path
+
+
+def _config(rootpath, option=None):
+    """A minimal config for _load_strategy_files, without a terminal reporter."""
+    return SimpleNamespace(
+        option=option if option is not None else SimpleNamespace(verbose=0),
+        rootpath=rootpath,
+        pluginmanager=SimpleNamespace(get_plugin=lambda name: None),
+    )
+
+
+@pytest.fixture
+def session():
+    """Run the test inside a fresh runtime session."""
+    runtime.push("r2-unit")
+    try:
+        yield
+    finally:
+        runtime.pop()
 
 
 class TestSeedLeavesGlobalRandomAlone:
@@ -98,3 +138,85 @@ class TestRuntimeRestoresGlobalState:
         assert Strategy._registry is registry
         assert "r2_inner_strat" not in Strategy._registry
         assert Strategy._registry["r2_outer_strat"] is outer
+
+
+class TestLoadWithoutTerminalPlugin:
+    """With -p no:terminal, config.option has no ``verbose`` and there is no reporter."""
+
+    def test_successful_load_is_not_a_load_error(self, tmp_path, session):
+        strategy_file = _write(tmp_path / "strategies.py")
+
+        PytestStrategyPlugin()._load_strategy_files(
+            [strategy_file], _config(tmp_path, option=SimpleNamespace())
+        )
+
+        assert runtime.load_errors == []
+        assert runtime.discovered_files == [strategy_file]
+        assert "r2_unit_strat" in Strategy._registry
+
+    def test_skipped_file_does_not_raise(self, tmp_path, session):
+        strategy_file = _write(
+            tmp_path / "strategies.py",
+            f"import pytest\npytest.importorskip({MISSING_MODULE!r})\n" + STRATEGY_SOURCE,
+        )
+
+        PytestStrategyPlugin()._load_strategy_files(
+            [strategy_file], _config(tmp_path, option=SimpleNamespace())
+        )
+
+        assert runtime.load_errors == []
+        assert runtime.skipped_files == [(strategy_file, SKIP_REASON)]
+
+
+class TestSkippedFilesAreNamed:
+    """A strategy file that skipped itself is named in the "not found" error."""
+
+    def test_skipped_file_is_recorded(self, tmp_path, session):
+        strategy_file = _write(
+            tmp_path / "strategies.py",
+            "import pytest\npytest.skip('no gpu', allow_module_level=True)\n" + STRATEGY_SOURCE,
+        )
+
+        PytestStrategyPlugin()._load_strategy_files([strategy_file], _config(tmp_path))
+
+        assert runtime.skipped_files == [(strategy_file, "no gpu")]
+        assert runtime.load_errors == []
+        assert runtime.discovered_files == []
+
+    def test_strategy_not_found_error_lists_skipped_files(self, session):
+        skipped = Path("/project/tests/strategies.py")
+        runtime.record_skipped_file(skipped, SKIP_REASON)
+
+        with pytest.raises(ValueError) as excinfo:
+            Strategy.strategy("r2_never_registered")(lambda x: None)
+
+        message = str(excinfo.value)
+        assert message.startswith("Strategy 'r2_never_registered' not found.")
+        assert f"\nStrategy files that were skipped:\n  {skipped}: {SKIP_REASON}" in message
+
+    def test_skipped_files_belong_to_their_session(self):
+        rt = StrategyRuntime()
+        rt.record_skipped_file("ghost.py", "reason")  # no session: dropped
+        assert rt.skipped_files == []
+        rt.push("outer")
+        rt.push("inner")
+        rt.record_skipped_file("inner.py", "reason")
+        rt.pop()
+        assert rt.skipped_files == []
+        rt.pop()
+
+
+class TestVerboseLoadOutsideRootdir:
+    """-vv reports a file outside rootdir as loaded, by its absolute path."""
+
+    def test_file_outside_rootdir_is_loaded(self, tmp_path, session, capsys):
+        strategy_file = _write(tmp_path / "shared" / "strategies.py")
+        (tmp_path / "proj").mkdir()
+
+        PytestStrategyPlugin()._load_strategy_files(
+            [strategy_file], _config(tmp_path / "proj", option=SimpleNamespace(verbose=2))
+        )
+
+        assert runtime.load_errors == []
+        assert runtime.discovered_files == [strategy_file]
+        assert f"pytest-strategies: Loaded {strategy_file}" in capsys.readouterr().out

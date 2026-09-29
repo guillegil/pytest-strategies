@@ -165,13 +165,13 @@ class PytestStrategyPlugin:
         from .strategy import Strategy
 
         # Only show if verbose mode
-        if config.option.verbose >= 1:
+        if self._verbosity(config) >= 1:
             terminalreporter.section("Strategy Summary")
 
             if Strategy._registry:
                 terminalreporter.write_line(f"Registered strategies: {len(Strategy._registry)}")
 
-                if config.option.verbose >= 2:
+                if self._verbosity(config) >= 2:
                     # Show all strategy names in very verbose mode
                     for name in sorted(Strategy._registry.keys()):
                         terminalreporter.write_line(f"  - {name}")
@@ -262,23 +262,21 @@ class PytestStrategyPlugin:
             try:
                 # Load the module
                 spec = importlib.util.spec_from_file_location(module_name, file_path)
-                if spec and spec.loader:
-                    module = importlib.util.module_from_spec(spec)
-                    sys.modules[module_name] = module
-                    spec.loader.exec_module(module)
-
-                    runtime.record_discovered_file(file_path)
-
-                    # Optionally log in verbose mode
-                    if config.option.verbose >= 2:
-                        print(f"pytest-strategies: Loaded {file_path.relative_to(config.rootpath)}")
+                if spec is None or spec.loader is None:
+                    continue
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = module
+                spec.loader.exec_module(module)
 
             except pytest.skip.Exception as e:
                 # pytest.skip() / pytest.importorskip() at module level: the file
                 # opted out of this run. pytest's outcome exceptions derive from
                 # BaseException; one escaping this hook aborts the whole session.
                 sys.modules.pop(module_name, None)
-                if config.option.verbose >= 1:
+                # Its strategies are missing: Strategy.strategy lists it in any
+                # "Strategy not found" error.
+                runtime.record_skipped_file(file_path, str(e))
+                if self._verbosity(config) >= 1:
                     self._write_line(config, f"Skipped {file_path}: {e}")
 
             except (Exception, pytest.fail.Exception) as e:
@@ -291,6 +289,30 @@ class PytestStrategyPlugin:
                 self._write_line(
                     config, f"Warning - Failed to load {file_path}: {error}", yellow=True
                 )
+
+            else:
+                # Outside the try: a problem reporting a successful load must not
+                # turn it into a load error.
+                runtime.record_discovered_file(file_path)
+
+                # Optionally log in verbose mode
+                if self._verbosity(config) >= 2:
+                    try:
+                        shown = file_path.relative_to(config.rootpath)
+                    except ValueError:
+                        # Outside rootdir, e.g. an absolute testpaths entry
+                        shown = file_path
+                    print(f"pytest-strategies: Loaded {shown}")
+
+    @staticmethod
+    def _verbosity(config: Config) -> int:
+        """
+        Return the -v count.
+
+        The terminal plugin adds -v, so config.option has no ``verbose`` with
+        ``-p no:terminal``; that counts as 0.
+        """
+        return int(getattr(config.option, "verbose", 0))
 
     def _write_line(self, config: Config, message: str, **markup: bool) -> None:
         """

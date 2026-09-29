@@ -227,6 +227,11 @@ class Strategy:
                     message += "\nStrategy files that failed to load:"
                     for path, error in runtime.load_errors:
                         message += f"\n  {path}: {error}"
+                # So are strategy files that skipped themselves (pytest.importorskip)
+                if runtime.skipped_files:
+                    message += "\nStrategy files that were skipped:"
+                    for path, reason in runtime.skipped_files:
+                        message += f"\n  {path}: {reason}"
                 raise ValueError(message)
 
             return resolve_and_parametrize(

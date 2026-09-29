@@ -39,6 +39,8 @@ class SessionState:
         self.discovered_files: list[Path] = []
         # Strategy files that raised while loading, as (path, "ErrorType: message").
         self.load_errors: list[tuple[Path, str]] = []
+        # Strategy files that called pytest.skip()/importorskip(), as (path, reason).
+        self.skipped_files: list[tuple[Path, str]] = []
         # Process-global state in effect when this session began, restored on pop:
         # a nested session's --rng-seed, random draws and strategy registrations
         # must not leak into the enclosing session or later sibling sessions.
@@ -127,6 +129,15 @@ class StrategyRuntime:
         """Record a strategy file that failed to load (no-op if no session)."""
         if self.current is not None:
             self.current.load_errors.append((path, error))
+
+    @property
+    def skipped_files(self) -> list[tuple[Path, str]]:
+        return self.current.skipped_files if self.current else []
+
+    def record_skipped_file(self, path: Path, reason: str) -> None:
+        """Record a strategy file that skipped itself (no-op if no session)."""
+        if self.current is not None:
+            self.current.skipped_files.append((path, reason))
 
 
 # Process-wide stack; each session pushes on configure and pops on unconfigure.

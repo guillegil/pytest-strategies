@@ -29,6 +29,8 @@ def test_ints(x):
     assert 0 <= x <= 10**9
 """
 
+MISSING_MODULE = "pytest_strategies_missing_module"
+
 
 @pytest.fixture(autouse=True)
 def _restore_global_state():
@@ -123,3 +125,88 @@ class TestNestedSessionGlobalState:
         first.unlink()
         pytester.makepyfile(test_second=source)
         pytester.runpytest_inprocess(*error).assert_outcomes(passed=3, warnings=0)
+
+
+class TestWithoutTerminalPlugin:
+    """-p no:terminal removes the -v option and the terminal reporter."""
+
+    def test_importorskip_in_strategy_file_does_not_crash(self, pytester):
+        pytester.makepyfile(strategies=f"""
+            import pytest
+
+            pytest.importorskip({MISSING_MODULE!r})
+
+            from pytest_strategy import Strategy
+
+            @Strategy.register("r2_optional")
+            def optional(nsamples):
+                return ("x",), [(1,)]
+            """)
+        pytester.makepyfile(test_other="def test_other():\n    pass\n")
+
+        result = pytester.runpytest_subprocess("-p", "no:terminal")
+
+        assert "INTERNALERROR" not in result.stderr.str()
+        assert result.ret == pytest.ExitCode.OK
+
+    def test_loaded_file_is_not_reported_as_failed(self, pytester):
+        pytester.makepyfile(strategies=STRATEGIES)
+        pytester.makepyfile(test_typo=TESTS.replace('"r2_ints"', '"r2_intz"'))
+
+        result = pytester.runpytest_subprocess("-p", "no:terminal", "--junitxml=report.xml")
+
+        assert result.ret == pytest.ExitCode.INTERRUPTED
+        report = (pytester.path / "report.xml").read_text()
+        assert "Strategy 'r2_intz' not found" in report
+        assert "failed to load" not in report
+
+
+class TestSkippedStrategyFileIsNamed:
+    """Tests that need a skipped file's strategy are told the file was skipped."""
+
+    def test_not_found_error_names_the_skipped_file(self, pytester):
+        pytester.makepyfile(strategies=f"""
+            import pytest
+
+            pytest.importorskip({MISSING_MODULE!r})
+
+            from pytest_strategy import Strategy
+
+            @Strategy.register("r2_arr")
+            def arr(nsamples):
+                return ("x",), [(1,)]
+            """)
+        pytester.makepyfile(test_arr="""
+            from pytest_strategy import Strategy
+
+            @Strategy.strategy("r2_arr")
+            def test_arr(x):
+                pass
+            """)
+
+        result = pytester.runpytest_subprocess()
+
+        result.stdout.fnmatch_lines(
+            [
+                "*ValueError: Strategy 'r2_arr' not found. Available strategies: none",
+                "*Strategy files that were skipped:",
+                f"*strategies.py: could not import '{MISSING_MODULE}': *",
+            ]
+        )
+
+
+class TestVerboseLoadOutsideRootdir:
+    """-vv reports a strategy file outside rootdir as loaded, not as failed."""
+
+    def test_absolute_testpaths_outside_rootdir(self, pytester, monkeypatch):
+        shared = pytester.path / "shared"
+        pytester.makepyfile(**{"shared/strategies": STRATEGIES, "shared/test_ints": TESTS})
+        project = pytester.mkdir("proj")
+        (project / "pytest.ini").write_text(f"[pytest]\ntestpaths = {shared}\n")
+        monkeypatch.chdir(project)
+
+        result = pytester.runpytest_subprocess("-vv")
+
+        result.stdout.no_fnmatch_line("*Failed to load*")
+        result.stdout.fnmatch_lines([f"pytest-strategies: Loaded {shared / 'strategies.py'}"])
+        result.assert_outcomes(passed=3)
