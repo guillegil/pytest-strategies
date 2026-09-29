@@ -7,14 +7,13 @@ read CLI options, call the factory, generate vectors, and apply
 
 from __future__ import annotations
 
-import inspect
 from typing import TYPE_CHECKING, Any, Callable, cast
 
 import pytest
 
 from ._dataclass import convert_to_dataclass
 from ._ids import generate_dataclass_ids, generate_test_ids
-from ._introspection import detect_dataclass_mode, validate_signature
+from ._introspection import detect_dataclass_param, validate_signature
 from .parameters import Parameter
 from .rng import RNG
 
@@ -131,11 +130,13 @@ def resolve_and_parametrize(
             argnames = (argnames,)
 
     # Detect dataclass mode
-    is_dc_mode, dc_type = detect_dataclass_mode(test_fn, argnames, pytest_fixtures=pytest_fixtures)
+    is_dc_mode, dc_type, dc_param = detect_dataclass_param(
+        test_fn, argnames, pytest_fixtures=pytest_fixtures
+    )
 
     if is_dc_mode:
         # DATACLASS MODE: Convert samples to dataclass instances
-        assert dc_type is not None  # guaranteed when is_dc_mode is True
+        assert dc_type is not None and dc_param is not None  # guaranteed when is_dc_mode is True
         try:
             dataclass_samples = convert_to_dataclass(samples, argnames, dc_type)
         except Exception as e:
@@ -143,17 +144,12 @@ def resolve_and_parametrize(
                 f"Error converting samples to dataclass for strategy '{name}': {e}"
             ) from e
 
-        # Get the single parameter name
-        sig = inspect.signature(test_fn)
-        test_params = [p for p in sig.parameters if p not in pytest_fixtures]
-        param_name = test_params[0]
-
         # Generate test IDs for dataclass mode
         ids = generate_dataclass_ids(dataclass_samples, dc_type)
 
-        # Apply pytest parametrize with single dataclass parameter
+        # Apply pytest parametrize to the dataclass parameter chosen by detection
         return cast(
-            Callable, pytest.mark.parametrize(param_name, dataclass_samples, ids=ids)(test_fn)
+            Callable, pytest.mark.parametrize(dc_param, dataclass_samples, ids=ids)(test_fn)
         )
 
     else:
