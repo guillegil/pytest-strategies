@@ -1,5 +1,5 @@
 """
-Regression tests for Parameter and RNGEnum review fixes.
+Regression tests for Parameter, RNGEnum and TestArg.to_dict review fixes.
 
 Covers:
 - Parameter(nsamples="auto") accepted again (factories pass --nsamples=auto through)
@@ -8,8 +8,10 @@ Covers:
 - generate_exhaustive raising when the constraints reject every combination
 - RNGEnum accepting a Flag whose iteration is empty when weights name members
 - RNGEnum reading predicate and weights when drawing, not only at construction
+- TestArg.to_dict exporting the Enum class of an RNGEnum and whether a predicate is set
 """
 
+import json
 import random
 import warnings
 from enum import Enum, Flag
@@ -379,3 +381,44 @@ class TestRNGEnumReadsPredicateAndWeightsLive:
         weighted = RNGEnum(Color, weights=weights, predicate=lambda c: c is not Color.RED)
         assert [uniform.generate() for _ in range(50)] == expected_uniform
         assert [weighted.generate() for _ in range(50)] == expected_weighted
+
+
+class TestToDictDescribesRNGConfiguration:
+    """The export used to drop the Enum class and report a set predicate as no predicate."""
+
+    def test_rng_enum_without_predicate(self):
+        details = TestArg("color", rng_type=RNGEnum(Color)).to_dict()["rng_details"]
+        assert details == {
+            "enum_class": "Color",
+            "weights": "None",
+            "predicate": "None",
+            "has_predicate": False,
+        }
+
+    def test_rng_enum_with_predicate(self):
+        rng_type = RNGEnum(Color, predicate=lambda c: c is not Color.RED)
+        details = TestArg("color", rng_type=rng_type).to_dict()["rng_details"]
+        assert details["enum_class"] == "Color"
+        assert details["has_predicate"] is True
+
+    def test_rng_integer_keys_kept(self):
+        plain = TestArg("n", rng_type=RNGInteger(0, 10)).to_dict()["rng_details"]
+        filtered = TestArg("n", rng_type=RNGInteger(0, 10, predicate=bool)).to_dict()["rng_details"]
+        assert plain == {"min": "0", "max": "10", "predicate": "None", "has_predicate": False}
+        assert filtered == {"min": "0", "max": "10", "has_predicate": True}
+
+    def test_rng_without_predicate_attribute_has_no_flag(self):
+        details = TestArg("s", rng_type=Series([1, 2])).to_dict()["rng_details"]
+        assert "has_predicate" not in details
+
+    def test_export_strategies_is_json_with_details(self):
+        @Strategy.register("fix_r2_export")
+        def factory(nsamples):
+            return Parameter(
+                TestArg("color", rng_type=RNGEnum(Color, predicate=lambda c: c is not Color.RED)),
+            )
+
+        data = json.loads(Strategy.export_strategies())
+        details = data["fix_r2_export"]["arguments"][0]["rng_details"]
+        assert details["enum_class"] == "Color"
+        assert details["has_predicate"] is True
