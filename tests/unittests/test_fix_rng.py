@@ -3,13 +3,21 @@ Regression tests for fixed bugs in the RNG module.
 
 Tests cover:
 - Weighted generators with a predicate re-choosing the range on every retry
+- RNGInteger/RNGFloat rejecting min > max at construction
 """
 
 import random
 
 import pytest
 
-from pytest_strategy import RNG, RNGWeightedFloat, RNGWeightedInteger
+from pytest_strategy import (
+    RNG,
+    RNGFloat,
+    RNGInteger,
+    RNGValueError,
+    RNGWeightedFloat,
+    RNGWeightedInteger,
+)
 
 
 class TestWeightedPredicateRedrawsRange:
@@ -82,3 +90,64 @@ class TestWeightedPredicateRedrawsRange:
 
         RNG.seed(seed)
         assert [RNG.wfloat(ranges) for _ in range(50)] == expected
+
+
+class TestRNGTypeBounds:
+    """RNGInteger/RNGFloat reject min > max when constructed, after filling defaults"""
+
+    def test_float_min_only_above_default_max(self):
+        """RNGFloat(min=5.0) used to draw from [1.0, 5.0], below the requested min"""
+        with pytest.raises(
+            RNGValueError,
+            match=r"RNGFloat min \(5\.0\) must be <= max \(1\.0\) "
+            r"\(max was not given and defaults to 1\.0\)",
+        ):
+            RNGFloat(min=5.0)
+
+    def test_float_max_only_below_default_min(self):
+        """RNGFloat(max=-2.0) used to draw from [-2.0, 0.0], above the requested max"""
+        with pytest.raises(
+            RNGValueError,
+            match=r"RNGFloat min \(0\.0\) must be <= max \(-2\.0\) "
+            r"\(min was not given and defaults to 0\.0\)",
+        ):
+            RNGFloat(max=-2.0)
+
+    def test_float_explicit_reversed_bounds(self):
+        """Explicit reversed bounds are rejected instead of silently swapped"""
+        with pytest.raises(RNGValueError, match=r"RNGFloat min \(10\.0\) must be <= max \(0\.0\)$"):
+            RNGFloat(10.0, 0.0)
+
+    def test_integer_min_only_above_default_max(self):
+        """RNGInteger(min=2**31) fails at construction, not with 'empty range' at generate()"""
+        with pytest.raises(
+            RNGValueError,
+            match=r"RNGInteger min \(2147483648\) must be <= max \(2147483647\) "
+            r"\(max was not given",
+        ):
+            RNGInteger(min=2**31)
+
+    def test_integer_max_only_below_default_min(self):
+        """RNGInteger(max=-(2**31) - 1) fails at construction"""
+        with pytest.raises(RNGValueError, match="min was not given and defaults to -2147483648"):
+            RNGInteger(max=-(2**31) - 1)
+
+    def test_integer_explicit_reversed_bounds(self):
+        """Explicit reversed bounds are rejected at construction"""
+        with pytest.raises(RNGValueError, match=r"RNGInteger min \(10\) must be <= max \(5\)$"):
+            RNGInteger(10, 5)
+
+    def test_valid_single_bound_still_works(self):
+        """A single bound on the right side of the default still builds and generates"""
+        RNG.seed(0)
+        float_type = RNGFloat(min=0.5)
+        int_type = RNGInteger(max=0)
+
+        assert (float_type.min, float_type.max) == (0.5, 1.0)
+        assert all(0.5 <= float_type.generate() <= 1.0 for _ in range(100))
+        assert all(-(2**31) <= int_type.generate() <= 0 for _ in range(100))
+
+    def test_equal_bounds_allowed(self):
+        """min == max is a valid one-value range"""
+        assert RNGInteger(5, 5).generate() == 5
+        assert RNGFloat(2.5, 2.5).generate() == 2.5

@@ -272,6 +272,33 @@ class RNG:
 # ====
 
 
+def _check_bounds(
+    owner: str, min_val: float, max_val: float, min_given: bool, max_given: bool
+) -> None:
+    """
+    Raise RNGValueError if min_val > max_val, naming the bound that fell back to its default.
+
+    Args:
+        owner: Name of the RNG type, used in the error message
+        min_val: Minimum value after filling defaults
+        max_val: Maximum value after filling defaults
+        min_given: Whether the caller passed min explicitly
+        max_given: Whether the caller passed max explicitly
+
+    Raises:
+        RNGValueError: If min_val > max_val
+    """
+    if min_val <= max_val:
+        return
+
+    note = ""
+    if not max_given:
+        note = f" (max was not given and defaults to {max_val})"
+    elif not min_given:
+        note = f" (min was not given and defaults to {min_val})"
+    raise RNGValueError(f"{owner} min ({min_val}) must be <= max ({max_val}){note}")
+
+
 class RNGType:
     """Base class for all RNG types"""
 
@@ -294,6 +321,7 @@ class RNGInteger(RNGType):
         self.min = min if min is not None else -(2**31)
         self.max = max if max is not None else 2**31 - 1
         self.predicate = predicate
+        _check_bounds("RNGInteger", self.min, self.max, min is not None, max is not None)
 
     def generate(self):
         return RNG.integer(self.min, self.max, self.predicate)
@@ -312,6 +340,7 @@ class RNGFloat(RNGType):
         self.min = min if min is not None else 0.0
         self.max = max if max is not None else 1.0
         self.predicate = predicate
+        _check_bounds("RNGFloat", self.min, self.max, min is not None, max is not None)
 
     def generate(self):
         return RNG.float(self.min, self.max, self.predicate)
