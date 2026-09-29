@@ -156,10 +156,12 @@ def resolve_and_parametrize(
 
         # "auto" enumerates the Series/RNGSequence args. A strategy without any has
         # nothing to enumerate, so it falls back to the finite count instead of failing.
+        # param.nsamples may itself be "auto" (e.g. a factory forwarding its nsamples),
+        # so only an int count is used; anything else falls back to 10.
         if effective_nsamples == "auto" and not any(
             isinstance(arg.rng_type, SequenceLike) for arg in param.test_args
         ):
-            effective_nsamples = param.nsamples if param.nsamples is not None else 10
+            effective_nsamples = param.nsamples if isinstance(param.nsamples, int) else 10
 
         # Generate samples using Parameter's generate_vectors with CLI options
         try:
