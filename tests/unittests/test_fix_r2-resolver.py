@@ -21,6 +21,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from pytest_strategy import RNG, RNGInteger, Strategy
+from pytest_strategy._ids import generate_dataclass_ids, generate_test_ids
 from pytest_strategy._introspection import detect_dataclass_param
 from pytest_strategy._resolver import call_factory, resolve_and_parametrize
 from pytest_strategy.parameters import Parameter
@@ -494,3 +495,53 @@ class TestDataclassTypedFixture:
         )
         assert argstr == "server"
         assert samples == [Server("localhost", 8000)]
+
+
+# ---------------------------------------------------------------------------
+# Test IDs: strings containing " at 0x", and sets
+# ---------------------------------------------------------------------------
+
+
+class Codec:
+    """A value whose repr is the default ``<... object at 0x...>``."""
+
+    def encode(self):
+        pass
+
+
+@dataclass
+class Fault:
+    msg: str
+    code: int
+
+
+class TestIdsOfStringsWithAddresses:
+    """Only default object reprs collapse to the type name, never string data."""
+
+    def test_single_string(self):
+        assert generate_test_ids(["line"], [("segfault at 0x0",), ("jump at 0x401000",)]) == [
+            "line='segfault at 0x0'",
+            "line='jump at 0x401000'",
+        ]
+
+    def test_string_shaped_like_a_default_repr(self):
+        assert generate_test_ids(["s"], [("<x at 0x10>",)]) == ["s='<x at 0x10>'"]
+
+    def test_multi_arg_string(self):
+        assert generate_test_ids(["msg", "code"], [("fault at 0x10", 1)]) == [
+            "msg='fault at 0x10',code=1"
+        ]
+
+    def test_bytes_and_containers_of_strings(self):
+        assert generate_test_ids(["b"], [(b"read at 0x10",)]) == ["b=b'read at 0x10'"]
+        assert generate_test_ids(["regs"], [(["r0 at 0x0"],)]) == ["regs=['r0 at 0x0']"]
+
+    def test_dataclass_field(self):
+        assert generate_dataclass_ids([Fault("fault at 0x10", 1)], Fault) == [
+            "msg='fault at 0x10',code=1"
+        ]
+
+    def test_default_reprs_still_use_the_type_name(self):
+        assert generate_test_ids(["c"], [(Codec(),)]) == ["c=Codec"]
+        assert generate_test_ids(["m"], [(Codec().encode,)]) == ["m=method"]
+        assert generate_test_ids(["cs"], [([Codec()],)]) == ["cs=list"]

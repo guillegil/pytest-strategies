@@ -2,9 +2,14 @@
 Test ID generation for parametrized strategies.
 """
 
+import re
 from collections.abc import Sequence
 from dataclasses import fields
 from typing import Any
+
+# The memory address in a default repr (``<Foo object at 0x7f...>``, a function, a
+# bound method or a container of such objects) is directly followed by ``>``.
+_ADDRESS = re.compile(r" at 0x[0-9a-fA-F]+>")
 
 
 def _value_repr(value: Any) -> str:
@@ -12,10 +17,12 @@ def _value_repr(value: Any) -> str:
     Return ``repr(value)``, or the type name when the repr embeds a memory address.
 
     The default object repr (``<Foo object at 0x7f...>``) differs on every run,
-    so using it would make test IDs unstable across runs with the same seed.
+    so a value whose repr embeds a memory address is shown by its type name.
+    Strings and bytes always keep their repr, even when they contain text such as
+    ``"fault at 0x10"``.
     """
     val_str = repr(value)
-    if " at 0x" in val_str:
+    if not isinstance(value, (str, bytes)) and _ADDRESS.search(val_str):
         return type(value).__name__
     return val_str
 

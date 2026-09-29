@@ -247,3 +247,44 @@ class TestDataclassTypedFixture:
         result = pytester.runpytest_inprocess()
 
         result.assert_outcomes(passed=2)
+
+
+# ---------------------------------------------------------------------------
+# Test IDs: strings containing " at 0x", and sets
+# ---------------------------------------------------------------------------
+
+
+class TestIdsInRealRuns:
+    """IDs keep string data and do not depend on PYTHONHASHSEED."""
+
+    def test_strings_containing_at_0x_keep_their_value(self, pytester):
+        pytester.makepyfile(fault_strategies="""
+            from pytest_strategy import Strategy
+
+            @Strategy.register("r2_lines")
+            def lines(nsamples):
+                return ("line",), [("segfault at 0x0",), ("jump at 0x401000",)]
+
+            @Strategy.register("r2_pairs")
+            def pairs(nsamples):
+                return ("msg", "code"), [("fault at 0x10", 1), ("fault at 0x20", 2)]
+            """)
+        pytester.makepyfile(test_faults="""
+            from pytest_strategy import Strategy
+
+            @Strategy.strategy("r2_lines")
+            def test_parse(line):
+                pass
+
+            @Strategy.strategy("r2_pairs")
+            def test_pairs(msg, code):
+                pass
+            """)
+
+        result = pytester.runpytest_inprocess("--collect-only", "-q")
+
+        assert _ids(result, "test_parse") == ["line='segfault at 0x0'", "line='jump at 0x401000'"]
+        assert _ids(result, "test_pairs") == [
+            "msg='fault at 0x10',code=1",
+            "msg='fault at 0x20',code=2",
+        ]
