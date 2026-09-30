@@ -144,6 +144,17 @@ class TestPackagingMetadata:
         assert minimum is not None
         assert min(minors) == int(minimum.group(1))
 
+    def test_license_is_the_same_everywhere(self, pyproject):
+        """LICENSE said GPL-3.0, the metadata Apache-2.0 and the README MIT."""
+        project = pyproject["project"]
+        assert project["license"] == "MIT"
+        assert project["license-files"] == ["LICENSE"]
+        # setuptools rejects a license classifier next to an SPDX license expression
+        assert not [c for c in project["classifiers"] if c.startswith("License ::")]
+        assert _read("LICENSE").startswith("MIT License\n")
+        assert "MIT License. See [LICENSE](LICENSE)" in _read("README.md")
+        assert "MIT License. See [LICENSE](../LICENSE)" in _read("docs/dev.md")
+
 
 # ---------------------------------------------------------------------------
 # Continuous integration

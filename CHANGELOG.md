@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dataclass mode is chosen by annotation: the parameter annotated with a dataclass whose fields are the strategy's arguments receives the vector, and every other parameter is treated as a fixture. Custom fixture names no longer need to be added to `Strategy.PYTEST_FIXTURES`.
 - `Parameter` copies the `directed_vectors`, `test_vectors` and `vector_constraints` it is given.
 - `--list-strategies` exits with code 2 when collection had errors.
+- **License**: the project is MIT licensed. Before, the `LICENSE` file said GPL-3.0 and the package metadata said Apache-2.0; the metadata now uses the SPDX `license` field.
 - **Requirements**: Python 3.11 or later (Python 3.10 is no longer supported) and pytest 8.4.2 or later. Python 3.14 is supported.
 - Package metadata: development status is Alpha, and the `docs` extra (Sphinx, never configured) is removed.
 
