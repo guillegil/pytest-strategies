@@ -189,7 +189,7 @@ class TestSkippedStrategyFileIsNamed:
 
         result.stdout.fnmatch_lines(
             [
-                "*ValueError: Strategy 'r2_arr' not found. Available strategies: none",
+                "In test_*: Strategy 'r2_arr' not found. Available strategies: none",
                 "*Strategy files that were skipped:",
                 f"*strategies.py: could not import '{MISSING_MODULE}': *",
             ]

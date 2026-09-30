@@ -350,7 +350,7 @@ class TestLoadErrorsAreVisible:
         result.stdout.fnmatch_lines(
             [
                 f"pytest-strategies: Warning - Failed to load *strategies.py: {error}",
-                "*ValueError: Strategy 'limited' not found. Available strategies: none",
+                "In test_*: Strategy 'limited' not found. Available strategies: none",
                 "*Strategy files that failed to load:",
                 f"*strategies.py: {error}",
             ]

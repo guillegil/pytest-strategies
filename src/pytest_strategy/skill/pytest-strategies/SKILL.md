@@ -103,19 +103,21 @@ Names are scoped by folder, like fixtures:
   `tests/dma/strategies.py` can both define `"default"`, and a
   `tests/strategies.py` `"default"` serves folders that have none.
 - A name that no folder on that path defines, but that is registered only once
-  elsewhere (an installed package, a shared plugin), is found too.
+  elsewhere (a sibling folder, an installed package), is found too. When several
+  such folders register it, the lookup fails and names them.
 - Two different factories with the same name in the same folder (two files, or a
   file and `conftest.py`) stop the run with a usage error (exit code 4) that names
   both files. Registering the same function again is fine.
 - "Strategy 'x' not found" lists the names visible from that test, a "did you
   mean" suggestion and the files that failed to load.
 
-Strategies files are loaded lazily through pytest's own importer: only when a test
-in that folder or below needs a name that is not registered yet, closest folder
-first, each file once per session. So `pytest tests/esm` never imports
-`tests/dma/strategies.py`, relative imports work inside strategies files in package
-folders, and `--list-strategies` is the one command that loads them all. Do not
-rely on side effects of importing a strategies file.
+Strategies files are loaded lazily through pytest's own importer: when pytest
+collects a test module in that folder or below, closest folder first, each file once
+per session. So `pytest tests/esm` does not import `tests/dma/strategies.py`, unless
+a test asks for a name that no folder on its path registers (then every strategies
+file is loaded to find it). Relative imports work inside strategies files in package
+folders, and `--list-strategies` loads every file. Do not rely on side effects of
+importing a strategies file.
 
 ## Building a Parameter
 
@@ -178,9 +180,10 @@ Both walk a fixed list of values; `RNG` in the name means random order.
   K in total, in declaration order for both types. It has no effect under `auto`.
 - Pass a list or tuple, never a `set` (its order is not reproducible and is
   rejected): `Series(sorted(names))`.
-- Exhaustive combinations (`auto`, `Series` products) above 100,000 rows fail
-  collection. Raise the limit with `Parameter(max_exhaustive=...)` or the
-  `strategies_max_exhaustive` ini option, or reduce the combinations.
+- Exhaustive generation above 100,000 rows fails collection before any row is
+  built: the combinations under `--nsamples=auto`, or combinations x K with
+  `per_sequence_samples=True`. Raise the limit with `Parameter(max_exhaustive=...)`
+  or the `strategies_max_exhaustive` ini option, or reduce the combinations.
 
 ## Values that come from configuration: ctx and skip_if_empty
 

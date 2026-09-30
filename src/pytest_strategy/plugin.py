@@ -22,6 +22,7 @@ import itertools
 import os
 import re
 import sys
+import traceback
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path, PurePath
 from types import ModuleType
@@ -34,6 +35,9 @@ from pytest import Config, Session
 from ._registry import Registration, _contains, _describe_factory, registry
 from ._runtime import runtime
 from .rng import RNG
+
+# This package's folder, whose frames are left out of the errors shown for a factory
+_PACKAGE_DIR = os.path.normcase(os.path.realpath(os.path.dirname(__file__)))
 
 # Strategy file names; a file is imported only if it also contains a registration
 _STRATEGY_FILE_PATTERNS = ("strategies.py", "strategy.py", "*_strategies.py", "*_strategy.py")
@@ -223,16 +227,26 @@ class PytestStrategyPlugin:
             markers.append(mark)
             if mark.name != "strategy":
                 continue
-            ref, validate = _marker_arguments(mark, metafunc)
-            name, factory = self.resolve(ref, metafunc.definition.path, metafunc.config)
-            parametrization = build_parametrization(
-                name,
-                factory,
-                metafunc.function,
-                config=metafunc.config,
-                pytest_fixtures=Strategy.PYTEST_FIXTURES,
-                validate=validate,
-            )
+            error: str | None = None
+            try:
+                ref, validate = _marker_arguments(mark)
+                name, factory = self.resolve(ref, metafunc.definition.path, metafunc.config)
+                parametrization = build_parametrization(
+                    name,
+                    factory,
+                    metafunc.function,
+                    config=metafunc.config,
+                    pytest_fixtures=Strategy.PYTEST_FIXTURES,
+                    validate=validate,
+                )
+            except ValueError as e:
+                if metafunc.config.getoption("fulltrace", False):
+                    raise
+                error = f"In {metafunc.function.__name__}: {e}{_user_traceback(e)}"
+            if error is not None:
+                # Reported like pytest's own parametrize errors: the message, and the
+                # frames of a factory that raised, without the plugin's
+                pytest.fail(error, pytrace=False)
             markers.append(
                 pytest.mark.parametrize(
                     parametrization.argnames, parametrization.values, ids=parametrization.ids
@@ -918,7 +932,7 @@ class PytestStrategyPlugin:
             return f"pytest_strategies_discovered.{file_path.stem}_{unique}"
 
 
-def _marker_arguments(mark: pytest.Mark, metafunc: pytest.Metafunc) -> tuple[Any, bool]:
+def _marker_arguments(mark: pytest.Mark) -> tuple[Any, bool]:
     """Return the strategy reference and the validate_signature flag of a ``strategy`` marker."""
     args = list(mark.args)
     kwargs = dict(mark.kwargs)
@@ -928,16 +942,36 @@ def _marker_arguments(mark: pytest.Mark, metafunc: pytest.Metafunc) -> tuple[Any
         ref = kwargs.pop("name")
     else:
         raise ValueError(
-            f"{metafunc.definition.nodeid}: the strategy marker needs a strategy name or "
-            "factory, e.g. @strategy('name')"
+            "the strategy marker needs a strategy name or factory, e.g. @strategy('name')"
         )
     validate = kwargs.pop("validate_signature", True)
     if args or kwargs or not (isinstance(ref, str) or callable(ref)):
         raise ValueError(
-            f"{metafunc.definition.nodeid}: invalid strategy marker {mark.args!r} "
-            f"{mark.kwargs!r}; use @strategy(name_or_factory, validate_signature=True)"
+            f"invalid strategy marker {mark.args!r} {mark.kwargs!r}; use "
+            "@strategy(name_or_factory, validate_signature=True)"
         )
     return ref, bool(validate)
+
+
+def _user_traceback(error: BaseException) -> str:
+    """
+    Format where the user's code raised the exception behind ``error``, if it did.
+
+    A factory that raised is reported with its own frames only: the frames of
+    pluggy, pytest and this package say nothing about the factory.
+    """
+    cause = error.__cause__
+    if cause is None or cause.__traceback__ is None:
+        return ""
+    frames = [
+        frame
+        for frame in traceback.extract_tb(cause.__traceback__)
+        if not _contains(_PACKAGE_DIR, _file_key(frame.filename))
+    ]
+    if not frames:
+        return ""
+    lines = "".join(traceback.format_list(frames)).rstrip()
+    return f"\n{lines}\n{type(cause).__name__}: {cause}"
 
 
 def _on_path(registration: Registration, directory: str) -> bool:
@@ -1220,12 +1254,10 @@ def pytest_collection_finish(session: Session) -> None:
                         terminalreporter.write_line(f"  ✓ {name}")
                         continue
                     # The same name in several folders: say where each one is
-                    for registration in registrations:
-                        where = (
-                            _relative(registration.file, config)
-                            if registration.file
-                            else "<unknown>"
-                        )
+                    places = sorted(
+                        _relative(r.file, config) if r.file else "<unknown>" for r in registrations
+                    )
+                    for where in places:
                         terminalreporter.write_line(f"  ✓ {name} ({where})")
 
                 terminalreporter.write_line("")

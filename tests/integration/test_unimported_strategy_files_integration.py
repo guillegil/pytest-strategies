@@ -59,7 +59,7 @@ class TestUnimportedFileIsListed:
 
         result.stdout.fnmatch_lines(
             [
-                "*ValueError: Strategy 'ns_strat' not found. Available strategies: none",
+                "In test_*: Strategy 'ns_strat' not found. Available strategies: none",
                 HINT,
                 f"*  {pytester.path / 'alias_strategies.py'}",
             ]
@@ -117,7 +117,7 @@ class TestExcludedFileIsNotListed:
         result = pytester.runpytest_subprocess()
 
         result.stdout.fnmatch_lines(
-            ["*ValueError: Strategy 'ns_strat' not found. Available strategies: none"]
+            ["In test_*: Strategy 'ns_strat' not found. Available strategies: none"]
         )
         assert "alias_strategies.py" not in result.stdout.str()
         assert "were not imported" not in result.stdout.str()
@@ -183,7 +183,7 @@ class TestFailedFileIsListed:
 
         result.stdout.fnmatch_lines(
             [
-                "*ValueError: Strategy 'ns_late' not found. Available strategies: none",
+                "In test_*: Strategy 'ns_late' not found. Available strategies: none",
                 "*Strategy files that failed to load:",
                 "*strategies.py: ModuleNotFoundError: No module named 'ns_missing_helpers'",
                 "*Strategy files are imported when a test in their folder or below first needs "

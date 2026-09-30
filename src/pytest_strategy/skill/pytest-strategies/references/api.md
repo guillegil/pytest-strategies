@@ -211,8 +211,9 @@ Each checks its arguments when built and raises `RNGValueError` (a `ValueError`)
   `max_retries` redraws of the random arguments); if all are dropped, collection
   fails. Directed vectors are added per `--vector-mode`. A strategy with no sequence
   argument falls back to its own `nsamples` or 10.
-- **Size guard:** before generating exhaustive combinations (`auto`, `Series`
-  products), the plugin computes their count without building them. Above the limit
+- **Size guard:** before generating exhaustive rows (the combinations under `auto`,
+  or combinations x K with `per_sequence_samples=True`), the plugin computes their
+  count without building them. Above the limit
   (100,000 rows by default) collection fails with the strategy name, the count and how
   to raise the limit: `Parameter(max_exhaustive=...)` for one strategy, or the
   `strategies_max_exhaustive` ini option for the project.
@@ -221,7 +222,7 @@ Each checks its arguments when built and raises `RNGValueError` (a `ValueError`)
 
 ```python
 RNG.get_seed()                         # the run's seed
-RNG.generator()                        # the plugin's random.Random for the current draw
+RNG.generator()                        # the random.Random the RNG types draw from
 RNG.integer(min, max, predicate=None)
 RNG.float(min=0.0, max=1.0, predicate=None)
 RNG.boolean(true_probability=0.5)
@@ -303,10 +304,12 @@ Reporting:
 `@Strategy.register(` or `@<module>.register(` (for example `@ps.register(` after
 `import pytest_strategy as ps`). A `conftest.py` may also register strategies.
 
-**Lazy loading:** when a test needs a name that is not registered yet, the plugin
-loads the strategies files in the test's folder and then in each parent folder up to
-the rootdir, closest first, each file at most once per session. Files in unrelated
-folders are never imported by that run.
+**Lazy loading:** when pytest collects a test module, the plugin first loads the
+strategies files in the module's folder and then in each parent folder up to the
+rootdir (or the `testpaths` entry that contains it), closest first, each file at most
+once per session. Files in unrelated folders are not imported by that run, unless a
+test asks for a name that no folder on its path registers: then every strategies file
+is loaded to find it.
 
 **Import:** files are imported with pytest's importer, using the session's
 `--import-mode` and rootdir. The module gets the name a test importing it would get,
@@ -325,8 +328,9 @@ import time through the plugin's generators do not depend on which folders load 
 - Lookup starts at the test module's folder and walks up to the rootdir; the first
   folder that has the name wins.
 - A name that no folder on that path has, but that is registered only once elsewhere,
-  is found too. Registrations from files outside the rootdir (an installed package, a
-  shared plugin) are global and are found last.
+  is found too. When several folders off the path register it, a registration from
+  outside the rootdir (an installed package, a shared plugin) wins; otherwise the
+  lookup fails with an error that names them.
 - Two different factories with the same name in one folder are a usage error (exit
   code 4) naming both files. The same function registered again is silent.
 - `@strategy(factory)` skips the lookup entirely.
@@ -417,7 +421,7 @@ extra names. IDs look like `x=1,y=2`.
 | `Could not generate valid vector` | The constraints rejected every draw within `max_retries`; the message names each constraint and its rejection count. Relax the constraint, narrow the ranges or raise `Parameter(max_retries=)`. |
 | `No valid value found after N attempts` | A number predicate rejected every draw. Narrow the range. |
 | `Series combination (...) skipped` warning | One combination's random arguments failed the constraints `max_retries` times. Raise `max_retries` or relax the constraint. |
-| exhaustive count above the limit | Too many `auto`/`Series` combinations. Reduce them or raise `max_exhaustive` / `strategies_max_exhaustive`. |
+| `... would generate N rows ..., more than the limit of ...` | Too many exhaustive combinations. Reduce them or raise `max_exhaustive` / `strategies_max_exhaustive`. |
 | `Directed vector 'x' has N values, expected M` | A directed or test vector does not have one value per argument. |
 | signature mismatch at collection | The test does not take every argument name (and dataclass mode does not apply). Add the parameters or a matching dataclass. |
 | `got empty parameter set` skip | `--vector-name`/`--vector-index` selected a vector this strategy lacks. |
@@ -441,8 +445,8 @@ Breaking changes from 2.x, and what to do:
 - **Plain `random` is no longer seeded by `--rng-seed`.** Draw through the RNG types
   or `RNG.*` helpers, or seed `random` yourself from `RNG.get_seed()` (section 8).
 - **Strategies files load later and only when needed.** In 2.x every strategies file
-  was imported when the session started. Now a file is imported when a test in its
-  folder (or below) needs it. Do not rely on a strategies file being imported by
+  was imported when the session started. Now a file is imported when pytest collects
+  a test module in its folder (or below). Do not rely on a strategies file being imported by
   another folder's run, and move import-time side effects into fixtures or conftest.
 - **A same-folder name clash is an error.** 2.x warned and the last registration won.
   Rename one of the strategies, or move it to another folder.
