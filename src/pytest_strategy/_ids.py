@@ -25,7 +25,7 @@ _DATACLASS_REPR = _DataclassProbe.__repr__.__code__
 _NAMEDTUPLE_REPR = namedtuple("_NamedTupleProbe", "").__repr__.__code__
 
 
-def _sorted_elements(values: set | frozenset) -> list:
+def _sorted_elements(values: set[Any] | frozenset[Any]) -> list[Any]:
     """Return set elements in a deterministic order: by value when they sort, else by repr."""
     # Sets are only partially ordered (by inclusion), so nested sets sort by repr
     if not any(isinstance(v, (set, frozenset)) for v in values):
@@ -125,7 +125,7 @@ def generate_test_ids(
 
 
 def generate_dataclass_ids(
-    dataclass_samples: list,
+    dataclass_samples: list[Any],
     dc_type: type,
     max_length: int = 80,
 ) -> list[str]:

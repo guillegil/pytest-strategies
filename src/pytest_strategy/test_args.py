@@ -1,5 +1,6 @@
 # test_args.py
 
+import builtins
 import warnings
 from collections.abc import Callable
 from typing import Any
@@ -29,7 +30,7 @@ class TestArg:
         # Control
         always_include_directed: bool = True,
         description: str = "",
-    ):
+    ) -> None:
         """
         Initialize a test argument.
 
@@ -204,17 +205,17 @@ class TestArg:
     # ====
 
     @property
-    def name(self):
+    def name(self) -> str:
         """Get the argument name"""
         return self._name
 
     @property
-    def description(self):
+    def description(self) -> str:
         """Get the argument description"""
         return self._description
 
     @property
-    def type(self):
+    def type(self) -> builtins.type:
         """
         Get the Python type of this argument.
 
@@ -222,7 +223,8 @@ class TestArg:
             Python type (int, float, str, etc.) or Any if unknown
         """
         if self._rng_type:
-            return self._rng_type.python_type
+            python_type: builtins.type = self._rng_type.python_type
+            return python_type
         if self._value is not None:
             return type(self._value)
         if self._directed_values:
@@ -230,17 +232,17 @@ class TestArg:
         return Any
 
     @property
-    def is_static(self):
+    def is_static(self) -> bool:
         """Check if this argument has a static value"""
         return self._value is not None
 
     @property
-    def has_directed_values(self):
+    def has_directed_values(self) -> bool:
         """Check if this argument has directed test values"""
         return bool(self._directed_values)
 
     @property
-    def rng_type(self):
+    def rng_type(self) -> Any:
         """Get the RNG type for this argument"""
         return self._rng_type
 
@@ -258,7 +260,7 @@ class TestArg:
     # String Representation
     # ====
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         """String representation for debugging"""
         if self._value is not None:
             return f"TestArg(name={self._name!r}, value={self._value!r})"
@@ -273,7 +275,7 @@ class TestArg:
 
         return f"TestArg({', '.join(parts)})"
 
-    def __str__(self):
+    def __str__(self) -> str:
         """Human-readable string representation"""
         if self._description:
             return f"{self._name}: {self._description}"

@@ -63,6 +63,8 @@ __version__ = "2.0.0"
 __author__ = "Guillermo Gil"
 __email__ = "guillegil@proton.me"
 
+from typing import Any
+
 # Core components
 # The 2.x module first: binding the strategy decorator below replaces the package
 # attribute that importing it sets, while `from pytest_strategy.strategy import ...`
@@ -131,12 +133,12 @@ __all__ = [
 PYTEST_FIXTURES = Strategy.PYTEST_FIXTURES
 
 
-def get_version():
+def get_version() -> str:
     """Get the current version of pytest_strategies."""
     return __version__
 
 
-def list_strategies():
+def list_strategies() -> list[str]:
     """
     List all registered strategies.
 
@@ -146,7 +148,7 @@ def list_strategies():
     return list(Strategy._registry.keys())
 
 
-def get_strategy_info(name: str):
+def get_strategy_info(name: str) -> dict[str, Any]:
     """
     Get information about a registered strategy.
 

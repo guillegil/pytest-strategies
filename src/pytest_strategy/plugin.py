@@ -903,7 +903,7 @@ class PytestStrategyPlugin:
         with disabled:
             # Start a line of its own after pytest's "collecting ..." progress
             writer = getattr(terminalreporter, "_tw", None)
-            if writer is not None and getattr(writer, "width_of_current_line", 0):
+            if writer is not None and bool(getattr(writer, "width_of_current_line", 0)):
                 writer.line()
             terminalreporter.write_line(f"pytest-strategies: {message}", **markup)
 
@@ -1130,14 +1130,14 @@ def _nsamples_type(value: str) -> int | str:
     return nsamples
 
 
-def pytest_addhooks(pluginmanager) -> None:
+def pytest_addhooks(pluginmanager: pytest.PytestPluginManager) -> None:
     """Add the plugin's hooks (``pytest_strategies_context``)."""
     from . import hookspecs
 
     pluginmanager.add_hookspecs(hookspecs)
 
 
-def pytest_addoption(parser) -> None:
+def pytest_addoption(parser: pytest.Parser) -> None:
     """Add command-line options for the plugin."""
     group = parser.getgroup("pytest-strategies", "Pytest Strategies Plugin Options")
 
@@ -1201,7 +1201,7 @@ def pytest_addoption(parser) -> None:
     )
 
 
-def pytest_configure(config):
+def pytest_configure(config: Config) -> None:
     """Register the plugin instance and open a runtime session for this config."""
     # --list-strategies prints from pytest_collection_finish and exits. Under
     # pytest-xdist only the workers collect, and a worker's exit crashes the
@@ -1217,11 +1217,12 @@ def pytest_configure(config):
         # Push the session state BEFORE registering, so the instance's hooks
         # have a current state.
         runtime.push(config)
-        config._strategy_plugin_instance = _plugin_instance
+        # Config does not declare this attribute, so the type checker needs setattr
+        setattr(config, "_strategy_plugin_instance", _plugin_instance)  # noqa: B010
         config.pluginmanager.register(_plugin_instance, "pytest-strategies")
 
 
-def pytest_unconfigure(config):
+def pytest_unconfigure(config: Config) -> None:
     """Unregister the plugin instance and close this config's runtime session."""
     if hasattr(config, "_strategy_plugin_instance"):
         config.pluginmanager.unregister(_plugin_instance, "pytest-strategies")

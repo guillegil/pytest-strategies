@@ -7,7 +7,7 @@ Pure functions — no pytest runtime dependency beyond inspect/dataclasses.
 import inspect
 import sys
 import typing
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import fields, is_dataclass
 from typing import Any
 
@@ -54,7 +54,7 @@ def lazy_signature(fn: Any, **kwargs: Any) -> inspect.Signature:
 
 
 def validate_signature(
-    test_fn,
+    test_fn: Callable[..., Any],
     argnames: Sequence[str],
     strategy_name: str,
     pytest_fixtures: "frozenset[str] | set[str]" = PYTEST_FIXTURES,  # noqa: ARG001
@@ -105,7 +105,7 @@ def validate_signature(
 
 
 def detect_dataclass_param(
-    test_fn,
+    test_fn: Callable[..., Any],
     argnames: Sequence[str],
     pytest_fixtures: "frozenset[str] | set[str]" = PYTEST_FIXTURES,
     allow_fixtures: bool = True,
@@ -176,7 +176,7 @@ def detect_dataclass_param(
 
 
 def detect_dataclass_mode(
-    test_fn,
+    test_fn: Callable[..., Any],
     argnames: Sequence[str],
     pytest_fixtures: "frozenset[str] | set[str]" = PYTEST_FIXTURES,
 ) -> tuple[bool, type | None]:
@@ -193,7 +193,7 @@ def detect_dataclass_mode(
     return is_dc_mode, dc_type
 
 
-def _eval_annotation(test_fn, annotation: str) -> Any:
+def _eval_annotation(test_fn: Callable[..., Any], annotation: str) -> Any:
     """Evaluate a string annotation in *test_fn*'s module globals (``None`` on failure)."""
     module_globals = getattr(inspect.unwrap(test_fn), "__globals__", {})
     try:

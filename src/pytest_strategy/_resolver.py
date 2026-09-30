@@ -61,7 +61,7 @@ def _skipped_param(reason: str, width: int) -> Any:
 
 
 @contextlib.contextmanager
-def _attributed_warnings(name: str, test_fn: Callable) -> Iterator[None]:
+def _attributed_warnings(name: str, test_fn: Callable[..., Any]) -> Iterator[None]:
     """
     Re-emit the PytestStrategiesWarnings raised in the block at the test function,
     prefixed with the strategy and the test.
@@ -119,7 +119,7 @@ def _unique_ids(
     return unique_rows, unique_ids
 
 
-def _test_location(test_fn: Callable, config: pytest.Config | None) -> str:
+def _test_location(test_fn: Callable[..., Any], config: pytest.Config | None) -> str:
     """
     Return the test's file path relative to the rootdir, in posix form.
 
@@ -388,7 +388,7 @@ def _warn_legacy(name: str, factory: Callable[..., Any]) -> None:
 def build_parametrization(
     name: str,
     factory: Callable[..., Any],
-    test_fn: Callable,
+    test_fn: Callable[..., Any],
     *,
     config: pytest.Config | None,
     pytest_fixtures: set[str],
@@ -675,13 +675,13 @@ def _count_rows(
 
 def resolve_and_parametrize(
     name: str,
-    test_fn: Callable,
+    test_fn: Callable[..., Any],
     *,
     registry: Mapping[str, Callable[..., Any]],
     config: pytest.Config | None,
     pytest_fixtures: set[str],
     validate: bool = True,
-) -> Callable:
+) -> Callable[..., Any]:
     """Build the parametrization for a registered strategy and apply it to ``test_fn``."""
     parametrization = build_parametrization(
         name,
@@ -694,4 +694,4 @@ def resolve_and_parametrize(
     mark = pytest.mark.parametrize(
         parametrization.argnames, parametrization.values, ids=parametrization.ids
     )
-    return cast(Callable, mark(test_fn))
+    return cast(Callable[..., Any], mark(test_fn))

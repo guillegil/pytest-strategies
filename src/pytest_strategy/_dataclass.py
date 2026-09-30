@@ -4,15 +4,16 @@ Dataclass conversion utilities for strategy samples.
 
 from collections.abc import Sequence
 from dataclasses import fields
+from typing import Any
 
 from ._introspection import lazy_signature
 
 
 def convert_to_dataclass(
-    samples: Sequence[tuple],
+    samples: Sequence[tuple[Any, ...]],
     argnames: Sequence[str],
     dataclass_type: type,
-) -> list:
+) -> list[Any]:
     """
     Convert a sequence of tuple samples to dataclass instances.
 
