@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `py.typed` marker: type checkers now use the package's annotations, which can surface new type errors in code that uses it.
 - pytest-xdist support without `--rng-seed`: the controller sends its seed to the workers, so they generate the same tests.
 - `Strategy.export_strategies()` reports `enum_class` and `has_predicate` in each argument's `rng_details`.
+- `Parameter(per_sequence_samples=True)`: a finite `nsamples` gives that many random rows for each combination of the `Series`/`RNGSequence` args instead of in total, so two devices with the default 10 samples run 20 tests. `--nsamples=auto` is unaffected.
 
 ### Changed
 - **Generated values**: each (strategy, test) pair draws from its own random stream, derived from the seed, the strategy name, the test's file path relative to the rootdir and its qualified name. The same `--rng-seed` gives different vectors than 1.1.0a2, so a seed recorded with an older version does not reproduce that run. Tests that share a strategy no longer get identical vectors, and the values no longer depend on collection order or `--import-mode`.

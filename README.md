@@ -226,6 +226,20 @@ TestArg("evens", rng_type=Series(range(10), predicate=lambda x: x % 2 == 0))
 **Constraints on `Series` in finite mode:**
 With a finite `--nsamples`, a `Series` combination that the constraints reject is skipped, and the cycle continues with the next combination. If the strategy also has random arguments, they are redrawn up to `max_retries` times before the combination is skipped. Each such skip emits a `PytestStrategiesWarning`: raise `max_retries`, or relax the constraint if that combination should be tested. If a whole cycle of combinations yields no valid vector, collecting the test fails.
 
+**`n` samples per sequence value (`per_sequence_samples`):**
+By default a finite `--nsamples=K` gives `K` rows in total, shared among the sequence values. Pass `per_sequence_samples=True` to get `K` random rows for *each* combination of the `Series`/`RNGSequence` arguments instead:
+
+```python
+@Strategy.register("per_device")
+def per_device(nsamples):
+    return Parameter(
+        TestArg("device", rng_type=Series(["devA", "devB"])),
+        TestArg("width", rng_type=RNGInteger(1, 64)),
+        per_sequence_samples=True,
+    )
+```
+With the default of 10 samples this runs 20 tests: 10 for `devA`, then 10 for `devB`, each with a fresh random `width`. Several sequence arguments multiply (2 devices × 3 modes × `K`). Combinations follow declaration order for `RNGSequence` too, and directed vectors are still placed first. Under `--nsamples=auto` the flag has no effect: every combination runs once. A combination whose random arguments the constraints reject `max_retries` times in a row gets fewer rows and a `PytestStrategiesWarning`; collecting the test fails only if no combination yields a row.
+
 ### 6. Metadata Export (New in v1.0.0)
 
 You can export all registered strategies and their metadata (parameters, RNG types, constraints) to JSON for analysis or integration with other tools.

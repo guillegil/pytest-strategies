@@ -31,6 +31,7 @@ class Parameter:
         vector_constraints: list[Callable[[tuple], bool]] | None = None,
         max_retries: int = 100,
         nsamples: int | str | None = None,
+        per_sequence_samples: bool = False,
     ):
         """
         Initialize a Parameter container.
@@ -47,10 +48,14 @@ class Parameter:
                 raises only when a whole cycle of combinations yields no vector.
             nsamples: Default number of random samples for this strategy (None, "auto"
                 for exhaustive generation, or an int >= 0)
+            per_sequence_samples: If True, generate the n random samples once for every
+                combination of the Series/RNGSequence args (in declaration order) instead
+                of n in total. Two devices with the default n=10 give 20 rows.
 
         Raises:
             ValueError: If directed vectors don't match the number of test args
-            ValueError: If nsamples or max_retries is not a valid count
+            ValueError: If nsamples or max_retries is not a valid count, or
+                per_sequence_samples is not a bool
 
         Examples:
             # Simple parameter with 2 args
@@ -79,6 +84,8 @@ class Parameter:
             raise ValueError(f'nsamples must be None or an int >= 0 (or "auto"), got {nsamples!r}')
         if not isinstance(max_retries, int) or isinstance(max_retries, bool) or max_retries < 1:
             raise ValueError(f"max_retries must be an int >= 1, got {max_retries!r}")
+        if not isinstance(per_sequence_samples, bool):
+            raise ValueError(f"per_sequence_samples must be a bool, got {per_sequence_samples!r}")
 
         # Copy the caller's containers so add_*/remove_* never mutate shared objects
         self.test_args = list(test_args)
@@ -88,6 +95,7 @@ class Parameter:
         self.vector_constraints = list(vector_constraints or [])
         self.max_retries = max_retries
         self.nsamples = nsamples
+        self.per_sequence_samples = per_sequence_samples
 
         # Validate directed vectors on initialization
         self._validate_directed_vectors()
@@ -280,6 +288,7 @@ class Parameter:
             "always_include_directed": self.always_include_directed,
             "has_constraints": bool(self.vector_constraints),
             "nsamples": self.nsamples,
+            "per_sequence_samples": self.per_sequence_samples,
         }
 
     def generate_vectors(
@@ -293,7 +302,9 @@ class Parameter:
         Generate parameter vectors.
 
         Args:
-            n: Number of random samples to generate (an int >= 0)
+            n: Number of random samples to generate (an int >= 0). With
+                per_sequence_samples=True, this many per combination of the
+                Series/RNGSequence args.
             mode: Sampling mode
                 - "all": All directed vectors + n random samples (default)
                 - "random_only": Only n random samples, no directed
@@ -367,7 +378,9 @@ class Parameter:
         # (no action needed, samples stays empty)
 
         # Generate samples (for all modes except directed_only)
-        if mode != "directed_only":
+        if mode != "directed_only" and self.per_sequence_samples and self._sequence_indices():
+            samples.extend(self._generate_per_sequence(n))
+        elif mode != "directed_only":
             # Series-aware branch: if any arg uses Series, produce ordered/cycling rows
             series_indices = [
                 i
@@ -434,6 +447,92 @@ class Parameter:
             else:
                 for _ in range(n):
                     samples.append(self.generate_vector())
+
+        return samples
+
+    def _sequence_indices(self) -> list[int]:
+        """Return the positions of the Series/RNGSequence args."""
+        return [
+            i
+            for i, a in enumerate(self.test_args)
+            if a.rng_type and isinstance(a.rng_type, SequenceLike)
+        ]
+
+    def _generate_per_sequence(self, n: int) -> list[tuple]:
+        """
+        Generate n random rows for every combination of the sequence args.
+
+        Combinations follow declaration order (leftmost arg is the slowest counter), for
+        RNGSequence as well as Series. The non-sequence args are drawn fresh for every
+        row and redrawn up to max_retries times when the constraints reject the vector.
+
+        Args:
+            n: Number of rows per combination
+
+        Returns:
+            List of parameter vectors, grouped by combination
+
+        Raises:
+            ValueError: If a sequence value fails its argument's validator
+            ValueError: If the vector constraints reject every combination
+
+        Warns:
+            PytestStrategiesWarning: If a combination produced fewer than n rows because
+                its random args did not satisfy the constraints within max_retries draws
+        """
+        sequence_indices = self._sequence_indices()
+        sequences = [self.test_args[i].rng_type.sequence for i in sequence_indices]
+        random_indices = [i for i in range(len(self.test_args)) if i not in sequence_indices]
+        # Redrawing only helps when there are non-sequence positions to change
+        attempts = self.max_retries if random_indices else 1
+
+        samples: list[tuple] = []
+        # Combinations cut short after redrawing their random args, with their row count
+        short: list[tuple[tuple, int]] = []
+        for combo in itertools.product(*sequences):
+            vec: list = [None] * len(self.test_args)
+            # Sequence values skip arg.generate(), so apply the arg's validator here
+            for idx, value in zip(sequence_indices, combo):
+                vec[idx] = self.test_args[idx]._validate(value)
+
+            rows = 0
+            while rows < n:
+                for _ in range(attempts):
+                    for i in random_indices:
+                        vec[i] = self.test_args[i].generate()
+                    candidate = tuple(vec)
+                    if self._validate_vector(candidate):
+                        samples.append(candidate)
+                        rows += 1
+                        break
+                else:
+                    # Further rows of this combination would most likely fail too
+                    if random_indices:
+                        short.append((combo, rows))
+                    break
+
+        num_combos = math.prod(len(seq) for seq in sequences)
+        if n and num_combos and not samples:
+            raise ValueError(
+                "Could not generate valid vector: none of the "
+                f"{num_combos} sequence combinations satisfied the vector "
+                f"constraints ({attempts} attempt(s) each). "
+                "Check your constraints."
+            )
+
+        for combo, rows in short:
+            values = ", ".join(
+                f"{self.test_args[idx].name}={value!r}"
+                for idx, value in zip(sequence_indices, combo)
+            )
+            warnings.warn(
+                f"Sequence combination ({values}) produced {rows} of {n} rows: the vector "
+                f"constraints rejected max_retries={attempts} draws of the other args. "
+                "Raise max_retries, or relax the constraints if this combination "
+                "should be tested.",
+                PytestStrategiesWarning,
+                stacklevel=3,
+            )
 
         return samples
 

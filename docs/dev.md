@@ -307,6 +307,14 @@ vector. `generate_exhaustive()` (used for `--nsamples=auto`) builds the
 Cartesian product of the `Series`/`RNGSequence` args, drops combinations the
 constraints reject after the same redraws, and raises when it drops all of them.
 
+With `Parameter(per_sequence_samples=True)`, `n` counts per combination of the
+`Series`/`RNGSequence` args: `generate_vectors(n)` walks their Cartesian product
+in declaration order (for `RNGSequence` too) and draws `n` rows of fresh random
+args for each one. A combination whose random args are rejected `max_retries`
+times in a row stops short with a `PytestStrategiesWarning`; the call raises when
+no combination yields a row. `generate_exhaustive()` ignores the flag, and a
+`Parameter` without sequence args behaves as if it were `False`.
+
 The `Parameter` copies the `directed_vectors`, `test_vectors` and
 `vector_constraints` it is given, so `add_*`/`remove_*` never change the
 caller's dicts and lists.
