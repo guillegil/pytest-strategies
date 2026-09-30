@@ -207,3 +207,39 @@ def pytest_strategies_context(config):
 
     result.assert_outcomes(passed=10, skipped=2)
     result.stdout.fnmatch_lines(["*no testbench configured*"])
+
+
+def test_random_draws_in_the_hook_do_not_change_the_vectors(project):
+    project.makeconftest("""
+import random
+
+def pytest_strategies_context(config):
+    channels = [3, 5]
+    random.shuffle(channels)
+    return {"peripherals": [{"type": "Esm", "channel": c} for c in channels]}
+""")
+
+    def collected(*paths):
+        result = project.runpytest(
+            "-p", "no:cacheprovider", "--rng-seed=42", "--collect-only", "-q", *paths
+        )
+        return [line for line in result.outlines if "test_rw_again.py::" in line]
+
+    # The first test that needs ctx triggers the hook: test_rw.py in the full run,
+    # test_rw_again.py when it runs alone
+    assert collected() == collected("test_rw_again.py")
+
+
+def test_optional_hook_conftest_works_without_the_plugin(pytester):
+    pytester.makeconftest("""
+import pytest
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_strategies_context(config):
+    return {"channels": [3, 5]}
+""")
+    pytester.makepyfile(test_plain="def test_plain():\n    pass\n")
+
+    result = pytester.runpytest_subprocess("-p", "no:cacheprovider", "-p", "no:pytest_strategy")
+
+    result.assert_outcomes(passed=1)

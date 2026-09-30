@@ -1,11 +1,12 @@
 """Unit tests for the ``ctx`` that factories get from the pytest_strategies_context hook."""
 
 import functools
+import random
 from types import SimpleNamespace
 
 import pytest
 
-from pytest_strategy import Parameter, RNGInteger, TestArg
+from pytest_strategy import RNG, Parameter, RNGInteger, TestArg
 from pytest_strategy._resolver import call_factory
 from pytest_strategy._runtime import StrategyRuntime, runtime
 
@@ -119,6 +120,42 @@ class TestFactoriesWithoutCtx:
 
 
 class TestWithoutHookResult:
+    """No implementation answered: a ctx default is kept, and ctx is None without one."""
+
+    @pytest.fixture
+    def no_answer(self):
+        calls = HookCalls(result=None)
+        runtime.push(calls.config)
+        try:
+            yield calls
+        finally:
+            runtime.pop()
+
+    def test_default_is_kept(self, no_answer):
+        def factory(nsamples, ctx="default bench"):
+            return ctx
+
+        assert call_factory("s", factory, 3) == "default bench"
+
+    def test_ctx_bound_by_partial_is_kept(self, no_answer):
+        def factory(nsamples, ctx):
+            return ctx
+
+        assert call_factory("s", functools.partial(factory, ctx="bench A"), 3) == "bench A"
+
+    def test_args_only_wrapper_around_a_default_ctx(self, no_answer):
+        def factory(nsamples, ctx=None):
+            return nsamples, ctx
+
+        @functools.wraps(factory)
+        def wrapper(*args):
+            return factory(*args)
+
+        assert call_factory("s", wrapper, 3) == (3, None)
+
+    def test_without_a_default_ctx_is_none(self, no_answer):
+        assert call_factory("s", lambda nsamples, ctx: ctx, 3) is None
+
     def test_ctx_is_none_without_a_session(self):
         assert StrategyRuntime().strategy_context() is None
 
@@ -147,6 +184,25 @@ class TestWithoutHookResult:
         finally:
             runtime.pop()
         assert (outer.calls, inner.calls) == (1, 1)
+
+
+class TestHookRandomStream:
+    def test_draws_in_the_hook_leave_the_callers_random_state_alone(self):
+        def draw_in_hook(config):
+            return random.random()
+
+        config = SimpleNamespace(hook=SimpleNamespace(pytest_strategies_context=draw_in_hook))
+        runtime.push(config)
+        try:
+            random.seed("caller stream")
+            expected = random.Random("caller stream").random()
+            ctx = call_factory("s", lambda ctx: ctx, 3)
+            assert random.random() == expected
+        finally:
+            runtime.pop()
+
+        # The hook's own draws come from a stream derived from the seed
+        assert ctx == random.Random(f"{RNG.get_seed()}:pytest_strategies_context").random()
 
 
 class TestHookErrors:

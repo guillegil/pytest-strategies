@@ -183,11 +183,18 @@ class StrategyRuntime:
             return None
         if not state.context_loaded:
             state.context_loaded = True
+            # The hook is first needed while a test's random stream is active. Give
+            # it a stream of its own, derived from the seed, and put the test's
+            # back: random draws in the hook must not shift that test's vectors.
+            random_state = random.getstate()
+            RNG.refresh_seed(key="pytest_strategies_context")
             try:
                 state.context = state.config.hook.pytest_strategies_context(config=state.config)
             except (Exception, pytest.skip.Exception, pytest.fail.Exception) as e:
                 state.context_error = e
                 state.context_traceback = e.__traceback__
+            finally:
+                random.setstate(random_state)
         if state.context_error is not None:
             # Restore the original traceback, so re-raising does not stack frames
             raise state.context_error.with_traceback(state.context_traceback)

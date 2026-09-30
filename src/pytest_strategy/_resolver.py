@@ -166,15 +166,27 @@ def _declares_ctx(sig: inspect.Signature | None) -> bool:
     )
 
 
-def _factory_context(name: str) -> Any:
-    """Return the ``ctx`` for strategy ``name``: the session's pytest_strategies_context."""
+def _ctx_kwargs(name: str, sig: inspect.Signature | None) -> dict[str, Any]:
+    """
+    Return ``{"ctx": <the session's pytest_strategies_context result>}`` for a
+    factory with a ``ctx`` parameter, and ``{}`` for any other.
+
+    When no hook implementation answers and ``ctx`` has a default (including a
+    value bound by ``functools.partial``), ``{}`` too, so the factory keeps it.
+    """
+    if not _declares_ctx(sig):
+        return {}
     try:
-        return runtime.strategy_context()
+        ctx = runtime.strategy_context()
     except Exception as e:
         raise ValueError(
             f"Strategy factory '{name}' has a 'ctx' parameter, but the "
             f"pytest_strategies_context hook raised {type(e).__name__}: {e}"
         ) from e
+    assert sig is not None
+    if ctx is None and sig.parameters["ctx"].default is not inspect.Parameter.empty:
+        return {}
+    return {"ctx": ctx}
 
 
 def call_factory(name: str, factory: Callable[..., Any], nsamples: int | str) -> Any:
@@ -194,8 +206,9 @@ def call_factory(name: str, factory: Callable[..., Any], nsamples: int | str) ->
     raises ``TypeError``, once more as ``factory(nsamples)``.
 
     A factory with a ``ctx`` parameter also gets ``ctx=`` the session's
-    ``pytest_strategies_context`` result (``None`` without an implementation). For
-    a wrapper with only ``*args``/``**kwargs``, the function it wraps decides.
+    ``pytest_strategies_context`` result. When no implementation answers, ``ctx``
+    keeps its default, or is ``None`` without one. For a wrapper with only
+    ``*args``/``**kwargs``, the function it wraps decides.
 
     Args:
         name: Name of the strategy (for error messages)
@@ -225,7 +238,7 @@ def call_factory(name: str, factory: Callable[..., Any], nsamples: int | str) ->
             wrapped: inspect.Signature | None = lazy_signature(factory)
         except (TypeError, ValueError):
             wrapped = None
-        extra = {"ctx": _factory_context(name)} if _declares_ctx(wrapped) else {}
+        extra = _ctx_kwargs(name, wrapped)
         try:
             return factory(nsamples=nsamples, **extra)
         except TypeError as e:
@@ -253,7 +266,8 @@ def call_factory(name: str, factory: Callable[..., Any], nsamples: int | str) ->
             )
     if extra:
         # Only now: a factory whose signature is rejected never triggers the hook
-        kwargs["ctx"] = _factory_context(name)
+        del kwargs["ctx"]
+        kwargs.update(_ctx_kwargs(name, sig))
 
     try:
         return factory(*args, **kwargs)

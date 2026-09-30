@@ -385,14 +385,19 @@ Some vectors depend on configuration that is only known when the session runs, s
 
 ```python
 # conftest.py
+import pytest
+
 from testbench import Testbench  # your project's code
 
 def pytest_addoption(parser):
     parser.addoption("--tb-config", default="testbench.yaml")
 
+@pytest.hookimpl(optionalhook=True)
 def pytest_strategies_context(config):
     return Testbench.parse_config(config.getoption("--tb-config"))
 ```
+
+`optionalhook=True` keeps the `conftest.py` usable when pytest-strategies is not loaded (not installed, or `-p no:pytest_strategy`): without it, pytest stops with "unknown hook".
 
 ```python
 # esm_strategies.py
@@ -411,9 +416,10 @@ def esm_rw(nsamples, ctx):
 Tests use the strategy as usual, with `@Strategy.strategy("esm_rw")`. With two Esm channels in the configuration they run 10 writes per channel; with none they are skipped with the reason.
 
 - The hook is called at most once per session, the first time a factory with a `ctx` parameter runs, and its result is reused for the others. Factories without `ctx` are called as before and never trigger it.
-- When no implementation returns a value, `ctx` is `None`. Give the parameter a default (`ctx=None`) if the factory should also work then.
-- If the hook raises, each test module that uses a factory with `ctx` fails collection with `Strategy factory '<name>' has a 'ctx' parameter, but the pytest_strategies_context hook raised <error>`. The hook can also call `pytest.skip(..., allow_module_level=True)` to skip those modules.
-- Implement it in the rootdir's `conftest.py` or in a plugin. Factories run while test modules are collected, and a `conftest.py` further down may not be loaded yet.
+- When no implementation returns a value, a `ctx` parameter keeps its default (or a value bound with `functools.partial`), and is `None` without one.
+- If the hook raises, each test module that uses a factory with `ctx` fails collection with `Strategy factory '<name>' has a 'ctx' parameter, but the pytest_strategies_context hook raised <error>`. `pytest.fail()` in the hook is reported as it is. The hook can also call `pytest.skip(..., allow_module_level=True)` to skip those modules.
+- Implement it in the rootdir's `conftest.py` or in a plugin. The result is shared by the whole session, and factories run while test modules are collected: a `conftest.py` further down is only loaded when pytest reaches its directory, so the hook there may be called too late, and once loaded its result also applies to modules outside that directory.
+- Random draws in the hook come from a stream of their own, derived from the seed, so they are reproduced by `--rng-seed` and do not change any test's vectors.
 - Under pytest-xdist every worker calls the hook, so it must return the same configuration in each, or the workers collect different tests.
 - `Strategy.export_strategies()` passes the same `ctx`.
 
