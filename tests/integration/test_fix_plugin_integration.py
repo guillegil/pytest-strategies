@@ -238,6 +238,23 @@ class TestNestedSessionSeed:
         assert _seed_from_header(unseeded) == 7
 
 
+# A test that needs a strategy: running it loads the strategy files of its folder
+OTHER_STRATEGY = """
+from pytest_strategy import register
+
+@register("other_strat")
+def other(nsamples):
+    return ("x",), [(1,)]
+"""
+OTHER_TEST = """
+from pytest_strategy import strategy
+
+@strategy("other_strat")
+def test_other(x):
+    pass
+"""
+
+
 class TestSkipInStrategyFile:
     """pytest.skip / importorskip in a strategy file must not crash the session."""
 
@@ -276,7 +293,7 @@ class TestSkipInStrategyFile:
             def gpu(nsamples):
                 return ("x",), [(1,)]
             """)
-        pytester.makepyfile(test_other="def test_other():\n    pass\n")
+        pytester.makepyfile(other_strategies=OTHER_STRATEGY, test_other=OTHER_TEST)
 
         quiet = pytester.runpytest_subprocess()
         verbose = pytester.runpytest_subprocess("-v")
@@ -333,7 +350,7 @@ class TestLoadErrorsAreVisible:
         result.stdout.fnmatch_lines(
             [
                 f"pytest-strategies: Warning - Failed to load *strategies.py: {error}",
-                "*ValueError: Strategy 'limited' not found. Available strategies: none",
+                "In test_*: Strategy 'limited' not found. Available strategies: none",
                 "*Strategy files that failed to load:",
                 f"*strategies.py: {error}",
             ]
@@ -348,7 +365,7 @@ class TestLoadErrorsAreVisible:
             def broken(nsamples)
                 return ("x",), [(1,)]
             """)
-        pytester.makepyfile(test_other="def test_other():\n    pass\n")
+        pytester.makepyfile(other_strategies=OTHER_STRATEGY, test_other=OTHER_TEST)
 
         result = pytester.runpytest_subprocess("-q")
 

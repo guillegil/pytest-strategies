@@ -189,15 +189,15 @@ class TestWithoutHookResult:
 class TestHookRandomStream:
     def test_draws_in_the_hook_leave_the_callers_random_state_alone(self):
         def draw_in_hook(config):
-            return random.random()
+            return RNG.generator().random()
 
         config = SimpleNamespace(hook=SimpleNamespace(pytest_strategies_context=draw_in_hook))
         runtime.push(config)
         try:
-            random.seed("caller stream")
+            RNG.generator().seed("caller stream")
             expected = random.Random("caller stream").random()
             ctx = call_factory("s", lambda ctx: ctx, 3)
-            assert random.random() == expected
+            assert RNG.generator().random() == expected
         finally:
             runtime.pop()
 

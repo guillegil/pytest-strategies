@@ -1,9 +1,10 @@
 """Per-session runtime state for the strategy plugin.
 
 The strategy registry is a process-global catalog populated at import time by
-``@Strategy.register``, so it cannot be made per-session (it is only restored
-when a session ends, see below). The active pytest ``Config``, the
-auto-discovery bookkeeping and the RNG seed, however, ARE per-session.
+``@register``, so it cannot be made per-session (it is only restored when a
+session ends, see below). ``register`` runs while a module is imported, with no
+pytest object at hand, so the active session is found here. The active pytest
+``Config``, the discovery bookkeeping and the RNG seed are per-session.
 
 These are held on a STACK rather than a single slot because pytest sessions can
 nest: running pytest in-process (e.g. via ``pytester``) starts an inner session
@@ -11,24 +12,39 @@ inside the outer one. A single global flag would let the outer session's
 "already discovered" state leak into the inner run and skip its discovery. A
 stack gives each session its own state and restores the parent's on exit.
 
-The process-global state a session changes (the RNG seed, the global ``random``
-state and the strategy registry) is snapshotted when the session begins and put
-back when it ends, so an inner session leaves no trace in the enclosing session
-or in later sibling sessions.
+The process-global state a session changes (the RNG seed and generator state,
+and the strategy registry) is snapshotted when the session begins and put back
+when it ends, so an inner session leaves no trace in the enclosing session or in
+later sibling sessions.
 """
 
 from __future__ import annotations
 
-import random
-from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType, TracebackType
 from typing import TYPE_CHECKING, Any
 
+from ._registry import Registration, registry
 from .rng import RNG
 
 if TYPE_CHECKING:
     import pytest
+
+
+@dataclass
+class Resolution:
+    """How one test's strategy was resolved, for the -v summary."""
+
+    strategy: str
+    # Where the factory is defined, for the summary ("tests/payments/strategies.py")
+    where: str
+    directed: int = 0
+    random: int = 0
+    test: int = 0
+    # The count the factory's random rows were generated with, and where it came from
+    nsamples: int | str | None = None
+    source: str = ""
 
 
 class SessionState:
@@ -36,6 +52,9 @@ class SessionState:
 
     def __init__(self, config: pytest.Config | None = None) -> None:
         self.config: pytest.Config | None = config
+        # The seed this session started from: the header, the reproduce line and
+        # xdist workers use it even if a test body reseeds the RNG later.
+        self.run_seed: int | None = None
         self.strategies_loaded: bool = False
         self.discovered_files: list[Path] = []
         # Module of each loaded strategy file, by real path: an import of the file
@@ -46,8 +65,24 @@ class SessionState:
         # Strategy files that called pytest.skip()/importorskip(), as (path, reason).
         self.skipped_files: list[tuple[Path, str]] = []
         # Files named like strategy files that discovery did not import because
-        # they contain no '@Strategy.register' (e.g. they register through an alias).
+        # they contain no registration decorator (e.g. they register through an alias).
         self.unimported_files: list[Path] = []
+        # Directories whose strategy files were loaded (normalized real paths), and
+        # whether every strategy file of the session was
+        self.loaded_dirs: set[str] = set()
+        self.all_loaded: bool = False
+        # Strategy files imported (or attempted), by normalized real path
+        self.loaded_files: set[str] = set()
+        # Where a lookup stops going up: the rootdir and the search paths
+        self.ceilings: set[str] | None = None
+        # A name registered twice in the same directory: the messages, reported as
+        # a usage error once collection ends
+        self.clashes: list[str] = []
+        # One entry per test and strategy, for the -v summary
+        self.resolutions: list[Resolution] = []
+        # On the pytest-xdist controller, which collects nothing: the -v summary
+        # of the first worker that finished (every worker collects all the tests)
+        self.worker_summary: dict[str, Any] | None = None
         # --vector-name/--vector-index bookkeeping: whether a Parameter strategy
         # was resolved with the filter, whether any of them had the vector, and
         # the directed vector names of those that did not (strategy -> names).
@@ -65,8 +100,8 @@ class SessionState:
         # a nested session's --rng-seed, random draws and strategy registrations
         # must not leak into the enclosing session or later sibling sessions.
         self.prev_seed: int | None = None
-        self.prev_random_state: Any = None
-        self.prev_registry: dict[str, Callable[..., Any]] | None = None
+        self.prev_rng_state: Any = None
+        self.prev_registry: dict[str, list[Registration]] | None = None
 
 
 class StrategyRuntime:
@@ -77,32 +112,28 @@ class StrategyRuntime:
 
     def push(self, config: pytest.Config | None = None) -> SessionState:
         """Begin a session (``pytest_configure``)."""
-        # Imported here: strategy.py imports this module.
-        from .strategy import Strategy
-
         state = SessionState(config)
         state.prev_seed = RNG.get_seed()
-        state.prev_random_state = random.getstate()
-        state.prev_registry = dict(Strategy._registry)
+        state.prev_rng_state = RNG.generator().getstate()
+        state.prev_registry = registry.snapshot()
         self._stack.append(state)
         return state
 
     def pop(self) -> None:
         """End a session (``pytest_unconfigure``) and restore the state it began with."""
         if self._stack:
-            from .strategy import Strategy
-
             state = self._stack.pop()
-            # Restore the seed without reseeding: the random state is restored
-            # as it was, not restarted from the beginning of the seed's stream.
+            # Restore the seed without reseeding: the generator is restored as it
+            # was, not restarted from the beginning of the seed's stream.
             if state.prev_seed is not None:
                 RNG._seed = state.prev_seed
-            if state.prev_random_state is not None:
-                random.setstate(state.prev_random_state)
-            if state.prev_registry is not None:
-                # In place: resolve_and_parametrize holds the registry by reference.
-                Strategy._registry.clear()
-                Strategy._registry.update(state.prev_registry)
+            if state.prev_rng_state is not None:
+                RNG.generator().setstate(state.prev_rng_state)
+            # Only a nested session's registrations are removed. The modules that
+            # registered stay in sys.modules and are not run again, so a second
+            # pytest.main() in the same process needs the registrations.
+            if state.prev_registry is not None and self._stack:
+                registry.restore(state.prev_registry)
 
     @property
     def current(self) -> SessionState | None:
@@ -168,6 +199,26 @@ class StrategyRuntime:
         if self.current is not None:
             self.current.unimported_files.append(path)
 
+    def record_clash(self, message: str) -> None:
+        """Record a name registered twice in one directory (no-op if no session)."""
+        if self.current is not None:
+            self.current.clashes.append(message)
+
+    def record_resolution(self, resolution: Resolution) -> None:
+        """Record how a test's strategy was resolved (no-op if no session)."""
+        if self.current is not None:
+            self.current.resolutions.append(resolution)
+
+    def load_all_strategy_files(self) -> None:
+        """Load every strategy file of the active session (no-op if none)."""
+        state = self.current
+        if state is None or state.config is None or state.all_loaded:
+            return
+        # Imported here: the plugin imports this module
+        from .plugin import _plugin_instance
+
+        _plugin_instance.load_all_strategy_files(state.config)
+
     def strategy_context(self) -> Any:
         """
         Return the active session's ``pytest_strategies_context`` result.
@@ -188,8 +239,8 @@ class StrategyRuntime:
             state.context_loaded = True
             # The hook is first needed while a test's random stream is active. Give
             # it a stream of its own, derived from the seed, and put the test's
-            # back: random draws in the hook must not shift that test's vectors.
-            random_state = random.getstate()
+            # back: RNG draws in the hook must not shift that test's vectors.
+            random_state = RNG.generator().getstate()
             RNG.refresh_seed(key="pytest_strategies_context")
             try:
                 state.context = state.config.hook.pytest_strategies_context(config=state.config)
@@ -197,7 +248,7 @@ class StrategyRuntime:
                 state.context_error = e
                 state.context_traceback = e.__traceback__
             finally:
-                random.setstate(random_state)
+                RNG.generator().setstate(random_state)
         if state.context_error is not None:
             # Restore the original traceback, so re-raising does not stack frames
             raise state.context_error.with_traceback(state.context_traceback)

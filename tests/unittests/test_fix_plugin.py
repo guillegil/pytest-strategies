@@ -5,6 +5,7 @@ import os
 import random
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -64,25 +65,47 @@ class TestDiscoveryHiddenDirectories:
 
 
 class TestSeedNone:
-    """RNG.seed(None) keeps the seed; refresh_seed() starts the random state from it."""
+    """RNG.seed(None) keeps the seed and restarts the generator from it."""
 
-    def test_seed_none_keeps_seed_and_refresh_reseeds_random_from_it(self):
+    def test_seed_none_keeps_seed_and_restarts_the_generator(self):
         RNG.seed(1234)
-        expected = [random.random() for _ in range(3)]
+        expected = [RNG.generator().random() for _ in range(3)]
 
-        random.seed()  # state from OS entropy, as in a fresh unseeded process
+        RNG.generator().random()
         RNG.seed(None)
         assert RNG.get_seed() == 1234
+        assert [RNG.generator().random() for _ in range(3)] == expected
 
-        # What the plugin does before loading strategy files
+        RNG.generator().random()
         RNG.refresh_seed()
-        assert [random.random() for _ in range(3)] == expected
+        assert [RNG.generator().random() for _ in range(3)] == expected
+
+    def test_seeding_leaves_the_global_random_state_alone(self):
+        state = random.getstate()
+        RNG.seed(1234)
+        RNG.refresh_seed(key="s:mod.test_a")
+        RNG.integer(0, 100)
+        assert random.getstate() == state
 
 
 class TestXdistConfigureNode:
-    """The controller hands its seed to every xdist worker."""
+    """The controller hands the seed its session started from to every xdist worker."""
 
-    def test_configure_node_sends_current_seed(self):
+    def test_configure_node_sends_the_session_seed(self):
+        state = runtime.push()
+        try:
+            state.run_seed = 98765
+            RNG.seed(4321)  # A reseed after the session started does not count
+            node = SimpleNamespace(workerinput={})
+
+            PytestStrategyPlugin().pytest_configure_node(node)
+        finally:
+            runtime.pop()
+
+        assert node.workerinput["pytest_strategies_seed"] == 98765
+
+    def test_without_a_session_the_current_seed(self, monkeypatch):
+        monkeypatch.setattr(runtime, "_stack", [])
         RNG.seed(98765)
         node = SimpleNamespace(workerinput={})
 
@@ -97,7 +120,7 @@ class TestKeyedRefreshSeed:
     @staticmethod
     def _draw(key=None):
         RNG.refresh_seed(key=key)
-        return [random.random() for _ in range(3)]
+        return [RNG.generator().random() for _ in range(3)]
 
     def test_same_key_repeats_its_stream(self):
         RNG.seed(42)
@@ -116,18 +139,18 @@ class TestKeyedRefreshSeed:
 
     def test_without_key_the_run_seed_is_used(self):
         RNG.seed(42)
-        random.seed(42)
-        expected = [random.random() for _ in range(3)]
+        # The same values as the global random state seeded with it (2.x behavior)
+        stdlib = random.Random(42)
+        expected = [stdlib.random() for _ in range(3)]
         assert self._draw() == expected
 
     def test_keyed_stream_is_stable_across_processes(self):
         """The key must not go through hash(), which is salted per process."""
         code = (
-            "import random\n"
             "from pytest_strategy import RNG\n"
             "RNG.seed(42)\n"
             "RNG.refresh_seed(key='s:mod.test_a')\n"
-            "print(random.random())\n"
+            "print(RNG.generator().random())\n"
         )
         outputs = {
             subprocess.run(
@@ -252,13 +275,14 @@ class TestLoadErrorsAreReported:
         assert load_session.terminal.lines == []
 
     def test_strategy_not_found_error_lists_failed_files(self, tmp_path, load_session):
-        from pytest_strategy import Strategy
 
         broken = tmp_path / "strategies.py"
         runtime.record_load_error(broken, "SyntaxError: expected ':' (strategies.py, line 3)")
 
         with pytest.raises(ValueError) as excinfo:
-            Strategy.strategy("pytest_strategies_never_registered")(lambda x: None)
+            PytestStrategyPlugin().resolve(
+                "pytest_strategies_never_registered", Path("/project/tests/test_x.py"), None
+            )
 
         message = str(excinfo.value)
         assert message.startswith("Strategy 'pytest_strategies_never_registered' not found.")

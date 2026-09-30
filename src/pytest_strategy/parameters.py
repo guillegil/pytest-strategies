@@ -3,15 +3,16 @@
 import itertools
 import math
 import warnings
+from collections import Counter
 from collections.abc import Callable
 from typing import Any
 
 from ._warnings import PytestStrategiesWarning
-from .rng import SequenceLike, Series
+from .rng import RNGValueError, SequenceLike, Series
 from .test_args import TestArg
 
 
-def _as_vector(values: Any) -> tuple:
+def _as_vector(values: Any) -> tuple[Any, ...]:
     """
     Store a directed or test vector as a tuple.
 
@@ -36,14 +37,15 @@ class Parameter:
     def __init__(
         self,
         *test_args: TestArg,
-        directed_vectors: dict[str, tuple] | None = None,
-        test_vectors: dict[str, tuple] | None = None,
+        directed_vectors: dict[str, tuple[Any, ...]] | None = None,
+        test_vectors: dict[str, tuple[Any, ...]] | None = None,
         always_include_directed: bool = True,
-        vector_constraints: list[Callable[[tuple], bool]] | None = None,
+        vector_constraints: list[Callable[[tuple[Any, ...]], bool]] | None = None,
         max_retries: int = 100,
         nsamples: int | str | None = None,
         per_sequence_samples: bool = False,
-    ):
+        max_exhaustive: int | None = None,
+    ) -> None:
         """
         Initialize a Parameter container.
 
@@ -65,11 +67,16 @@ class Parameter:
                 combination of the Series/RNGSequence args (in declaration order) instead
                 of n in total. Two devices with the default n=10 give 20 rows. A value
                 listed twice counts twice.
+            max_exhaustive: The most rows --nsamples=auto (or per_sequence_samples=True)
+                may generate for this strategy; the plugin fails the test's collection
+                above it, before generating. None uses the strategies_max_exhaustive ini
+                option (100,000 by default).
 
         Raises:
             ValueError: If directed vectors don't match the number of test args
-            ValueError: If nsamples or max_retries is not a valid count, or
-                per_sequence_samples is not a bool
+            ValueError: If nsamples, max_retries or max_exhaustive is not a valid count,
+                or per_sequence_samples is not a bool
+            RNGValueError: If two test args have the same name
 
         Examples:
             # Simple parameter with 2 args
@@ -100,6 +107,17 @@ class Parameter:
             raise ValueError(f"max_retries must be an int >= 1, got {max_retries!r}")
         if not isinstance(per_sequence_samples, bool):
             raise ValueError(f"per_sequence_samples must be a bool, got {per_sequence_samples!r}")
+        if max_exhaustive is not None and (
+            not isinstance(max_exhaustive, int)
+            or isinstance(max_exhaustive, bool)
+            or max_exhaustive < 1
+        ):
+            raise ValueError(f"max_exhaustive must be None or an int >= 1, got {max_exhaustive!r}")
+        seen: set[str] = set()
+        for arg in test_args:
+            if arg.name in seen:
+                raise RNGValueError(f"Parameter has two test args named {arg.name!r}")
+            seen.add(arg.name)
 
         # Copy the caller's containers so add_*/remove_* never mutate shared objects
         self.test_args = list(test_args)
@@ -110,12 +128,13 @@ class Parameter:
         self.max_retries = max_retries
         self.nsamples = nsamples
         self.per_sequence_samples = per_sequence_samples
+        self.max_exhaustive = max_exhaustive
 
         # Validate directed vectors on initialization
         self._validate_directed_vectors()
         self._validate_test_vectors()
 
-    def _validate_directed_vectors(self):
+    def _validate_directed_vectors(self) -> None:
         """
         Ensure all directed vectors match the number of test args.
 
@@ -130,7 +149,7 @@ class Parameter:
                     f"expected {expected_len}"
                 )
 
-    def _validate_test_vectors(self):
+    def _validate_test_vectors(self) -> None:
         """
         Ensure all test vectors match the number of test args.
 
@@ -144,23 +163,48 @@ class Parameter:
                     f"Test vector '{name}' has {len(vector)} values, " f"expected {expected_len}"
                 )
 
-    def _validate_vector(self, vector: tuple) -> bool:
+    def _validate_vector(
+        self, vector: tuple[Any, ...], rejections: Counter[int] | None = None
+    ) -> bool:
         """
         Validate a vector against all constraints.
 
         Args:
             vector: Parameter vector to validate
+            rejections: If given, the index of the first constraint that rejects the
+                vector is counted in it
 
         Returns:
             True if all constraints pass, False otherwise
         """
-        return all(constraint(vector) for constraint in self.vector_constraints)
+        for index, constraint in enumerate(self.vector_constraints):
+            if not constraint(vector):
+                if rejections is not None:
+                    rejections[index] += 1
+                return False
+        return True
+
+    def _describe_rejections(self, rejections: Counter[int]) -> str:
+        """Name the constraints that rejected vectors, with their counts, for an error."""
+        if not rejections:
+            return ""
+        parts = []
+        for index, count in sorted(rejections.items()):
+            constraint = self.vector_constraints[index]
+            name = getattr(constraint, "__name__", None)
+            if name is None or name == "<lambda>":
+                kind = "lambda" if name == "<lambda>" else type(constraint).__name__
+                label = f"constraint #{index} ({kind})"
+            else:
+                label = f"{name} (constraint #{index})"
+            parts.append(f"{label} rejected {count}")
+        return " Rejected by: " + ", ".join(parts) + "."
 
     # ====
     # Vector Management
     # ====
 
-    def add_directed_vector(self, name: str, values: tuple):
+    def add_directed_vector(self, name: str, values: tuple[Any, ...]) -> None:
         """
         Add a named directed test vector.
 
@@ -178,7 +222,7 @@ class Parameter:
             raise ValueError(f"Vector must have {len(self.test_args)} values, got {len(values)}")
         self.directed_vectors[name] = _as_vector(values)
 
-    def remove_directed_vector(self, name: str):
+    def remove_directed_vector(self, name: str) -> None:
         """
         Remove a directed vector by name.
 
@@ -192,7 +236,7 @@ class Parameter:
             raise KeyError(f"No directed vector named '{name}'")
         del self.directed_vectors[name]
 
-    def add_test_vector(self, name: str, values: tuple):
+    def add_test_vector(self, name: str, values: tuple[Any, ...]) -> None:
         """
         Add a named test vector.
 
@@ -210,7 +254,7 @@ class Parameter:
             raise ValueError(f"Vector must have {len(self.test_args)} values, got {len(values)}")
         self.test_vectors[name] = _as_vector(values)
 
-    def remove_test_vector(self, name: str):
+    def remove_test_vector(self, name: str) -> None:
         """
         Remove a test vector by name.
 
@@ -224,7 +268,7 @@ class Parameter:
             raise KeyError(f"No test vector named '{name}'")
         del self.test_vectors[name]
 
-    def get_test_vector(self, name: str) -> tuple:
+    def get_test_vector(self, name: str) -> tuple[Any, ...]:
         """
         Get a specific test vector by name.
 
@@ -241,7 +285,7 @@ class Parameter:
             raise KeyError(f"No test vector named '{name}'")
         return self.test_vectors[name]
 
-    def get_directed_vector(self, name: str) -> tuple:
+    def get_directed_vector(self, name: str) -> tuple[Any, ...]:
         """
         Get a specific directed vector by name.
 
@@ -276,7 +320,7 @@ class Parameter:
                 return arg.rng_type.skip_reason
         return None
 
-    def generate_vector(self) -> tuple:
+    def generate_vector(self) -> tuple[Any, ...]:
         """
         Generate a single random parameter vector.
 
@@ -289,16 +333,17 @@ class Parameter:
         Example:
             vector = param.generate_vector()  # e.g., (5, 3.14, "fast")
         """
+        rejections: Counter[int] = Counter()
         for _ in range(self.max_retries):
             vector = tuple(arg.generate() for arg in self.test_args)
 
             # Check constraints
-            if self._validate_vector(vector):
+            if self._validate_vector(vector, rejections):
                 return vector
 
         raise ValueError(
             f"Could not generate valid vector after {self.max_retries} attempts. "
-            "Check your constraints."
+            "Check your constraints." + self._describe_rejections(rejections)
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -326,7 +371,7 @@ class Parameter:
         mode: str = "all",
         filter_by_name: str | None = None,
         filter_by_index: int | None = None,
-    ) -> list[tuple]:
+    ) -> list[tuple[Any, ...]]:
         """
         Generate parameter vectors.
 
@@ -373,7 +418,7 @@ class Parameter:
             # Get specific vector by index
             samples = param.generate_vectors(0, filter_by_index=0)
         """
-        samples: list[tuple] = []
+        samples: list[tuple[Any, ...]] = []
 
         # Handle CLI filters first (override mode). A missing vector raises even when
         # the Parameter is skipped, so callers can still tell whether a filter matched.
@@ -436,11 +481,12 @@ class Parameter:
                 misses = 0
                 # Combinations skipped after redrawing their random args, keyed by their
                 # index in the product (Series values need not be hashable)
-                skipped: dict[int, tuple] = {}
+                skipped: dict[int, tuple[Any, ...]] = {}
+                rejections: Counter[int] = Counter()
                 for k, combo in enumerate(itertools.cycle(itertools.product(*series_seqs))):
                     if series_rows >= n:
                         break
-                    vec: list = [None] * len(self.test_args)
+                    vec: list[Any] = [None] * len(self.test_args)
                     # Series values skip arg.generate(), so apply the arg's validator here
                     for pos, idx in enumerate(series_indices):
                         vec[idx] = self.test_args[idx]._validate(combo[pos])
@@ -449,7 +495,7 @@ class Parameter:
                         for i in random_indices:
                             vec[i] = self.test_args[i].generate()
                         candidate = tuple(vec)
-                        if self._validate_vector(candidate):
+                        if self._validate_vector(candidate, rejections):
                             samples.append(candidate)
                             series_rows += 1
                             misses = 0
@@ -463,7 +509,7 @@ class Parameter:
                                 "Could not generate valid vector: none of the "
                                 f"{num_combos} Series combinations satisfied the vector "
                                 f"constraints ({attempts} attempt(s) each). "
-                                "Check your constraints."
+                                "Check your constraints." + self._describe_rejections(rejections)
                             )
                         # With random args the rejection may just be unlucky draws of a
                         # valid combination, so the skip must not go unnoticed
@@ -497,7 +543,7 @@ class Parameter:
             if a.rng_type and isinstance(a.rng_type, SequenceLike)
         ]
 
-    def _generate_per_sequence(self, n: int) -> list[tuple]:
+    def _generate_per_sequence(self, n: int) -> list[tuple[Any, ...]]:
         """
         Generate n random rows for every combination of the sequence args.
 
@@ -529,11 +575,12 @@ class Parameter:
         # Redrawing only helps when there are non-sequence positions to change
         attempts = self.max_retries if random_indices else 1
 
-        samples: list[tuple] = []
+        samples: list[tuple[Any, ...]] = []
         # Combinations cut short after redrawing their random args, with their row count
-        short: list[tuple[tuple, int]] = []
+        short: list[tuple[tuple[Any, ...], int]] = []
+        rejections: Counter[int] = Counter()
         for combo in itertools.product(*sequences):
-            vec: list = [None] * len(self.test_args)
+            vec: list[Any] = [None] * len(self.test_args)
             # Sequence values skip arg.generate(), so apply the arg's validator here
             for idx, value in zip(sequence_indices, combo):
                 vec[idx] = self.test_args[idx]._validate(value)
@@ -544,7 +591,7 @@ class Parameter:
                     for i in random_indices:
                         vec[i] = self.test_args[i].generate()
                     candidate = tuple(vec)
-                    if self._validate_vector(candidate):
+                    if self._validate_vector(candidate, rejections):
                         samples.append(candidate)
                         rows += 1
                         break
@@ -560,7 +607,7 @@ class Parameter:
                 "Could not generate valid vector: none of the "
                 f"{num_combos} sequence combinations satisfied the vector "
                 f"constraints ({attempts} attempt(s) each). "
-                "Check your constraints."
+                "Check your constraints." + self._describe_rejections(rejections)
             )
 
         for combo, rows in short:
@@ -579,7 +626,7 @@ class Parameter:
 
         return samples
 
-    def generate_exhaustive(self) -> list[tuple]:
+    def generate_exhaustive(self) -> list[tuple[Any, ...]]:
         """
         Generate all combinations of sequence arguments (Cartesian product).
         For non-sequence arguments, generate a random value for each combination.
@@ -621,6 +668,7 @@ class Parameter:
 
         # Generate Cartesian product
         samples = []
+        rejections: Counter[int] = Counter()
         for combination in itertools.product(*sequences):
             # Create a mutable vector (list) to fill in
             vector = [None] * len(self.test_args)
@@ -638,7 +686,7 @@ class Parameter:
 
                 # Convert to tuple and validate
                 vector_tuple = tuple(vector)
-                if self._validate_vector(vector_tuple):
+                if self._validate_vector(vector_tuple, rejections):
                     samples.append(vector_tuple)
                     break
 
@@ -651,7 +699,7 @@ class Parameter:
                 "Could not generate valid vector: none of the "
                 f"{num_combos} sequence combinations satisfied the vector "
                 f"constraints ({attempts} attempt(s) each). "
-                "Check your constraints."
+                "Check your constraints." + self._describe_rejections(rejections)
             )
 
         return samples
@@ -660,7 +708,7 @@ class Parameter:
     # CLI Support
     # ====
 
-    def get_vector_by_name(self, name: str) -> tuple:
+    def get_vector_by_name(self, name: str) -> tuple[Any, ...]:
         """
         Get directed vector by name (for -vn CLI argument).
 
@@ -678,7 +726,7 @@ class Parameter:
             raise KeyError(f"No directed vector named '{name}'. " f"Available: {available}")
         return self.directed_vectors[name]
 
-    def get_vector_by_index(self, index: int) -> tuple:
+    def get_vector_by_index(self, index: int) -> tuple[Any, ...]:
         """
         Get directed vector by index (for -vi CLI argument).
 
@@ -713,7 +761,7 @@ class Parameter:
     # Constraint Management
     # ====
 
-    def add_constraint(self, constraint: Callable[[tuple], bool]):
+    def add_constraint(self, constraint: Callable[[tuple[Any, ...]], bool]) -> None:
         """
         Add a constraint that validates entire parameter vectors.
 
@@ -726,7 +774,7 @@ class Parameter:
         """
         self.vector_constraints.append(constraint)
 
-    def clear_constraints(self):
+    def clear_constraints(self) -> None:
         """Remove all vector constraints."""
         self.vector_constraints = []
 
@@ -781,11 +829,11 @@ class Parameter:
     # String Representation
     # ====
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         """String representation for debugging."""
         return f"Parameter(args={self.num_args}, " f"directed_vectors={self.num_directed_vectors})"
 
-    def __str__(self):
+    def __str__(self) -> str:
         """Human-readable string representation."""
         args_str = ", ".join(self.arg_names)
         vectors_str = ", ".join(self.vector_names) if self.vector_names else "none"

@@ -82,33 +82,34 @@ class TestSeedLeavesGlobalRandomAlone:
         assert RNG.get_seed() == 1234
         assert random.getstate() == state
 
-    def test_explicit_seed_still_seeds_random(self):
-        random.seed(99)
-        expected = [random.random() for _ in range(3)]
-
+    def test_explicit_seed_leaves_random_alone(self):
         random.seed(0)
+        state = random.getstate()
+
         RNG.seed(99)
 
         assert RNG.get_seed() == 99
-        assert [random.random() for _ in range(3)] == expected
+        assert random.getstate() == state
+        # The generator draws what the global random state seeded with it would
+        assert RNG.generator().random() == random.Random(99).random()
 
 
 class TestRuntimeRestoresGlobalState:
     """Ending a session restores the random state and registry it began with."""
 
-    def test_pop_continues_the_random_stream_instead_of_restarting_it(self):
+    def test_pop_continues_the_generator_stream_instead_of_restarting_it(self):
         rt = StrategyRuntime()
-        random.seed(123)
-        expected = [random.random() for _ in range(3)]
+        RNG.seed(123)
+        expected = [RNG.generator().random() for _ in range(3)]
 
-        random.seed(123)
-        got = [random.random()]
+        RNG.seed(123)
+        got = [RNG.generator().random()]
         rt.push("inner")
         RNG.seed(42)  # the inner session's --rng-seed
         RNG.refresh_seed(key="s:mod.test")
-        random.random()
+        RNG.generator().random()
         rt.pop()
-        got += [random.random(), random.random()]
+        got += [RNG.generator().random(), RNG.generator().random()]
 
         assert got == expected
 
@@ -137,6 +138,7 @@ class TestRuntimeRestoresGlobalState:
         def inner(nsamples):
             return ("x",), [(2,)]
 
+        rt.push("outer")
         Strategy.register("r2_outer_strat")(outer)
         rt.push("inner")
         Strategy.register("r2_inner_strat")(inner)
@@ -146,6 +148,21 @@ class TestRuntimeRestoresGlobalState:
         assert Strategy._registry is registry
         assert "r2_inner_strat" not in Strategy._registry
         assert Strategy._registry["r2_outer_strat"] is outer
+        rt.pop()
+
+    def test_the_outermost_session_keeps_its_registrations(self):
+        # A second pytest.main() in the same process finds the strategy modules in
+        # sys.modules and does not run them again: it needs their registrations
+        rt = StrategyRuntime()
+
+        def factory(nsamples):
+            return ("x",), [(1,)]
+
+        rt.push("first")
+        Strategy.register("r2_first_run_strat")(factory)
+        rt.pop()
+
+        assert Strategy._registry["r2_first_run_strat"] is factory
 
 
 class TestLoadWithoutTerminalPlugin:
@@ -196,7 +213,9 @@ class TestSkippedFilesAreNamed:
         runtime.record_skipped_file(skipped, SKIP_REASON)
 
         with pytest.raises(ValueError) as excinfo:
-            Strategy.strategy("r2_never_registered")(lambda x: None)
+            PytestStrategyPlugin().resolve(
+                "r2_never_registered", Path("/project/tests/test_x.py"), None
+            )
 
         message = str(excinfo.value)
         assert message.startswith("Strategy 'r2_never_registered' not found.")
@@ -217,17 +236,21 @@ class TestSkippedFilesAreNamed:
 class TestVerboseLoadOutsideRootdir:
     """-vv reports a file outside rootdir as loaded, by its absolute path."""
 
-    def test_file_outside_rootdir_is_loaded(self, tmp_path, session, capsys):
+    def test_file_outside_rootdir_is_loaded(self, tmp_path, session):
         strategy_file = _write(tmp_path / "shared" / "strategies.py")
         (tmp_path / "proj").mkdir()
-
-        PytestStrategyPlugin()._load_strategy_files(
-            [strategy_file], _config(tmp_path / "proj", option=SimpleNamespace(verbose=2))
+        lines = []
+        terminal = SimpleNamespace(write_line=lambda line, **markup: lines.append(line))
+        config = _config(tmp_path / "proj", option=SimpleNamespace(verbose=2))
+        config.pluginmanager = SimpleNamespace(
+            get_plugin=lambda name: terminal if name == "terminalreporter" else None
         )
+
+        PytestStrategyPlugin()._load_strategy_files([strategy_file], config)
 
         assert runtime.load_errors == []
         assert runtime.discovered_files == [strategy_file]
-        assert f"pytest-strategies: Loaded {strategy_file}" in capsys.readouterr().out
+        assert lines == [f"pytest-strategies: Loaded {strategy_file}"]
 
 
 class TestDiscoverySkipsEnvironmentsAndIgnoredDirectories:

@@ -94,7 +94,8 @@ class TestSeriesSkipWarningShown:
             def test_modes(mode, x):
                 assert mode != "a"
             """)
-        result = pytester.runpytest_inprocess("--nsamples=4", "--rng-seed=1")
+        # A subprocess keeps this suite's filterwarnings=error out of the inner run
+        result = pytester.runpytest_subprocess("--nsamples=4", "--rng-seed=1")
         result.assert_outcomes(passed=4, warnings=1)
         result.stdout.fnmatch_lines(
             [

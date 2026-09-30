@@ -1,5 +1,7 @@
 # test_args.py
 
+import builtins
+import warnings
 from collections.abc import Callable
 from typing import Any
 
@@ -27,8 +29,8 @@ class TestArg:
         validator: Callable[[Any], bool] | None = None,
         # Control
         always_include_directed: bool = True,
-        description: str = "",  # Re-added description as it was removed in the instruction but not explicitly stated
-    ):
+        description: str = "",
+    ) -> None:
         """
         Initialize a test argument.
 
@@ -37,8 +39,10 @@ class TestArg:
             rng_type: RNG type for random generation (required if value is None)
             description: Human-readable description of the argument
             value: Single static value (for directed tests)
-            directed_values: List of specific values to always test
-            test_values: List of specific values for test mode only
+            directed_values: Deprecated, removed in 4.0: Parameter does not use them.
+                Use Parameter(directed_vectors=...).
+            test_values: Deprecated, removed in 4.0: Parameter does not use them.
+                Use Parameter(test_vectors=...).
             always_include_directed: If True, directed values are always included in samples
             validator: Optional function to validate generated values
 
@@ -51,10 +55,16 @@ class TestArg:
 
             # Static value
             TestArg("count", value=0, description="Edge case")
-
-            # Mixed directed + random
-            TestArg("count", rng_type=RNGInteger(1, 100), directed_values=[0, 1])
         """
+        for option, given in (("directed_values", directed_values), ("test_values", test_values)):
+            if given is not None:
+                replacement = "directed_vectors" if option == "directed_values" else "test_vectors"
+                warnings.warn(
+                    f"TestArg({option}=...) is deprecated and will be removed in 4.0: strategies "
+                    f"do not use it. Use Parameter({replacement}=...) instead.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
         self._name = name
         self._rng_type = rng_type
         self._description = description
@@ -195,17 +205,17 @@ class TestArg:
     # ====
 
     @property
-    def name(self):
+    def name(self) -> str:
         """Get the argument name"""
         return self._name
 
     @property
-    def description(self):
+    def description(self) -> str:
         """Get the argument description"""
         return self._description
 
     @property
-    def type(self):
+    def type(self) -> builtins.type:
         """
         Get the Python type of this argument.
 
@@ -213,7 +223,8 @@ class TestArg:
             Python type (int, float, str, etc.) or Any if unknown
         """
         if self._rng_type:
-            return self._rng_type.python_type
+            python_type: builtins.type = self._rng_type.python_type
+            return python_type
         if self._value is not None:
             return type(self._value)
         if self._directed_values:
@@ -221,17 +232,17 @@ class TestArg:
         return Any
 
     @property
-    def is_static(self):
+    def is_static(self) -> bool:
         """Check if this argument has a static value"""
         return self._value is not None
 
     @property
-    def has_directed_values(self):
+    def has_directed_values(self) -> bool:
         """Check if this argument has directed test values"""
         return bool(self._directed_values)
 
     @property
-    def rng_type(self):
+    def rng_type(self) -> Any:
         """Get the RNG type for this argument"""
         return self._rng_type
 
@@ -249,7 +260,7 @@ class TestArg:
     # String Representation
     # ====
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         """String representation for debugging"""
         if self._value is not None:
             return f"TestArg(name={self._name!r}, value={self._value!r})"
@@ -264,7 +275,7 @@ class TestArg:
 
         return f"TestArg({', '.join(parts)})"
 
-    def __str__(self):
+    def __str__(self) -> str:
         """Human-readable string representation"""
         if self._description:
             return f"{self._name}: {self._description}"

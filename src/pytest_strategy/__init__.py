@@ -8,23 +8,24 @@ This plugin enables powerful parametrized tests that combine:
 - CLI control for test execution
 
 Main Components:
-- Strategy: Decorator for registering and applying test strategies
+- register / strategy: Decorators that register a strategy factory and apply it to a test
 - Parameter: Container for multiple test arguments (parameter vectors)
 - TestArg: Single test argument definition with type and generation rules
 - RNG: Random number generation with seed management
 - RNGType classes: Type-safe random generators (RNGInteger, RNGFloat, etc.)
 
-Strategies can be registered in the test module, as in the example below, or
-in files named strategies.py, strategy.py, *_strategies.py or *_strategy.py
-that contain @Strategy.register; the plugin imports those when the session
-starts.
+Strategies can be registered in the test module, as in the example below, in a
+conftest.py, or in files named strategies.py, strategy.py, *_strategies.py or
+*_strategy.py. A name is visible to the tests in that file's directory and
+below, and the nearest registration wins. The plugin loads a directory's
+strategy files when pytest first collects a test module there or below; files
+above the testpaths entry that contains the test are not searched.
 
 Example Usage:
-    from pytest_strategy import Strategy, Parameter, TestArg
-    from pytest_strategy.rng import RNGInteger
+    from pytest_strategy import Parameter, RNGInteger, TestArg, register, strategy
 
-    @Strategy.register("addition_strategy")
-    def create_samples(nsamples):
+    @register("addition_strategy")
+    def addition_strategy(nsamples):
         return Parameter(
             TestArg("a", rng_type=RNGInteger(0, 100)),
             TestArg("b", rng_type=RNGInteger(0, 100)),
@@ -34,7 +35,7 @@ Example Usage:
             }
         )
 
-    @Strategy.strategy("addition_strategy")
+    @strategy("addition_strategy")    # or @strategy(addition_strategy)
     def test_addition(a, b):
         assert a + b >= 0
 
@@ -46,7 +47,7 @@ Dataclass Support:
         a: int
         b: int
 
-    @Strategy.strategy("addition_strategy")
+    @strategy("addition_strategy")
     def test_addition(params: MathParams):
         assert params.a + params.b >= 0
 
@@ -59,11 +60,17 @@ CLI Options:
     pytest --vector-index 0           # Run the directed vector at index 0
 """
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"
 __author__ = "Guillermo Gil"
 __email__ = "guillegil@proton.me"
 
+
 # Core components
+# The 2.x module first: binding the strategy decorator below replaces the package
+# attribute that importing it sets, while `from pytest_strategy.strategy import ...`
+# keeps finding the module
+from . import strategy as _strategy_module  # noqa: F401
+from ._api import Strategy, export_strategies, register, strategy
 from ._warnings import PytestStrategiesWarning
 from .parameters import Parameter
 
@@ -84,7 +91,6 @@ from .rng import (
     SequenceLike,
     Series,
 )
-from .strategy import Strategy
 from .test_args import TestArg
 
 # Plugin is automatically loaded via entry point
@@ -95,6 +101,10 @@ __all__ = [
     "__version__",
     "__author__",
     "__email__",
+    # Decorators
+    "register",
+    "strategy",
+    "export_strategies",
     # Core classes
     "Strategy",
     "Parameter",
@@ -123,22 +133,29 @@ __all__ = [
 PYTEST_FIXTURES = Strategy.PYTEST_FIXTURES
 
 
-def get_version():
+def get_version() -> str:
     """Get the current version of pytest_strategies."""
     return __version__
 
 
-def list_strategies():
+def list_strategies() -> list[str]:
     """
     List all registered strategies.
+
+    During a pytest session this loads every strategy file first, like
+    ``--list-strategies``, so the names of folders pytest has not reached yet
+    are included.
 
     Returns:
         list: Names of all registered strategies
     """
+    from ._runtime import runtime
+
+    runtime.load_all_strategy_files()
     return list(Strategy._registry.keys())
 
 
-def get_strategy_info(name: str):
+def get_strategy_info(name: str) -> dict[str, object]:
     """
     Get information about a registered strategy.
 
@@ -151,6 +168,9 @@ def get_strategy_info(name: str):
     Raises:
         ValueError: If strategy doesn't exist
     """
+    from ._runtime import runtime
+
+    runtime.load_all_strategy_files()
     if name not in Strategy._registry:
         raise ValueError(f"No strategy registered under {name!r}")
 
@@ -161,32 +181,15 @@ def get_strategy_info(name: str):
     }
 
 
-# Module-level configuration
 def configure(
-    validate_signatures: bool = True,
-    default_nsamples: int = 10,
-):
-    """
-    Configure global pytest_strategies settings.
+    validate_signatures: bool = True,  # noqa: ARG001 - kept for 2.x callers
+    default_nsamples: int = 10,  # noqa: ARG001
+) -> None:
+    """Deprecated: this function never did anything, and will be removed in 4.0."""
+    import warnings
 
-    Args:
-        validate_signatures: Enable/disable signature validation globally
-        default_nsamples: Default number of samples when not specified via CLI
-    """
-    # This could be expanded to store global config
-    # For now, it's a placeholder for future configuration options
-    pass
-
-
-# Print helpful message on import (optional - can be removed if too verbose)
-def _print_import_message():
-    """Print helpful message when module is imported (for debugging)."""
-    import sys
-
-    if "--help" not in sys.argv and "-h" not in sys.argv:
-        # Only print in verbose mode or when explicitly requested
-        pass
-
-
-# Uncomment to enable import message
-# _print_import_message()
+    warnings.warn(
+        "pytest_strategy.configure() does nothing and will be removed in 4.0",
+        DeprecationWarning,
+        stacklevel=2,
+    )

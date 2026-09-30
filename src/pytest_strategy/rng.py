@@ -4,68 +4,95 @@ import builtins
 import math
 import random
 import time
+import warnings
 from collections.abc import Callable, Mapping, Sequence
 from enum import Enum
-from typing import TypeVar, cast
+from typing import Any, Generic, TypeVar, cast
 
 T = TypeVar("T")
+E = TypeVar("E", bound=Enum)
 
 
-class RNGValueError(Exception):
+class RNGValueError(ValueError):
     """Exception raised when an invalid value is provided to RNG operations."""
-
-    pass
 
 
 class RNG:
-    """Core RNG singleton managing seed and random state"""
+    """
+    Core RNG singleton managing the seed and the random state.
+
+    Every value the RNG types draw comes from one generator the plugin owns
+    (:meth:`generator`), not from the global ``random`` state, so ``--rng-seed``
+    reproduces them without seeding or disturbing the ``random`` calls of the
+    code under test.
+    """
 
     _seed = time.time_ns()
     _max_retries = 100
+    _generator = random.Random(_seed)
 
     # ====
     # Seed Management
     # ====
 
     @staticmethod
-    def seed(seed: int | None = None):
-        """Set the random seed and refresh the random state.
+    def seed(seed: int | None = None) -> None:
+        """Set the seed and restart the generator from it.
 
-        With ``None`` the current seed is kept and the global random state is
-        left alone. The plugin calls this on every run, including runs that never
-        use a strategy, so it must not replace a state the project seeded itself
-        (e.g. ``random.seed(0)`` in a conftest). Use :meth:`refresh_seed` to
-        start the random state from the current seed.
+        With ``None`` the current seed is kept, and the generator restarts from it.
         """
         if seed is not None:
             RNG._seed = seed
-            random.seed(RNG._seed)
+        RNG._generator.seed(RNG._seed)
 
     @staticmethod
-    def get_seed():
+    def get_seed() -> int:
         """Get the current seed value"""
         return RNG._seed
 
     @staticmethod
-    def refresh_seed(key: str | None = None):
-        """Refresh the random state with the current seed.
+    def generator() -> random.Random:
+        """
+        Return the generator the RNG types draw from.
+
+        A factory that needs other random operations (``shuffle``, ``gauss``) can
+        draw from it, and gets values that ``--rng-seed`` reproduces. The plugin
+        restarts it for each strategy and test.
+        """
+        return RNG._generator
+
+    @staticmethod
+    def refresh_seed(key: str | None = None) -> None:
+        """Restart the generator from the current seed.
 
         Args:
-            key: Optional stream name. With a key, the state is seeded from the
+            key: Optional stream name. With a key, the generator is seeded from the
                 seed and the key together, so each key gets its own stream that
                 is the same on every run with this seed and does not depend on
                 the order in which keys are used.
         """
         if key is None:
-            random.seed(RNG._seed)
+            RNG._generator.seed(RNG._seed)
         else:
             # A str seed is hashed with SHA-512, so it is stable across processes
             # (unlike hash(), which is salted per process).
-            random.seed(f"{RNG._seed}:{key}")
+            RNG._generator.seed(f"{RNG._seed}:{key}")
 
     @staticmethod
-    def set_max_retries(retries: int):
-        """Set the maximum number of retries for constrained generation"""
+    def set_max_retries(retries: int) -> None:
+        """
+        Deprecated: set the number of draws the ``predicate=`` of an RNG type gets.
+
+        Use ``Parameter(max_retries=...)``, which bounds the draws for the
+        strategy's vector constraints, or a predicate that accepts more values.
+        Removed in 4.0.
+        """
+        warnings.warn(
+            "RNG.set_max_retries() is deprecated and will be removed in 4.0; "
+            "use Parameter(max_retries=...)",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         RNG._max_retries = retries
 
     # ====
@@ -139,7 +166,7 @@ class RNG:
 
     @staticmethod
     def integer(
-        min: int = -(2**31), max: int = 2**31 - 1, predicate: Callable | None = None
+        min: int = -(2**31), max: int = 2**31 - 1, predicate: Callable[[int], bool] | None = None
     ) -> int:
         """
         Generate a random integer within the specified range.
@@ -156,10 +183,12 @@ class RNG:
             RNG.integer(1, 100)
             RNG.integer(1, 100, predicate=lambda x: x % 2 == 0)  # Even numbers only
         """
-        return cast(int, RNG._generate_with_constraint(lambda: random.randint(min, max), predicate))
+        return RNG._generate_with_constraint(lambda: RNG._generator.randint(min, max), predicate)
 
     @staticmethod
-    def float(min: float = 0.0, max: float = 1.0, predicate: Callable | None = None) -> float:
+    def float(
+        min: float = 0.0, max: float = 1.0, predicate: Callable[[float], bool] | None = None
+    ) -> float:
         """
         Generate a random float within the specified range.
 
@@ -175,10 +204,7 @@ class RNG:
             RNG.float(0.0, 10.0)
             RNG.float(0.0, 1.0, predicate=lambda x: x > 0.5)
         """
-        return cast(
-            builtins.float,
-            RNG._generate_with_constraint(lambda: _uniform(min, max), predicate),
-        )
+        return RNG._generate_with_constraint(lambda: _uniform(min, max), predicate)
 
     @staticmethod
     def boolean(true_probability: builtins.float = 0.5) -> bool:
@@ -195,10 +221,10 @@ class RNG:
             RNG.boolean()  # 50/50
             RNG.boolean(0.8)  # 80% True, 20% False
         """
-        return random.random() < true_probability
+        return RNG._generator.random() < true_probability
 
     @staticmethod
-    def choice(items: list):
+    def choice(items: list[T]) -> T:
         """
         Choose a random item from a list.
 
@@ -216,7 +242,7 @@ class RNG:
         """
         if not items:
             raise RNGValueError("The choices list cannot be empty.")
-        return random.choice(items)
+        return RNG._generator.choice(items)
 
     @staticmethod
     def string(
@@ -252,8 +278,8 @@ class RNG:
             raise ValueError(f"String {error}")
 
         if length is None:
-            length = random.randint(min_length, max_length)
-        return "".join(random.choice(charset) for _ in range(length))
+            length = RNG._generator.randint(min_length, max_length)
+        return "".join(RNG._generator.choice(charset) for _ in range(length))
 
     # ====
     # Weighted Generators
@@ -261,7 +287,8 @@ class RNG:
 
     @staticmethod
     def winteger(
-        ranges: dict[tuple[int, int], builtins.float], predicate: Callable | None = None
+        ranges: dict[tuple[int, int], builtins.float],
+        predicate: Callable[[int], bool] | None = None,
     ) -> int:
         """
         Generate a weighted integer from multiple ranges.
@@ -286,15 +313,15 @@ class RNG:
             # Choose range using random.choices (handles normalization). The range
             # is re-chosen on every predicate retry so that a range with no valid
             # value cannot exhaust all retries while other ranges could succeed.
-            min_val, max_val = random.choices(range_list, weights=weights, k=1)[0]
+            min_val, max_val = RNG._generator.choices(range_list, weights=weights, k=1)[0]
             return RNG.integer(min_val, max_val)
 
-        return cast(int, RNG._generate_with_constraint(generator, predicate))
+        return RNG._generate_with_constraint(generator, predicate)
 
     @staticmethod
     def wfloat(
         ranges: dict[tuple[builtins.float, builtins.float], builtins.float],
-        predicate: Callable | None = None,
+        predicate: Callable[[builtins.float], bool] | None = None,
     ) -> builtins.float:
         """
         Generate a weighted float from multiple ranges.
@@ -317,10 +344,10 @@ class RNG:
 
         def generator() -> builtins.float:
             # Re-choose the range on every predicate retry (see winteger)
-            min_val, max_val = random.choices(range_list, weights=weights, k=1)[0]
+            min_val, max_val = RNG._generator.choices(range_list, weights=weights, k=1)[0]
             return RNG.float(min_val, max_val)
 
-        return cast(builtins.float, RNG._generate_with_constraint(generator, predicate))
+        return RNG._generate_with_constraint(generator, predicate)
 
 
 # ====
@@ -330,13 +357,14 @@ class RNG:
 
 def _uniform(a: float, b: float) -> float:
     """
-    Return random.uniform(a, b), without overflowing when b - a exceeds the largest float.
+    Return uniform(a, b) from the RNG generator, without overflowing when b - a exceeds the
+    largest float.
 
     The same draw and formula as the standard library, so a seed gives the same
     values. b - a only overflows when a and b have opposite signs, and the second
     form cannot overflow then, and stays within [a, b].
     """
-    r = random.random()
+    r = RNG._generator.random()
     x = a + (b - a) * r
     return x if math.isfinite(x) else a * (1.0 - r) + b * r
 
@@ -356,7 +384,7 @@ def _check_finite(owner: str, *bounds: float) -> None:
             raise RNGValueError(f"{owner} bounds must be finite, got {bound!r}")
 
 
-def _check_ranges(owner: str, ranges: Mapping, finite: bool = False) -> None:
+def _check_ranges(owner: str, ranges: Mapping[Any, float], finite: bool = False) -> None:
     """
     Raise RNGValueError unless every key of ranges is a (min, max) pair with min <= max.
 
@@ -401,7 +429,7 @@ def _check_bounds(
     raise RNGValueError(f"{owner} min ({min_val}) must be <= max ({max_val}){note}")
 
 
-def _check_weights(owner: str, weights: Mapping) -> None:
+def _check_weights(owner: str, weights: Mapping[Any, float]) -> None:
     """
     Raise RNGValueError unless weights can be used for weighted selection.
 
@@ -437,89 +465,96 @@ def _check_weights(owner: str, weights: Mapping) -> None:
         raise RNGValueError(f"{owner} weights cannot all be zero")
 
 
-class RNGType:
+class RNGType(Generic[T]):
     """Base class for all RNG types"""
 
-    def generate(self):
+    def generate(self) -> T:
         """Generate a random value based on this type's configuration"""
         raise NotImplementedError
 
     @property
-    def python_type(self):
+    def python_type(self) -> type[T]:
         """Return the Python type this RNG type generates"""
         raise NotImplementedError
 
 
-class RNGInteger(RNGType):
+class RNGInteger(RNGType[int]):
     """RNG type for generating integers"""
 
     def __init__(
-        self, min: int | None = None, max: int | None = None, predicate: Callable | None = None
-    ):
+        self,
+        min: int | None = None,
+        max: int | None = None,
+        predicate: Callable[[int], bool] | None = None,
+    ) -> None:
         self.min = min if min is not None else -(2**31)
         self.max = max if max is not None else 2**31 - 1
         self.predicate = predicate
         _check_bounds("RNGInteger", self.min, self.max, min is not None, max is not None)
 
-    def generate(self):
+    def generate(self) -> int:
         return RNG.integer(self.min, self.max, self.predicate)
 
     @property
-    def python_type(self):
+    def python_type(self) -> type[int]:
         return int
 
 
-class RNGFloat(RNGType):
+class RNGFloat(RNGType[float]):
     """RNG type for generating floats"""
 
     def __init__(
-        self, min: float | None = None, max: float | None = None, predicate: Callable | None = None
-    ):
+        self,
+        min: float | None = None,
+        max: float | None = None,
+        predicate: Callable[[float], bool] | None = None,
+    ) -> None:
         self.min = min if min is not None else 0.0
         self.max = max if max is not None else 1.0
         self.predicate = predicate
         _check_finite("RNGFloat", self.min, self.max)
         _check_bounds("RNGFloat", self.min, self.max, min is not None, max is not None)
 
-    def generate(self):
+    def generate(self) -> float:
         return RNG.float(self.min, self.max, self.predicate)
 
     @property
-    def python_type(self):
+    def python_type(self) -> type[float]:
         return float
 
 
-class RNGBoolean(RNGType):
+class RNGBoolean(RNGType[bool]):
     """RNG type for generating booleans"""
 
-    def __init__(self, true_probability: float = 0.5):
+    def __init__(self, true_probability: float = 0.5) -> None:
         self.true_probability = true_probability
 
-    def generate(self):
+    def generate(self) -> bool:
         return RNG.boolean(self.true_probability)
 
     @property
-    def python_type(self):
+    def python_type(self) -> type[bool]:
         return bool
 
 
-class RNGChoice(RNGType):
+class RNGChoice(RNGType[T]):
     """RNG type for choosing from a list of options"""
 
-    def __init__(self, choices: list):
+    def __init__(self, choices: list[T]) -> None:
         if not choices:
             raise RNGValueError("Choices list cannot be empty")
         self.choices = choices
 
-    def generate(self):
+    def generate(self) -> T:
         return RNG.choice(self.choices)
 
     @property
-    def python_type(self):
-        return type(self.choices[0]) if self.choices else object
+    def python_type(self) -> type[T]:
+        # object when the list was emptied after construction
+        return type(self.choices[0]) if self.choices else cast("type[T]", object)
 
 
-class RNGEnum(RNGType):
+class RNGEnum(RNGType[E]):
     """
     RNG type for choosing from Python Enum values.
 
@@ -544,10 +579,10 @@ class RNGEnum(RNGType):
 
     def __init__(
         self,
-        enum_class: type[Enum],
-        weights: dict[Enum, float] | None = None,
-        predicate: Callable[[Enum], bool] | None = None,
-    ):
+        enum_class: type[E],
+        weights: dict[E, float] | None = None,
+        predicate: Callable[[E], bool] | None = None,
+    ) -> None:
         """
         Initialize RNGEnum.
 
@@ -592,9 +627,7 @@ class RNGEnum(RNGType):
         if predicate:
             self._filter_by_predicate(predicate)
 
-    def _filter_by_predicate(
-        self, predicate: Callable[[Enum], bool]
-    ) -> tuple[list[Enum], list[float]]:
+    def _filter_by_predicate(self, predicate: Callable[[E], bool]) -> tuple[list[E], list[float]]:
         """
         Return the candidate members the predicate accepts, with their weights.
 
@@ -610,7 +643,7 @@ class RNGEnum(RNGType):
         """
         # Same candidates generate() draws from: the weighted members, else all members
         candidates = self.weights if self.weights else dict.fromkeys(self.enum_class, 1.0)
-        members: list[Enum] = []
+        members: list[E] = []
         weights: list[float] = []
         for member, weight in candidates.items():
             if predicate(member):
@@ -625,7 +658,7 @@ class RNGEnum(RNGType):
             )
         return members, weights
 
-    def generate(self) -> Enum:
+    def generate(self) -> E:
         """
         Generate a random enum value.
 
@@ -637,28 +670,28 @@ class RNGEnum(RNGType):
             if self.predicate:
                 # With predicate: choose among the weighted members it accepts
                 members, weights = self._filter_by_predicate(self.predicate)
-                return random.choices(members, weights=weights, k=1)[0]
+                return RNG._generator.choices(members, weights=weights, k=1)[0]
 
             # Without predicate: direct selection
             members = list(self.weights.keys())
             weights = list(self.weights.values())
-            return random.choices(members, weights=weights, k=1)[0]
+            return RNG._generator.choices(members, weights=weights, k=1)[0]
         else:
             # Uniform selection from all members
             if self.predicate:
                 # With predicate: choose among the members it accepts
-                return random.choice(self._filter_by_predicate(self.predicate)[0])
+                return RNG._generator.choice(self._filter_by_predicate(self.predicate)[0])
 
             # Without predicate: direct selection
-            return random.choice(list(self.enum_class))
+            return RNG._generator.choice(list(self.enum_class))
 
     @property
-    def python_type(self):
+    def python_type(self) -> type[E]:
         """Return the Enum class type"""
         return self.enum_class
 
 
-class SequenceLike(RNGType):
+class SequenceLike(RNGType[T]):
     """
     Abstract base class for sequence-based RNG types.
 
@@ -676,11 +709,11 @@ class SequenceLike(RNGType):
 
     def __init__(
         self,
-        sequence: Sequence,
-        predicate: Callable | None = None,
+        sequence: Sequence[T],
+        predicate: Callable[[T], bool] | None = None,
         *,
         skip_if_empty: str | None = None,
-    ):
+    ) -> None:
         # A config lookup with no entry often yields None rather than an empty list
         if sequence is None:
             raise RNGValueError(f"{type(self).__name__} requires a sequence, got None")
@@ -718,7 +751,7 @@ class SequenceLike(RNGType):
                 "Pass skip_if_empty='<reason>' to skip the strategy's tests instead."
             )
 
-    def _get_auto_sequence(self) -> list:
+    def _get_auto_sequence(self) -> list[T]:
         """Return the ordered list to use for exhaustive (auto) mode.
 
         Subclasses MUST override this method.
@@ -730,7 +763,7 @@ class SequenceLike(RNGType):
         """The skip_if_empty reason when the sequence is empty, otherwise None."""
         return None if self.sequence else self.skip_if_empty
 
-    def generate(self):
+    def generate(self) -> T:
         """Generate a random value from the sequence (normal / finite mode)."""
         if not self.sequence:
             raise RNGValueError(
@@ -739,11 +772,12 @@ class SequenceLike(RNGType):
         return RNG.choice(self.sequence)
 
     @property
-    def python_type(self):
-        return type(self.sequence[0]) if self.sequence else object
+    def python_type(self) -> type[T]:
+        # object for an empty sequence (skip_if_empty), which has no element type
+        return type(self.sequence[0]) if self.sequence else cast("type[T]", object)
 
 
-class RNGSequence(SequenceLike):
+class RNGSequence(SequenceLike[T]):
     """
     RNG type for sequences of values.
 
@@ -754,12 +788,12 @@ class RNGSequence(SequenceLike):
     sequence (each value exactly once, random order).
     """
 
-    def _get_auto_sequence(self) -> list:
+    def _get_auto_sequence(self) -> list[T]:
         """Return a random permutation of the sequence for exhaustive mode."""
-        return random.sample(self.sequence, len(self.sequence))
+        return RNG._generator.sample(self.sequence, len(self.sequence))
 
 
-class Series(SequenceLike):
+class Series(SequenceLike[T]):
     """
     Deterministic ordered sequence type.
 
@@ -770,12 +804,12 @@ class Series(SequenceLike):
     itertools.product order (leftmost arg is the slowest counter).
     """
 
-    def _get_auto_sequence(self) -> list:
+    def _get_auto_sequence(self) -> list[T]:
         """Return sequence in original order for exhaustive mode."""
         return list(self.sequence)
 
 
-class RNGString(RNGType):
+class RNGString(RNGType[str]):
     """RNG type for generating strings"""
 
     def __init__(
@@ -784,7 +818,7 @@ class RNGString(RNGType):
         min_length: int = 1,
         max_length: int = 20,
         charset: str = "abcdefghijklmnopqrstuvwxyz",
-    ):
+    ) -> None:
         # Fail when the strategy is defined, not only for the seeds that hit the bad case
         error = RNG._string_args_error(length, min_length, max_length, charset)
         if error:
@@ -795,119 +829,49 @@ class RNGString(RNGType):
         self.max_length = max_length
         self.charset = charset
 
-    def generate(self):
+    def generate(self) -> str:
         return RNG.string(self.length, self.min_length, self.max_length, self.charset)
 
     @property
-    def python_type(self):
+    def python_type(self) -> type[str]:
         return str
 
 
-class RNGWeightedInteger(RNGType):
+class RNGWeightedInteger(RNGType[int]):
     """RNG type for generating weighted integers from multiple ranges"""
 
-    def __init__(self, ranges: dict[tuple[int, int], float], predicate: Callable | None = None):
+    def __init__(
+        self, ranges: dict[tuple[int, int], float], predicate: Callable[[int], bool] | None = None
+    ) -> None:
         _check_weights("RNGWeightedInteger", ranges)
         _check_ranges("RNGWeightedInteger", ranges)
         self.ranges = ranges
         self.predicate = predicate
 
-    def generate(self):
+    def generate(self) -> int:
         return RNG.winteger(self.ranges, self.predicate)
 
     @property
-    def python_type(self):
+    def python_type(self) -> type[int]:
         return int
 
 
-class RNGWeightedFloat(RNGType):
+class RNGWeightedFloat(RNGType[float]):
     """RNG type for generating weighted floats from multiple ranges"""
 
-    def __init__(self, ranges: dict[tuple[float, float], float], predicate: Callable | None = None):
+    def __init__(
+        self,
+        ranges: dict[tuple[float, float], float],
+        predicate: Callable[[float], bool] | None = None,
+    ) -> None:
         _check_weights("RNGWeightedFloat", ranges)
         _check_ranges("RNGWeightedFloat", ranges, finite=True)
         self.ranges = ranges
         self.predicate = predicate
 
-    def generate(self):
+    def generate(self) -> float:
         return RNG.wfloat(self.ranges, self.predicate)
 
     @property
-    def python_type(self):
+    def python_type(self) -> type[float]:
         return float
-
-
-# ====
-# Example Usage
-# ====
-
-if __name__ == "__main__":
-    from enum import Enum
-
-    # Define example enums
-    class Status(Enum):
-        PENDING = "pending"
-        SUCCESS = "success"
-        FAILED = "failed"
-        ERROR = "error"
-
-    class Priority(Enum):
-        LOW = 1
-        MEDIUM = 2
-        HIGH = 3
-        CRITICAL = 4
-
-    # Set seed for reproducibility
-    RNG.seed(42)
-
-    print("=== Basic Generators ===")
-    print(f"Integer (1-100): {RNG.integer(1, 100)}")
-    print(f"Even integer (1-100): {RNG.integer(1, 100, predicate=lambda x: x % 2 == 0)}")
-    print(f"Float (0-10): {RNG.float(0.0, 10.0)}")
-    print(f"Boolean: {RNG.boolean()}")
-    print(f"Choice: {RNG.choice(['apple', 'banana', 'cherry'])}")
-    print(f"String (length 10): {RNG.string(length=10)}")
-
-    print("\n=== Weighted Generators ===")
-    print(
-        f"Weighted integer (80% 0-20, 20% 21-100): {RNG.winteger({(0, 20): 0.8, (21, 100): 0.2})}"
-    )
-    print(f"Weighted float (70% 0-1, 30% 1-10): {RNG.wfloat({(0.0, 1.0): 0.7, (1.0, 10.0): 0.3})}")
-
-    print("\n=== RNG Type Classes ===")
-    int_type = RNGInteger(min=1, max=100)
-    print(f"RNGInteger: {int_type.generate()}, type: {int_type.python_type}")
-
-    weighted_type = RNGWeightedInteger(ranges={(0, 20): 0.8, (21, 100): 0.2})
-    print(f"RNGWeightedInteger: {weighted_type.generate()}, type: {weighted_type.python_type}")
-
-    choice_type = RNGChoice(choices=["fast", "slow", "medium"])
-    print(f"RNGChoice: {choice_type.generate()}, type: {choice_type.python_type}")
-
-    print("\n=== RNGEnum Examples ===")
-    # Simple enum selection
-    enum_type = RNGEnum(Status)
-    print(f"RNGEnum (uniform): {enum_type.generate()}")
-
-    # Weighted enum selection
-    weighted_enum = RNGEnum(
-        Status, weights={Status.SUCCESS: 0.7, Status.PENDING: 0.2, Status.FAILED: 0.1}
-    )
-    print(f"RNGEnum (weighted): {weighted_enum.generate()}")
-
-    # Enum with predicate
-    filtered_enum = RNGEnum(Status, predicate=lambda s: s != Status.ERROR)
-    print(f"RNGEnum (filtered): {filtered_enum.generate()}")
-
-    # Weighted with predicate
-    priority_enum = RNGEnum(
-        Priority,
-        weights={Priority.HIGH: 0.6, Priority.MEDIUM: 0.3, Priority.LOW: 0.1},
-        predicate=lambda p: p != Priority.CRITICAL,
-    )
-    print(f"RNGEnum (weighted + filtered): {priority_enum.generate()}")
-
-    # Generate multiple samples
-    print("\nMultiple samples:")
-    for i in range(5):
-        print(f"  Sample {i+1}: {weighted_enum.generate()}")

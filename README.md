@@ -21,26 +21,44 @@
 - **Reproducibility**: Deterministic generation via seed control for debugging failures.
 - **CLI Control**: Filter strategies, change generation modes, or increase sample sizes directly from the command line.
 - **Per-Strategy Sample Count**: Let a strategy declare its own vector count as a soft default that an integer `--nsamples` can still override.
+- **Folder-Scoped Names**: Strategy names are looked up like fixtures, nearest folder first, and strategy files are imported only for the folders being tested.
+- **Typed**: The package ships type hints (`py.typed`), and the decorators keep the decorated function's type.
+- **Agent Skill**: `pytest-strategies skill install` gives Claude Code, Codex and other coding agents a guide to writing strategies.
 
 ## 📦 Installation
 
-`pytest-strategies` needs Python 3.11 or later and pytest 8.4.2 or later (Python 3.10 is not supported from 2.0.0 on). It is not published on PyPI yet. Install a release from GitHub:
+`pytest-strategies` needs Python 3.11 or later and pytest 8.4.2 or later. It is not published on PyPI yet. Install a release from GitHub:
 
 ```bash
-pip install "pytest-strategies @ git+https://github.com/guillegil/pytest-strategies.git@v2.0.0"
+pip install "pytest-strategies @ git+https://github.com/guillegil/pytest-strategies.git@v3.0.0"
 ```
 
 or from a local clone with `pip install -e .`.
+
+Upgrading from 2.x? The [CHANGELOG](CHANGELOG.md) lists what changed in 3.0.0 and what to do about it.
+
+### Agent skill
+
+The package ships a skill that teaches coding agents (Claude Code, Codex and others that read `SKILL.md` files) how to write strategies and tests with this plugin. Install it into your project:
+
+```bash
+pytest-strategies skill install            # .claude/skills/ and .agents/skills/
+pytest-strategies skill install --claude   # only .claude/skills/
+pytest-strategies skill install --agents   # only .agents/skills/ (--generic works too)
+pytest-strategies skill install --global   # in your home folder instead
+```
+
+`python -m pytest_strategy skill install` does the same. A global Claude install honors `CLAUDE_CONFIG_DIR`. Run the command again after upgrading the package to update the skill.
 
 ## ⚡ Quick Start
 
 Define a strategy and apply it to your test:
 
 ```python
-from pytest_strategy import Strategy, Parameter, TestArg, RNGInteger, RNGChoice
+from pytest_strategy import Parameter, RNGChoice, RNGInteger, TestArg, register, strategy
 
 # 1. Register a strategy
-@Strategy.register("user_age_strategy")
+@register("user_age_strategy")
 def create_user_strategy(nsamples: int) -> Parameter:
     return Parameter(
         # Randomly generate ages between 0 and 100
@@ -58,7 +76,7 @@ def create_user_strategy(nsamples: int) -> Parameter:
     )
 
 # 2. Use the strategy in your test
-@Strategy.strategy("user_age_strategy")
+@strategy("user_age_strategy")
 def test_user_validation(age, user_type):
     assert 0 <= age <= 100
     assert user_type in ["admin", "user", "guest"]
@@ -69,7 +87,9 @@ Run it:
 pytest test_users.py
 ```
 
-Strategies can be registered in the test module that uses them, as here, or in separate strategy files that the plugin imports for you (see [Strategy Files](#10-strategy-files)).
+Strategies can be registered in the test module that uses them, as here, or in separate strategy files that the plugin imports for you (see [Strategy Files and Scoped Names](#10-strategy-files-and-scoped-names)). A test can also take the factory itself, `@strategy(create_user_strategy)`, which needs no name lookup.
+
+`register` and `strategy` are also available as `Strategy.register` and `Strategy.strategy`, the 2.x spelling, which keeps working.
 
 ## 📖 Core Concepts
 
@@ -77,7 +97,7 @@ Strategies can be registered in the test module that uses them, as here, or in s
 A **Strategy** is a factory function that returns a `Parameter` object. The `Parameter` defines the shape of your test data using `TestArg` definitions.
 
 ```python
-@Strategy.register("math_ops")
+@register("math_ops")
 def math_strategy(nsamples: int):
     return Parameter(
         TestArg("x", rng_type=RNGInteger(0, 100)),
@@ -91,9 +111,11 @@ def math_strategy(nsamples: int):
 
 The factory is called once for each test that uses the strategy, when pytest collects that test. It receives the run's sample count as `nsamples`: an integer (the `--nsamples` value, or 10 when the option is not given), or the string `"auto"` under `--nsamples=auto`. The factory may take it as a keyword or positional parameter, or take no parameters at all; the plugin reads the signature to decide how to call it. A factory that returns a `Parameter` does not need to use `nsamples`, because the plugin generates the vectors itself.
 
-Strategy names share one registry. If a different function registers a name that is already taken, the plugin emits a `PytestStrategiesWarning` naming both functions, and the last registration wins. Running the same function's registration again (for example, the same file executed twice) is silent. Decorated factories count as the function they decorate. Factories built by one shared function or class (closures, `functools.partial` objects, instances) count as that function or class, so a clash between two of them is not reported.
+A factory should return a `Parameter`. Returning an `(argnames, samples)` tuple, the 1.x form, still works but is deprecated: it emits a `DeprecationWarning` that points at the factory, and it will be removed in 4.0.
 
-`PytestStrategiesWarning` is a `UserWarning` subclass that you can import from `pytest_strategy.strategy`. To turn it into an error, add `error::pytest_strategy.strategy.PytestStrategiesWarning` to your `filterwarnings` setting. A name registered twice in [strategy files](#10-strategy-files) then stops the run when it starts, with a usage error naming the file.
+Strategy names are scoped by folder, like fixtures in `conftest.py` files (see [Strategy Files and Scoped Names](#10-strategy-files-and-scoped-names)). A name registered twice in the same folder is an error.
+
+`PytestStrategiesWarning` is a `UserWarning` subclass that you can import from `pytest_strategy`. The plugin emits it for problems that do not stop a run, such as a `Series` combination skipped because the constraints reject it. To turn it into an error, add `error::pytest_strategy.PytestStrategiesWarning` to your `filterwarnings` setting.
 
 ### 2. RNG Types
 `pytest-strategies` provides rich, type-safe generators:
@@ -120,7 +142,7 @@ RNG types check their arguments when they are constructed. A misconfigured strat
 - A `set` or `frozenset` passed to `Series` or `RNGSequence`. Their iteration order is not reproducible, so pass `sorted(...)` or a list instead.
 - An empty `Series` or `RNGSequence`, or one whose predicate rejects every value, unless it has `skip_if_empty` (see [Skipping when a sequence is empty](#skipping-when-a-sequence-is-empty)).
 
-`Parameter` raises `ValueError` when `nsamples` is not `None`, `"auto"` or an integer >= 0, when `max_retries` is not an integer >= 1, or when `per_sequence_samples` is not a bool.
+`Parameter` raises `ValueError` when `nsamples` is not `None`, `"auto"` or an integer >= 0, when `max_retries` is not an integer >= 1, when `max_exhaustive` is not `None` or an integer >= 1, when `per_sequence_samples` is not a bool, or when two of its arguments have the same name.
 
 ### 3. Enums & Weighted Generation
 The `RNGEnum` class supports standard Python Enums, including weighted selection and predicates.
@@ -161,7 +183,7 @@ Parameter(
     ]
 )
 ```
-A random vector that fails a constraint is drawn again, up to `max_retries` times (a `Parameter` argument, default 100). If no valid vector turns up, collecting the test fails with "Could not generate valid vector".
+A random vector that fails a constraint is drawn again, up to `max_retries` times (a `Parameter` argument, default 100). If no valid vector turns up, collecting the test fails with "Could not generate valid vector", and the message says how many draws each constraint rejected, naming the constraint functions (a lambda is named by its position), so you can tell which one is too strict.
 
 ### 5. Sequence Testing & Exhaustive Generation (New in v2.0.0)
 
@@ -178,7 +200,7 @@ There are two sequence types. Both walk a fixed set of values, but they differ i
 ```python
 from pytest_strategy import Series
 
-@Strategy.register("matrix_test")
+@register("matrix_test")
 def matrix_strategy(nsamples):
     return Parameter(
         TestArg("x", rng_type=Series([1, 2, 3])),
@@ -199,7 +221,7 @@ Under `--nsamples=auto`, this yields a permutation of `[1, 2, 3]` (each value ex
 If you mix a sequence type with random types (e.g., `RNGInteger`), the random values are regenerated for *each* sequence combination.
 
 ```python
-@Strategy.register("mixed_test")
+@register("mixed_test")
 def mixed_strategy(nsamples):
     return Parameter(
         # Deterministic: iterate through all user roles in order
@@ -225,6 +247,7 @@ TestArg("evens", rng_type=Series(range(10), predicate=lambda x: x % 2 == 0))
 - Directed vectors are placed before the combinations in the default `all` mode. In `mixed` mode they are included when `always_include_directed` is set (the default). `random_only` gives only the combinations.
 - `--vector-mode=test`, `--vector-mode=directed_only`, `--vector-name` and `--vector-index` take precedence: they select only those vectors, and no combinations are generated.
 - A strategy with no `Series` or `RNGSequence` argument has nothing to enumerate. It falls back to its own `nsamples` (see [Per-Strategy Sample Count](#8-per-strategy-sample-count-new-in-v200)), or 10 random samples.
+- The number of combinations is checked before any is generated. More than 100,000 rows fails collection with a message that shows the product (`a=1,000 x b=1,000`). Raise the limit for one strategy with `Parameter(max_exhaustive=...)`, or for the project with the `strategies_max_exhaustive` ini option. The same limit applies to `per_sequence_samples=True`, where each combination counts `K` rows.
 
 **Constraints on `Series` in finite mode:**
 With a finite `--nsamples`, a `Series` combination that the constraints reject is skipped, and the cycle continues with the next combination. If the strategy also has random arguments, they are redrawn up to `max_retries` times before the combination is skipped. Each such skip emits a `PytestStrategiesWarning`: raise `max_retries`, or relax the constraint if that combination should be tested. If a whole cycle of combinations yields no valid vector, collecting the test fails.
@@ -233,7 +256,7 @@ With a finite `--nsamples`, a `Series` combination that the constraints reject i
 By default a finite `--nsamples=K` gives `K` rows in total, shared among the sequence values. Pass `per_sequence_samples=True` to get `K` random rows for *each* combination of the `Series`/`RNGSequence` arguments instead:
 
 ```python
-@Strategy.register("per_device")
+@register("per_device")
 def per_device(nsamples):
     return Parameter(
         TestArg("device", rng_type=Series(["devA", "devB"])),
@@ -247,13 +270,13 @@ With the default of 10 samples this runs 20 tests: 10 for `devA`, then 10 for `d
 When the values come from configuration, there may be none: a testbench without any Esm peripheral, for example. An empty `Series` or `RNGSequence` normally fails collection. Give it a `skip_if_empty` reason instead (a keyword argument), and the strategy contributes a single skipped row with that reason, so each test that uses it is skipped:
 
 ```python
-from pytest_strategy import Parameter, RNGInteger, RNGSequence, Strategy, TestArg
+from pytest_strategy import Parameter, RNGInteger, RNGSequence, TestArg, register, strategy
 
 # From your testbench configuration, e.g.
 # [p.channel for p in config.peripherals.values() if p.type == "Esm"]
 ESM_CHANNELS = []
 
-@Strategy.register("esm_rw")
+@register("esm_rw")
 def esm_rw(nsamples):
     return Parameter(
         TestArg("channel", rng_type=RNGSequence(ESM_CHANNELS, skip_if_empty="no Esm peripheral in this testbench config")),
@@ -261,7 +284,7 @@ def esm_rw(nsamples):
         per_sequence_samples=True,
     )
 
-@Strategy.strategy("esm_rw")
+@strategy("esm_rw")
 def test_rw(channel, wdata):
     ...
 ```
@@ -272,21 +295,23 @@ With channels, the option changes nothing. Without any, `pytest -rs` shows `SKIP
 You can export all registered strategies and their metadata (parameters, RNG types, constraints) to JSON for analysis or integration with other tools.
 
 ```python
-from pytest_strategy import Strategy
+from pytest_strategy import export_strategies
 
 # Export as JSON string
-json_data = Strategy.export_strategies(format="json")
+json_data = export_strategies(format="json")
 print(json_data)
 ```
+
+In a pytest session every strategy file is imported first. A name registered in several folders is exported once, for the registration made last.
 
 ### 7. Test Values (New in v2.0.0)
 
 You can define test-specific vectors that only run when using `--vector-mode=test`. This is useful for defining specific test scenarios that you want to verify independently from random or directed vectors.
 
 ```python
-from pytest_strategy import Strategy, Parameter, TestArg, RNGInteger
+from pytest_strategy import Parameter, RNGInteger, TestArg, register
 
-@Strategy.register("api_test")
+@register("api_test")
 def api_test_strategy(nsamples):
     return Parameter(
         TestArg("status_code", rng_type=RNGInteger(200, 500)),
@@ -307,7 +332,7 @@ A directed or test vector holds one value per argument, in argument order. It ca
 By default the number of generated vectors is controlled globally by `--nsamples` (10 when unset). A strategy can declare its own count by passing `nsamples` to its `Parameter`:
 
 ```python
-@Strategy.register("edge_heavy")
+@register("edge_heavy")
 def edge_heavy_strategy(nsamples):
     return Parameter(
         TestArg("x", rng_type=RNGInteger(0, 100)),
@@ -336,7 +361,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from pytest_strategy import Strategy, Parameter, TestArg, RNGInteger
+from pytest_strategy import Parameter, RNGInteger, TestArg, register, strategy
 
 
 @dataclass
@@ -345,7 +370,7 @@ class Point:
     y: int
 
 
-@Strategy.register("points")
+@register("points")
 def points_strategy(nsamples):
     return Parameter(
         TestArg("x", rng_type=RNGInteger(0, 10)),
@@ -359,7 +384,7 @@ def scale():
 
 
 class TestPoints:
-    @Strategy.strategy("points")
+    @strategy("points")
     def test_scaled(self, point: Point, scale):
         assert 0 <= point.x * scale <= 20
 ```
@@ -371,19 +396,36 @@ Dataclass mode is used when all of these are true:
 
 Fields with `init=False` are not counted, and `kw_only` fields work. The other parameters (`self`, `cls`, fixtures) are left alone, in any position. String annotations (`from __future__ import annotations` or quoted names) work too, as long as the dataclass is defined at module level. If a single parameter has a dataclass annotation but its fields do not match, collection fails with a message that lists the missing and extra fields.
 
-### 10. Strategy Files
+### 10. Strategy Files and Scoped Names
 
-Strategies do not have to be registered in the test module. The plugin imports strategy files when the session starts, before any test module is collected. A file is loaded when both of these are true:
-- its name is `strategies.py`, `strategy.py`, `*_strategies.py` or `*_strategy.py`, and
-- it contains the text `@Strategy.register`.
+Strategies do not have to be registered in the test module. A **strategy file** is a file named `strategies.py`, `strategy.py`, `*_strategies.py` or `*_strategy.py` that registers a strategy with a decorator: `@register("name")`, `@Strategy.register(...)`, or an alias such as `@S.register("name")`. The file's text is checked before it is imported, so write the name as a string literal in the `@register(...)` forms. A plain call such as `register("x")(fn)`, or a name held in a variable (`@register(NAME)`), is not recognized, and a file that only registers that way is not imported.
 
-The plugin searches the `testpaths` directories from your pytest configuration, expanding glob patterns such as `pkgs/*/tests`. When `testpaths` is not set, it searches the rootdir. It also searches the directory of each path given on the command line. Below these directories it skips what pytest's collection skips: hidden directories (names starting with `.`), `__pycache__`, directories matching `norecursedirs` (by default these include `build`, `dist`, `venv` and `node_modules`; a pattern with a `/`, such as `tests/data`, is matched against the path), and virtual environments (a directory containing `pyvenv.cfg`, or a conda environment containing `conda-meta/history`). Like pytest, it follows symlinked directories. A directory named on the command line is always searched. Files are loaded one search directory at a time, the `testpaths` entries in the order they are listed (or the rootdir) and then the command-line directories, in sorted path order within each. So the same file wins a duplicate strategy name on every machine.
+**Loading.** Before pytest imports a test module, the plugin imports the strategy files in the module's folder and in each folder above it, up to the rootdir (or the `testpaths` entry or command-line directory that contains the module). Each file is imported once per session, closest folder first and in name order within a folder. Strategy files in folders that no collected test module is in or below are not imported, unless a test asks for a name that is not registered on its path (see below) or you run `pytest --list-strategies`.
 
-Each strategy file is imported as a standalone module, not as part of a package. Relative imports do not work in it, and a sibling module can only be imported if its directory is on `sys.path`.
+**Names are scoped by folder.** A strategy name is looked up like a fixture in a `conftest.py` file: in the test's folder first, then in each folder above it, and the nearest registration wins. A strategy registered in a test module or a `conftest.py` belongs to that file's folder. So with this layout, the tests under `tests/esm/` get the `default` strategy of `tests/esm/strategies.py`, and every other test gets the one of `tests/strategies.py`:
 
-A test module or `conftest.py` can import a strategy file, for example to use an `Enum` it defines (`from my_strategies import Mode`). The import gets the module the plugin loaded, so the file is not executed a second time, and the tests compare against the same classes the strategy uses. A strategy file that a `conftest.py` imports while pytest starts (the rootdir's `conftest.py`, for example) is already loaded when the session starts, and the plugin uses that module instead of loading the file again. Values that such a file draws at import time are then drawn before the seed is applied, so they are not reproduced by `--rng-seed`: draw them in the factory instead.
+```text
+tests/
+├── strategies.py          # @register("default")
+├── test_dma.py            # @strategy("default") -> tests/strategies.py
+└── esm/
+    ├── strategies.py      # @register("default")
+    └── test_esm.py        # @strategy("default") -> tests/esm/strategies.py
+```
 
-A strategy file that fails to import does not stop the run. The plugin prints `pytest-strategies: Warning - Failed to load <path>: <error>` when the session starts. A file that calls `pytest.skip(..., allow_module_level=True)` or `pytest.importorskip()` at module level is skipped, and that is reported with `-v`. Any "Strategy 'name' not found" error lists the files that failed to load or were skipped. It also lists files with a strategy file name that mention `register` but were not imported because they lack the literal `@Strategy.register` (an alias such as `@S.register`, or a plain `Strategy.register("x")(fn)` call). `pytest -vv` prints each loaded file, and `pytest --list-strategies` lists the registered strategy names and exits.
+When no folder on the test's path registers the name, the plugin imports every strategy file it can find and uses a registration from another place if there is exactly one: a sibling folder, or a module installed outside the rootdir (a registration outside the rootdir wins over the ones inside it). This keeps layouts like a shared `tests/strategies/` folder working. If several folders register the name, collecting the test fails with an error that lists them; register the strategy in a folder above the test, or pass the factory itself.
+
+**Passing the factory.** `@strategy(my_factory)` uses that function, with no name lookup, so it cannot pick up another folder's strategy. The factory does not need to be registered. When it is, the test gets the same vectors and IDs as it would with the name.
+
+**A name registered twice in one folder** (in one file or in two) is an error: the plugin emits a `PytestStrategiesWarning` naming both functions, and pytest stops with a usage error after collection. Running the same registration again (the same file executed twice) is silent. Decorated factories count as the function they decorate. Factories built by one shared function or class (closures, `functools.partial` objects, instances) count as that function or class, so registering two of them under one name is not reported.
+
+**Where files are searched.** The search for all strategy files covers the `testpaths` directories from your pytest configuration, expanding glob patterns such as `pkgs/*/tests`, or the rootdir when `testpaths` is not set, and the directory of each path given on the command line. Below these directories it skips what pytest's collection skips: hidden directories (names starting with `.`), `__pycache__`, directories matching `norecursedirs` (by default these include `build`, `dist`, `venv` and `node_modules`; a pattern with a `/`, such as `tests/data`, is matched against the path), and virtual environments (a directory containing `pyvenv.cfg`, or a conda environment containing `conda-meta/history`). Like pytest, it follows symlinked directories.
+
+**Imports.** A strategy file is imported the way pytest imports a test module in its folder, following `--import-mode`. In the default `prepend` mode its folder (or the root of its package) is put on `sys.path`, so it can import modules next to it. A test module or `conftest.py` that imports a strategy file (`from strategies import Mode`, for example to use an `Enum` it defines) gets the module the plugin loaded, so the file is not executed a second time and the tests compare against the same classes the strategy uses. When two folders without `__init__.py` both have a `strategies.py`, the second one is imported under a unique module name instead. A plain `from strategies import Mode` in that second folder still returns the first folder's module (Python caches modules by name), so its tests cannot import from it: give such files distinct names (`esm_strategies.py`), or add `__init__.py` files and use `from .strategies import Mode`.
+
+Values that a strategy file draws when it is imported come from a random stream of their own, derived from the seed and the file's path, so `--rng-seed` reproduces them whatever else was collected first.
+
+**Failures.** A strategy file that fails to import does not stop the run. The plugin prints `pytest-strategies: Warning - Failed to load <path>: <error>`. A file that calls `pytest.skip(..., allow_module_level=True)` or `pytest.importorskip()` at module level is skipped, and that is reported with `-v`. A "Strategy 'name' not found" error names the test, suggests close names, and lists the files that failed to load or were skipped, and the files with a strategy file name that mention `register` but were not imported because they have no registration decorator. `pytest -vv` prints each loaded file, and `pytest --list-strategies` lists the registered strategy names (with the file of each registration when a name is registered in several folders) and exits.
 
 ### 11. Configuration-Dependent Strategies (New in v2.0.0)
 
@@ -407,9 +449,9 @@ def pytest_strategies_context(config):
 
 ```python
 # esm_strategies.py
-from pytest_strategy import Parameter, RNGInteger, RNGSequence, Strategy, TestArg
+from pytest_strategy import Parameter, RNGInteger, RNGSequence, TestArg, register
 
-@Strategy.register("esm_rw")
+@register("esm_rw")
 def esm_rw(nsamples, ctx):
     channels = [p.channel for p in ctx.peripherals.values() if p.type == "Esm"]
     return Parameter(
@@ -419,7 +461,7 @@ def esm_rw(nsamples, ctx):
     )
 ```
 
-Tests use the strategy as usual, with `@Strategy.strategy("esm_rw")`. With two Esm channels in the configuration they run 10 writes per channel; with none they are skipped with the reason.
+Tests use the strategy as usual, with `@strategy("esm_rw")`. With two Esm channels in the configuration they run 10 writes per channel; with none they are skipped with the reason.
 
 - The hook is called at most once per session, the first time a factory with a `ctx` parameter runs, and its result is reused for the others. Factories without `ctx` are called as before and never trigger it.
 - When no implementation returns a value, a `ctx` parameter keeps its default (or a value bound with `functools.partial`), and is `None` without one.
@@ -427,7 +469,7 @@ Tests use the strategy as usual, with `@Strategy.strategy("esm_rw")`. With two E
 - Implement it in the rootdir's `conftest.py` or in a plugin. The result is shared by the whole session, and factories run while test modules are collected: a `conftest.py` further down is only loaded when pytest reaches its directory, so the hook there may be called too late, and once loaded its result also applies to modules outside that directory.
 - Random draws in the hook come from a stream of their own, derived from the seed, so they are reproduced by `--rng-seed` and do not change any test's vectors.
 - Under pytest-xdist every worker calls the hook, so it must return the same configuration in each, or the workers collect different tests.
-- `Strategy.export_strategies()` passes the same `ctx`.
+- `export_strategies()` passes the same `ctx`.
 
 Your testbench fixture does not change: the hook only has to describe the configuration the vectors depend on.
 
@@ -440,7 +482,7 @@ Strategies work seamlessly with standard pytest fixtures. You don't need any spe
 def database():
     return MockDB()
 
-@Strategy.strategy("user_strategy")
+@strategy("user_strategy")
 def test_db_insert(username, age, database): # 'database' is a fixture
     # 'username' and 'age' come from the strategy
     user = database.create_user(username, age)
@@ -460,6 +502,8 @@ Control test generation directly from the command line:
 | `--rng-seed`        | Set seed for reproducibility                                            | `pytest --rng-seed=42`                      |
 | `--list-strategies` | List the registered strategy names and exit                             | `pytest --list-strategies`                  |
 
+The ini option `strategies_max_exhaustive` (default `100000`) sets the most rows `--nsamples=auto` or `per_sequence_samples=True` may generate for one strategy.
+
 `--vector-name` and `--vector-index` take precedence over `--vector-mode` and `--nsamples`. A strategy without the requested directed vector yields no vectors, so the tests that use it are skipped ("got empty parameter set"). If no strategy in the run has the vector, for example because of a typo or an index that is out of range everywhere, pytest stops with a usage error that lists each strategy's directed vectors. It does not skip every test.
 
 ## 🔄 Reproducibility
@@ -468,25 +512,42 @@ The RNG seed of each run is printed in the pytest report header:
 ```text
 pytest-strategies: RNG seed = 1763926297314361000
 ```
-pytest does not show the header with `-q` or `--no-header`, so drop those flags (or pass your own `--rng-seed`) when you need the seed, e.g. in CI.
-
-If a test fails, pass this seed to generate the same test vectors again:
-```bash
-pytest --rng-seed=1763926297314361000
+When tests fail, the plugin also prints how to rerun them with the same vectors, after the failure tracebacks and before the short test summary, even with `-q`:
+```text
+pytest-strategies: reproduce with --rng-seed=1763926297314361000
 ```
+
+With `-v`, a "Strategy Summary" section lists each strategy with the number of tests that use it, their directed, random and test rows, and where the sample count came from (`--nsamples`, `Parameter(nsamples=)` or the default).
 
 Each strategy and test pair draws from its own random stream. The stream is derived from the seed, the strategy name, the test's file path relative to the rootdir, and the test's qualified name. As a result:
 - A test gets the same vectors and node IDs whether you run the whole suite, one file or one test, in any collection order and with any `--import-mode`.
 - Two tests that use the same strategy get different random vectors.
-- Values that a strategy factory draws itself are reproduced too.
+- Values that a strategy factory draws itself are reproduced too. A factory that needs other random operations (`shuffle`, `gauss`) can draw from `RNG.generator()`, the generator the RNG types use.
 
-The seed reproduces the generated test parameters, not random draws made inside test bodies. A test body that draws from `RNG` or `random` gets whatever state the global generator is in when the test runs. That state depends on the tests collected and run before it, so it changes when you rerun a single test or run under pytest-xdist. Seed such draws in the test itself (see [docs/dev.md](docs/dev.md#reproducibility)).
+The plugin draws from a `random.Random` instance of its own and never seeds Python's global `random` module. So your own use of `random` does not change the generated vectors, and `--rng-seed` does not reproduce what `random.random()` returns in your code, including in a factory: draw from `RNG.generator()` there. For the same seed, 3.0.0 generates the same values as 2.0.0 for strategies that draw through the RNG types, except values a strategy file draws when it is imported (3.0.0 gives each file a stream of its own); values differ from those of 1.x, so a seed recorded with 1.x does not reproduce that run.
 
-Values drawn at import time are reproduced when they are drawn in a strategy file. A test module is different: without `--rng-seed`, a draw at module level in a test module (for example `BASE = RNG.integer(0, 1000)` next to a strategy registered there) comes from the unseeded generator when no strategy file exists, so the printed seed does not reproduce it. Move such draws into the factory or a strategy file, or pass `--rng-seed`.
+The seed reproduces the generated test parameters, not random draws made inside test bodies. A test body that draws from `RNG` gets whatever state the generator is in when the test runs, which depends on the tests collected and run before it. To make plain `random` draws in test bodies follow the seed, seed it for each test in your `conftest.py`:
 
-For the same seed, the generated values differ from those of 1.x (1.0.0 and the 1.1.0 pre-releases), so a seed recorded with an older version does not reproduce that run. Also keep the same rootdir, because the test's path relative to the rootdir is part of the stream. pytest uses the directory of your ini file (such as `pytest.ini`) as the rootdir when there is one.
+```python
+# conftest.py
+import random
 
-**pytest-xdist:** runs with `-n` work with or without `--rng-seed`. The controller sends its seed to the workers, so they all generate the same tests. The exception is the module-level draw in a test module described above: without `--rng-seed` it differs between workers, and xdist stops with "Different tests were collected".
+import pytest
+
+from pytest_strategy import RNG
+
+
+@pytest.fixture(autouse=True)
+def _seed_random(request):
+    # Each test's random draws follow --rng-seed, whatever ran before it
+    random.seed(f"{RNG.get_seed()}:{request.node.nodeid}")
+```
+
+Values that a strategy file draws when it is imported are reproduced by the seed (see [Strategy Files and Scoped Names](#10-strategy-files-and-scoped-names)). A draw at module level in a test module (for example `BASE = RNG.integer(0, 1000)`) follows the seed too, but it depends on the test modules collected before it, so running one file alone gives it another value. Move such draws into the factory or a strategy file.
+
+Keep the same rootdir, because the test's path relative to the rootdir is part of the stream. pytest uses the directory of your ini file (such as `pytest.ini`) as the rootdir when there is one.
+
+**pytest-xdist:** runs with `-n` work with or without `--rng-seed`. The controller sends its seed to the workers, so they all generate the same tests.
 
 ## 📝 License
 

@@ -80,7 +80,7 @@ class TestFloatRanges:
     )
     def test_range_wider_than_the_largest_float_draws_finite_values(self, bounds):
         low, high = bounds
-        random.seed(1)
+        RNG.seed(1)
         values = [RNGFloat(low, high).generate() for _ in range(2000)]
         values += [RNGWeightedFloat({bounds: 1.0}).generate() for _ in range(2000)]
 
@@ -88,9 +88,9 @@ class TestFloatRanges:
 
     def test_normal_ranges_draw_what_random_uniform_draws(self):
         """The same seed gives the same values as before the fix."""
-        random.seed(7)
-        expected = [random.uniform(-3.5, 7.25) for _ in range(500)]
-        random.seed(7)
+        stdlib = random.Random(7)
+        expected = [stdlib.uniform(-3.5, 7.25) for _ in range(500)]
+        RNG.seed(7)
 
         assert [RNG.float(-3.5, 7.25) for _ in range(500)] == expected
 

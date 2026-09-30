@@ -1,8 +1,9 @@
-"""Resolve a registered strategy into a parametrized test function.
+"""Resolve a strategy into the parametrization of a test.
 
-This is the orchestration that the ``Strategy.strategy`` decorator delegates to:
-read CLI options, call the factory, generate vectors, and apply
-``pytest.mark.parametrize`` for either dataclass or named-parameter mode.
+This is the orchestration the plugin runs for each test marked with
+``@strategy`` (from ``pytest_generate_tests``): read CLI options, call the
+factory, generate vectors, and build the arguments of ``pytest.mark.parametrize``
+for either dataclass or named-parameter mode.
 """
 
 from __future__ import annotations
@@ -11,16 +12,17 @@ import contextlib
 import inspect
 import os
 import warnings
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import pytest
 
 from ._dataclass import convert_to_dataclass
 from ._ids import generate_dataclass_ids, generate_test_ids, make_unique_ids
 from ._introspection import detect_dataclass_param, lazy_signature, validate_signature
-from ._runtime import runtime
+from ._registry import _describe_factory, display_path, factory_source
+from ._runtime import Resolution, runtime
 from ._warnings import PytestStrategiesWarning
 from .parameters import Parameter
 from .rng import RNG, SequenceLike
@@ -30,6 +32,17 @@ if TYPE_CHECKING:
 
 # pytest.param() returns a ParameterSet (a NamedTuple), which pytest does not export
 _ParameterSet = type(pytest.param())
+
+# Default for the strategies_max_exhaustive ini option
+DEFAULT_MAX_EXHAUSTIVE = 100_000
+
+
+class Parametrization(NamedTuple):
+    """The arguments of ``pytest.mark.parametrize`` for one test and strategy."""
+
+    argnames: str
+    values: list[Any]
+    ids: list[str]
 
 
 def _id_row(sample: Any, single: bool) -> Any:
@@ -48,7 +61,7 @@ def _skipped_param(reason: str, width: int) -> Any:
 
 
 @contextlib.contextmanager
-def _attributed_warnings(name: str, test_fn: Callable) -> Iterator[None]:
+def _attributed_warnings(name: str, test_fn: Callable[..., Any]) -> Iterator[None]:
     """
     Re-emit the PytestStrategiesWarnings raised in the block at the test function,
     prefixed with the strategy and the test.
@@ -106,7 +119,7 @@ def _unique_ids(
     return unique_rows, unique_ids
 
 
-def _test_location(test_fn: Callable, config: pytest.Config | None) -> str:
+def _test_location(test_fn: Callable[..., Any], config: pytest.Config | None) -> str:
     """
     Return the test's file path relative to the rootdir, in posix form.
 
@@ -302,16 +315,102 @@ def call_factory(name: str, factory: Callable[..., Any], nsamples: int | str) ->
         raise _factory_error(name, nsamples, e) from e
 
 
-def resolve_and_parametrize(
+def _max_exhaustive(param: Parameter, config: pytest.Config | None) -> int:
+    """Return the most rows the exhaustive generation of ``param`` may produce."""
+    if param.max_exhaustive is not None:
+        return param.max_exhaustive
+    if config is None:
+        return DEFAULT_MAX_EXHAUSTIVE
+    try:
+        raw = config.getini("strategies_max_exhaustive")
+    except ValueError:
+        # The plugin's ini options are not registered (a config without the plugin)
+        return DEFAULT_MAX_EXHAUSTIVE
+    if not isinstance(raw, (str, int)):
+        # Not a real config (a test's stand-in)
+        return DEFAULT_MAX_EXHAUSTIVE
+    try:
+        limit = int(str(raw).strip())
+    except ValueError:
+        limit = -1
+    if limit < 1:
+        raise pytest.UsageError(f"strategies_max_exhaustive must be an integer >= 1, got {raw!r}")
+    return limit
+
+
+def _check_size(
+    name: str, param: Parameter, rows_per_combination: int, how: str, limit: int
+) -> None:
+    """
+    Fail before generating when the Series/RNGSequence combinations exceed ``limit`` rows.
+
+    Args:
+        name: Strategy name, for the message
+        param: The strategy's Parameter
+        rows_per_combination: Rows generated for each combination
+        how: What asked for every combination, for the message
+        limit: The most rows allowed
+    """
+    sizes = [
+        (arg.name, len(arg.rng_type.sequence))
+        for arg in param.test_args
+        if isinstance(arg.rng_type, SequenceLike)
+    ]
+    rows = rows_per_combination
+    for _, size in sizes:
+        rows *= size
+    if rows <= limit:
+        return
+    product = " x ".join(f"{arg}={size:,}" for arg, size in sizes)
+    if rows_per_combination != 1:
+        product += f" x {rows_per_combination:,} rows each"
+    raise ValueError(
+        f"Strategy '{name}': {how} would generate {rows:,} rows ({product}), more than "
+        f"the limit of {limit:,}. Raise it with Parameter(max_exhaustive=...) or the "
+        "strategies_max_exhaustive ini option, or use fewer values."
+    )
+
+
+def _warn_legacy(name: str, factory: Callable[..., Any]) -> None:
+    """Warn that a factory returned the deprecated (argnames, samples) tuple, at the factory."""
+    # The path as spelled, not normalized: warnings report and filter by it
+    filename, _, line = factory_source(factory)
+    message = (
+        f"Strategy '{name}' returns an (argnames, samples) tuple, which is deprecated and "
+        "will stop working in 4.0; return a Parameter instead "
+        f"(factory: {_describe_factory(factory)})"
+    )
+    if filename is None or line is None:
+        warnings.warn(message, DeprecationWarning, stacklevel=3)
+    else:
+        warnings.warn_explicit(message, DeprecationWarning, filename, line)
+
+
+def build_parametrization(
     name: str,
-    test_fn: Callable,
+    factory: Callable[..., Any],
+    test_fn: Callable[..., Any],
     *,
-    registry: dict[str, Callable[..., Any]],
     config: pytest.Config | None,
     pytest_fixtures: set[str],
     validate: bool = True,
-) -> Callable:
-    """Build and apply the pytest parametrization for a registered strategy."""
+) -> Parametrization:
+    """
+    Call a strategy's factory and build the parametrization of a test.
+
+    Args:
+        name: The strategy's name, used in messages and in the test's random
+            stream key
+        factory: The factory to call
+        test_fn: The test function
+        config: The session's config (CLI options), or None
+        pytest_fixtures: Fixture names the signature check ignores
+        validate: Check that the test takes the strategy's arguments
+
+    Raises:
+        ValueError: With a message naming the strategy when the factory, the
+            generation or the signature check fails
+    """
     # Get CLI options
     cli_nsamples = config.getoption("nsamples") if config else None
     vector_mode = config.getoption("vector_mode") if config else "all"
@@ -335,13 +434,13 @@ def resolve_and_parametrize(
         # below once we have access to param.nsamples.
         factory_nsamples = 10
 
-    factory = registry[name]
-
-    # Refresh the random number generator seed
+    # Restart the RNG generator on this strategy and test's own stream
     RNG.refresh_seed(key=f"{name}:{_test_location(test_fn, config)}::{test_fn.__qualname__}")
 
     # Call the factory function the way its signature accepts nsamples
     result = call_factory(name, factory, factory_nsamples)
+
+    resolution = Resolution(strategy=name, where=_where(factory, config))
 
     # Set when a skip_if_empty sequence has no values: the test then runs as one
     # skipped row with this reason instead of the generated vectors
@@ -359,12 +458,16 @@ def resolve_and_parametrize(
         #   4. fallback → 10
         if cli_nsamples == "auto":
             effective_nsamples: int | str = "auto"
+            source = "--nsamples"
         elif cli_nsamples is not None:
             effective_nsamples = int(cli_nsamples)
+            source = "--nsamples"
         elif param.nsamples is not None:
             effective_nsamples = param.nsamples
+            source = "Parameter(nsamples=)"
         else:
             effective_nsamples = 10
+            source = "default"
 
         # "auto" enumerates the Series/RNGSequence args. A strategy without any has
         # nothing to enumerate, so it falls back to the finite count instead of failing.
@@ -373,7 +476,25 @@ def resolve_and_parametrize(
         if effective_nsamples == "auto" and not any(
             isinstance(arg.rng_type, SequenceLike) for arg in param.test_args
         ):
-            effective_nsamples = param.nsamples if isinstance(param.nsamples, int) else 10
+            if isinstance(param.nsamples, int):
+                effective_nsamples, source = param.nsamples, "Parameter(nsamples=)"
+            else:
+                effective_nsamples, source = 10, "default"
+            source += ", no Series/RNGSequence for auto"
+        resolution.nsamples, resolution.source = effective_nsamples, source
+
+        filtered = vector_name is not None or vector_index is not None
+        if not filtered and vector_mode not in ("test", "directed_only"):
+            if effective_nsamples == "auto":
+                _check_size(name, param, 1, "--nsamples=auto", _max_exhaustive(param, config))
+            elif param.per_sequence_samples and isinstance(effective_nsamples, int):
+                _check_size(
+                    name,
+                    param,
+                    effective_nsamples,
+                    "per_sequence_samples=True",
+                    _max_exhaustive(param, config),
+                )
 
         # Generate samples using Parameter's generate_vectors with CLI options
         try:
@@ -388,11 +509,7 @@ def resolve_and_parametrize(
                         filter_by_name=vector_name,
                         filter_by_index=vector_index,
                     )
-                    if (
-                        vector_name is None
-                        and vector_index is None
-                        and vector_mode not in ("test", "directed_only")
-                    ):
+                    if not filtered and vector_mode not in ("test", "directed_only"):
                         samples.extend(param.generate_exhaustive())
                 else:
                     assert isinstance(effective_nsamples, int)
@@ -406,7 +523,7 @@ def resolve_and_parametrize(
             # If filtering by name (KeyError) or index (IndexError) and the vector
             # doesn't exist, return empty samples
             # This allows CLI filtering to work gracefully across multiple strategies
-            if vector_name is not None or vector_index is not None:
+            if filtered:
                 samples = []
                 # The plugin reports a filter that no strategy in the run matches
                 runtime.record_vector_filter(name, False, list(param.directed_vectors))
@@ -415,11 +532,13 @@ def resolve_and_parametrize(
         except Exception as e:
             raise ValueError(f"Error generating samples for strategy '{name}': {e}") from e
         else:
-            if vector_name is not None or vector_index is not None:
+            if filtered:
                 runtime.record_vector_filter(name, True)
             # The generators return nothing for a skipped Parameter. A vector filter
             # that names none of its vectors keeps the empty set, as for any strategy.
             skip_reason = param.skip_reason
+
+        _count_rows(resolution, param, samples, vector_mode, filtered)
 
         # Get argument names from Parameter
         argnames: Sequence[str] = param.arg_names
@@ -431,16 +550,21 @@ def resolve_and_parametrize(
                 f"Strategy '{name}' must return either a Parameter instance "
                 f"or a tuple (argnames, samples), got {type(result).__name__}"
             )
+        _warn_legacy(name, factory)
 
         argnames, samples = result
 
         # Materialize the samples: a generator would otherwise be consumed by ID
         # generation before pytest.mark.parametrize sees it
         samples = list(samples)
+        resolution.random = len(samples)
+        resolution.nsamples, resolution.source = factory_nsamples, "legacy tuple"
 
         # Convert a string of argnames to a tuple, split on commas as pytest does
         if isinstance(argnames, str):
             argnames = tuple(n.strip() for n in argnames.split(",") if n.strip())
+
+    runtime.record_resolution(resolution)
 
     # Detect dataclass mode. Without signature validation, parameters other than the
     # dataclass one may be fixtures consuming the argnames, so the dataclass
@@ -461,10 +585,7 @@ def resolve_and_parametrize(
                 raise ValueError(
                     f"Error converting samples to dataclass for strategy '{name}': {e}"
                 ) from e
-            return cast(
-                Callable,
-                pytest.mark.parametrize(dc_param, [_skipped_param(skip_reason, 1)])(test_fn),
-            )
+            return Parametrization(dc_param, [_skipped_param(skip_reason, 1)], ["skipped"])
         try:
             # A pytest.param() sample is converted from its values; its marks and id
             # are re-attached to the instance below
@@ -487,8 +608,8 @@ def resolve_and_parametrize(
         ]
         params, ids = _unique_ids(params, ids, config)
 
-        # Apply pytest parametrize to the dataclass parameter chosen by detection
-        return cast(Callable, pytest.mark.parametrize(dc_param, params, ids=ids)(test_fn))
+        # Parametrize the dataclass parameter chosen by detection
+        return Parametrization(dc_param, params, ids)
 
     else:
         # NAMED PARAMETERS MODE: Standard behavior
@@ -519,5 +640,52 @@ def resolve_and_parametrize(
         ids = generate_test_ids(argnames, [_id_row(s, len(argnames) == 1) for s in samples])
         samples, ids = _unique_ids(samples, ids, config)
 
-        # Apply pytest parametrize decorator to the test function
-        return cast(Callable, pytest.mark.parametrize(argstr, samples, ids=ids)(test_fn))
+        return Parametrization(argstr, samples, ids)
+
+
+def _where(factory: Callable[..., Any], config: pytest.Config | None) -> str:
+    """Return the factory's file, relative to the rootdir when inside it, for the summary."""
+    filename = factory_source(factory)[0]
+    if filename is None:
+        return "<unknown>"
+    rootpath = getattr(config, "rootpath", None) if config is not None else None
+    return display_path(filename, rootpath)
+
+
+def _count_rows(
+    resolution: Resolution, param: Parameter, samples: list[Any], mode: str, filtered: bool
+) -> None:
+    """Split a Parameter's generated rows into directed, random and test rows."""
+    total = len(samples)
+    if filtered or mode == "directed_only":
+        resolution.directed = total
+    elif mode == "test":
+        resolution.test = total
+    else:
+        if mode == "all" or (mode == "mixed" and param.always_include_directed):
+            resolution.directed = min(len(param.directed_vectors), total)
+        resolution.random = total - resolution.directed
+
+
+def resolve_and_parametrize(
+    name: str,
+    test_fn: Callable[..., Any],
+    *,
+    registry: Mapping[str, Callable[..., Any]],
+    config: pytest.Config | None,
+    pytest_fixtures: set[str],
+    validate: bool = True,
+) -> Callable[..., Any]:
+    """Build the parametrization for a registered strategy and apply it to ``test_fn``."""
+    parametrization = build_parametrization(
+        name,
+        registry[name],
+        test_fn,
+        config=config,
+        pytest_fixtures=pytest_fixtures,
+        validate=validate,
+    )
+    mark = pytest.mark.parametrize(
+        parametrization.argnames, parametrization.values, ids=parametrization.ids
+    )
+    return cast(Callable[..., Any], mark(test_fn))

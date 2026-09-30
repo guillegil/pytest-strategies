@@ -115,7 +115,8 @@ def test_width(device, width):
 """,
     )
 
-    result = pytester.runpytest("-p", "no:cacheprovider", "--rng-seed=1", "--nsamples=2")
+    # A subprocess keeps this suite's filterwarnings=error out of the inner run
+    result = pytester.runpytest_subprocess("-p", "no:cacheprovider", "--rng-seed=1", "--nsamples=2")
 
     result.assert_outcomes(passed=2, warnings=1)
     result.stdout.fnmatch_lines(

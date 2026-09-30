@@ -1,6 +1,6 @@
 [project]
 name = "pytest-strategies"
-version = "2.0.0"
+version = "3.0.0"
 description = "A pytest plugin for constrained-randomized test parametrization with directed testing support"
 authors = [{ name = "Guillermo Gil", email = "guillegirod@gmail.com" }]
 license = "MIT"
@@ -55,6 +55,9 @@ Documentation = "https://github.com/guillegil/pytest-strategies/blob/main/docs/d
 "Bug Tracker" = "https://github.com/guillegil/pytest-strategies/issues"
 Changelog = "https://github.com/guillegil/pytest-strategies/blob/main/CHANGELOG.md"
 
+[project.scripts]
+pytest-strategies = "pytest_strategy._cli:main"
+
 [project.entry-points.pytest11]
 pytest_strategy = "pytest_strategy.plugin"
 
@@ -71,7 +74,8 @@ include = ["pytest_strategy*"]
 exclude = ["tests*", "docs*"]
 
 [tool.setuptools.package-data]
-pytest_strategy = ["py.typed"]
+# The agent skill (skill/pytest-strategies/) is package data, read with importlib.resources
+pytest_strategy = ["py.typed", "skill/**/*.md"]
 
 # ============================================================================
 # BLACK - Code Formatting
@@ -126,16 +130,7 @@ ignore = [
 # ============================================================================
 [tool.mypy]
 python_version = "3.11"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = false    # Set to true for stricter typing
-disallow_incomplete_defs = false
-check_untyped_defs = true
-no_implicit_optional = true
-warn_redundant_casts = true
-warn_unused_ignores = true
-warn_no_return = true
-strict_equality = true
+strict = true
 
 # ============================================================================
 # PYTEST - Testing Configuration
@@ -149,14 +144,17 @@ python_functions = ["test_*"]
 
 addopts = [
     "-ra", # Show summary of all test outcomes
-    # "--strict-markers",       # Raise error on unknown markers
-    # "--strict-config",        # Raise error on unknown config options
-    # "--showlocals",           # Show local variables in tracebacks
-    # "--tb=short",             # Shorter traceback format
-    # "--cov=pytest_strategy", # Coverage for our package
-    # "--cov-report=term-missing", # Show missing lines in coverage
-    # "--cov-report=html",      # Generate HTML coverage report
-    # "--cov-report=xml",       # Generate XML coverage report (for CI)
+    "--strict-markers", # Raise error on unknown markers
+    "--strict-config", # Raise error on unknown config options
+]
+# A strategy that yields no rows fails collection instead of skipping silently
+empty_parameter_set_mark = "fail_at_collect"
+filterwarnings = [
+    "error",
+    # The suite keeps testing the APIs deprecated in 3.0 until 4.0 removes them
+    "ignore:Strategy '.*' returns an \\(argnames, samples\\) tuple:DeprecationWarning",
+    "ignore:TestArg\\((directed|test)_values=\\.\\.\\.\\) is deprecated:DeprecationWarning",
+    "ignore:RNG.set_max_retries\\(\\) is deprecated:DeprecationWarning",
 ]
 
 markers = [

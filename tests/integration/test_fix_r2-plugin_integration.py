@@ -189,7 +189,7 @@ class TestSkippedStrategyFileIsNamed:
 
         result.stdout.fnmatch_lines(
             [
-                "*ValueError: Strategy 'r2_arr' not found. Available strategies: none",
+                "In test_*: Strategy 'r2_arr' not found. Available strategies: none",
                 "*Strategy files that were skipped:",
                 f"*strategies.py: could not import '{MISSING_MODULE}': *",
             ]
@@ -203,7 +203,9 @@ class TestVerboseLoadOutsideRootdir:
         shared = pytester.path / "shared"
         pytester.makepyfile(**{"shared/strategies": STRATEGIES, "shared/test_ints": TESTS})
         project = pytester.mkdir("proj")
-        (project / "pytest.ini").write_text(f"[pytest]\ntestpaths = {shared}\n")
+        # pytest splits testpaths like a shell command line: a Windows path needs
+        # forward slashes
+        (project / "pytest.ini").write_text(f"[pytest]\ntestpaths = {shared.as_posix()}\n")
         monkeypatch.chdir(project)
 
         result = pytester.runpytest_subprocess("-vv")

@@ -8,12 +8,33 @@ on:
 
 jobs:
   test:
-    name: Tests (py${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: Tests (${{ matrix.os }}, py${{ matrix.python-version }}, pytest ${{ matrix.pytest }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.11", "3.12", "3.13", "3.14"]
+        pytest: [latest]
+        include:
+          # The one coverage run
+          - os: ubuntu-latest
+            python-version: "3.14"
+            pytest: latest
+            coverage: true
+          # The oldest supported pytest
+          - os: ubuntu-latest
+            python-version: "3.11"
+            pytest: "8.4.2"
+          - os: ubuntu-latest
+            python-version: "3.14"
+            pytest: "8.4.2"
+          - os: windows-latest
+            python-version: "3.11"
+            pytest: latest
+          - os: windows-latest
+            python-version: "3.14"
+            pytest: latest
 
     steps:
       - uses: actions/checkout@v7
@@ -24,15 +45,115 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          if [ "${{ matrix.pytest }}" != "latest" ]; then
+            pip install "pytest==${{ matrix.pytest }}"
+          fi
+          python -m pytest --version
+
+      - name: Run the suite
+        if: ${{ !matrix.coverage }}
+        run: python -m pytest -n auto
+
+      # coverage run, not pytest-cov: the plugin is imported through its entry
+      # point before pytest-cov starts, which would count every module-level
+      # line (imports, def and class lines) as missed. One process, no xdist.
+      - name: Run the suite with coverage
+        if: ${{ matrix.coverage }}
+        run: |
+          python -m coverage run -m pytest
+          python -m coverage report --fail-under=90
+
+      - name: Run the sequence tests with --nsamples=auto
+        run: python -m pytest tests/integration/test_sequence_integration.py --nsamples=auto
+
+  examples:
+    name: Examples, vector modes and xdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      - name: Run test suite
-        run: python run_tests.py
+      - name: Examples
+        run: python -m pytest examples/*.py
 
-      - name: Coverage
-        run: pytest --cov=pytest_strategy --cov-report=term-missing --cov-report=xml
+      - name: Examples with --nsamples=auto
+        run: python -m pytest examples/*.py --nsamples=auto
+
+      - name: Examples with --nsamples=5
+        run: python -m pytest examples/*.py --nsamples=5
+
+      - name: Test vectors only (--vector-mode=test)
+        run: python -m pytest examples/test_values_example.py --vector-mode=test
+
+      - name: Examples on two xdist workers, without a seed
+        run: python -m pytest examples/*.py -n 2
+
+      - name: Examples on two xdist workers, with a seed
+        run: python -m pytest examples/*.py -n 2 --rng-seed=1
+
+  packaging:
+    name: Packaging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Build and check
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check --strict dist/*
+
+      - name: The sdist carries the typing marker and the skill
+        run: |
+          tar tzf dist/*.tar.gz > sdist.txt
+          grep -q "src/pytest_strategy/py.typed$" sdist.txt
+          grep -q "src/pytest_strategy/skill/pytest-strategies/SKILL.md$" sdist.txt
+          grep -q "src/pytest_strategy/skill/pytest-strategies/references/api.md$" sdist.txt
+
+      - name: Install the wheel in a clean venv
+        run: |
+          python -m venv /tmp/wheel
+          /tmp/wheel/bin/pip install dist/*.whl
+          /tmp/wheel/bin/python - <<'EOF'
+          from importlib import resources
+          import pytest_strategy
+
+          assert "site-packages" in pytest_strategy.__file__, pytest_strategy.__file__
+          root = resources.files("pytest_strategy")
+          for name in ("py.typed", "skill/pytest-strategies/SKILL.md", "skill/pytest-strategies/references/api.md"):
+              assert (root / name).is_file(), f"{name} is missing from the wheel"
+          print("pytest-strategies", pytest_strategy.__version__, "from", pytest_strategy.__file__)
+          EOF
+
+      - name: Run the examples from the wheel
+        working-directory: examples
+        run: /tmp/wheel/bin/python -m pytest -p no:cacheprovider -q --rng-seed=1 *.py
+
+      - name: Install the skill in a project
+        run: |
+          mkdir /tmp/project && cd /tmp/project
+          /tmp/wheel/bin/pytest-strategies skill install --all
+          test -f .claude/skills/pytest-strategies/SKILL.md
+          test -f .agents/skills/pytest-strategies/SKILL.md
+          test -f .agents/skills/pytest-strategies/references/api.md
 
   lint:
     name: Lint (ruff + black)
@@ -57,7 +178,7 @@ jobs:
         run: black --check src/ tests/
 
   typecheck:
-    name: Type check (mypy)
+    name: Type check (mypy --strict)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -73,4 +194,7 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Mypy
-        run: mypy src/pytest_strategy/
+        run: mypy --strict src/pytest_strategy/
+
+      - name: The decorators keep the decorated function's type
+        run: mypy --strict tests/unittests/test_typing.py
