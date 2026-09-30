@@ -290,7 +290,8 @@ usage error listing each strategy's directed vectors.
 Reporting:
 
 - The header shows `pytest-strategies: RNG seed = S` (hidden by `-q` and `--no-header`).
-- A run with failures ends with "reproduce with `--rng-seed=S`", also under `-q`.
+- A run with failures prints "reproduce with `--rng-seed=S`" after the tracebacks,
+  also under `-q`.
   A passing run does not print it.
 - `-v` adds, per strategy, the counts of directed, random and test rows and where
   `nsamples` came from.
@@ -407,8 +408,10 @@ extra names. IDs look like `x=1,y=2`.
   qualified name. A test gets the same rows (and node IDs) whether you run the whole
   suite, one file or one test, in any order and with any `--import-mode`. Two tests
   sharing a strategy get different random rows.
-- Keep the same seed, the same rootdir (the directory of the ini file) and the same
-  plugin version. Values for a seed may differ between major versions; check the
+- Keep the same seed, the same rootdir and the same plugin version. The rootdir is
+  the directory of the ini file (`pytest.ini`, or `pyproject.toml` with
+  `[tool.pytest.ini_options]`); without one it depends on the folder pytest is run
+  from, so compare the `rootdir:` line of both runs. Values for a seed may differ between major versions; check the
   CHANGELOG before comparing with a 2.x run.
 - pytest-xdist works with or without `--rng-seed`: the controller sends its seed to
   the workers.
@@ -425,7 +428,7 @@ extra names. IDs look like `x=1,y=2`.
 | `... would generate N rows ..., more than the limit of ...` | Too many exhaustive combinations. Reduce them or raise `max_exhaustive` / `strategies_max_exhaustive`. |
 | `Directed vector 'x' has N values, expected M` | A directed or test vector does not have one value per argument. |
 | signature mismatch at collection | The test does not take every argument name (and dataclass mode does not apply). Add the parameters or a matching dataclass. |
-| `got empty parameter set` skip | `--vector-name`/`--vector-index` selected a vector this strategy lacks. |
+| `got empty parameter set` skip | `--vector-name`/`--vector-index` selected a vector this strategy lacks, or `--vector-mode=directed_only`/`test` ran a strategy with no directed/test vectors. |
 | `RNGValueError` when building a type | Bad RNG arguments (section 6). |
 | `Factory should accept an 'nsamples' parameter (or no parameters)` | The factory's signature cannot receive `nsamples`. Accept `nsamples`, `**kwargs` or nothing. |
 

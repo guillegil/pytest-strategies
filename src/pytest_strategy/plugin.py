@@ -481,7 +481,7 @@ class PytestStrategyPlugin:
         if not registry:
             terminalreporter.write_line("No strategies registered")
             return
-        terminalreporter.write_line(f"Registered strategies: {len(registry)}")
+        terminalreporter.write_line(f"Registered strategies: {_registration_count()}")
         if state is not None and state.resolutions:
             for line in _summary_lines(state.resolutions):
                 terminalreporter.write_line(f"  {line}")
@@ -1077,6 +1077,11 @@ def strategy_not_found_message(name: str, directory: str, rootpath: str | None) 
     return message
 
 
+def _registration_count() -> int:
+    """Count the registrations: a name registered in two folders counts twice."""
+    return sum(len(registry.registrations(name)) for name in registry.names())
+
+
 def _summary_lines(resolutions: list[Any]) -> list[str]:
     """Summarize the resolved strategies for -v: tests and rows per strategy."""
     by_strategy: dict[tuple[str, str], list[Any]] = {}
@@ -1247,7 +1252,9 @@ def pytest_collection_finish(session: Session) -> None:
             terminalreporter.section("Registered Strategies")
 
             if registry:
-                terminalreporter.write_line(f"\nFound {len(registry)} registered strategies:\n")
+                terminalreporter.write_line(
+                    f"\nFound {_registration_count()} registered strategies:\n"
+                )
 
                 for name in sorted(registry.names()):
                     registrations = registry.registrations(name)

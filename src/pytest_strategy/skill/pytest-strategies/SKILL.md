@@ -85,7 +85,9 @@ same module object the plugin loaded.
   `@strategy(..., validate_signature=False)` turns the check off). Its other
   parameters are fixtures, as usual. Or use dataclass mode (see Traps).
 - Rows: the directed vectors, then `nsamples` random rows (10 by default). Test IDs
-  are built from the values, such as `test_charge[amount=17,currency='EUR']`.
+  are built from the values, such as `test_charge[amount=17,currency='EUR']`. A
+  directed vector's name is not part of its ID: select it with `--vector-name`, not
+  `-k`.
 
 ## Where strategies live
 
@@ -103,7 +105,8 @@ Names are scoped by folder, like fixtures:
 - The plugin walks from the test's folder up to the rootdir, and the nearest
   folder that registers the name wins. `tests/esm/strategies.py` and
   `tests/dma/strategies.py` can both define `"default"`, and a
-  `tests/strategies.py` `"default"` serves folders that have none.
+  `tests/strategies.py` `"default"` serves folders that have none. Files with the
+  same name in several folders are fine, with or without `__init__.py`.
 - A name that no folder on that path defines, but that is registered only once
   elsewhere (a sibling folder, an installed package), is found too. When several
   such folders register it, the lookup fails and names them.
@@ -131,7 +134,7 @@ def ranges(nsamples):
         TestArg("lo", rng_type=RNGInteger(0, 100)),
         TestArg("hi", rng_type=RNGInteger(0, 100)),
         TestArg("mode", value="fast"),                  # fixed value
-        directed_vectors={"empty": (5, 5, "fast")},     # run in the default mode
+        directed_vectors={"empty": (5, 5, "fast")},     # run in the default mode; one arg: (5,)
         test_vectors={"bug_1234": (0, 100, "fast")},    # only with --vector-mode=test
         vector_constraints=[lo_below_hi],               # each gets the row as a tuple
         nsamples=25,                                    # default count; --nsamples=N overrides it
@@ -242,21 +245,32 @@ def esm_rw(nsamples, ctx):
 
 To reproduce a failure:
 
-1. Take the seed from the end of the failing run (`reproduce with --rng-seed=S`,
-   also printed under `-q`) or from the header (`pytest-strategies: RNG seed = S`).
+1. Take the seed from the failing run: the line `reproduce with --rng-seed=S` after
+   the tracebacks (also printed under `-q`), or the header
+   (`pytest-strategies: RNG seed = S`).
 2. Rerun with it: `pytest tests/payments/test_charge.py --rng-seed=S`. Node IDs
    contain generated values, so a failing ID exists only under its seed: pass both,
    `pytest "tests/payments/test_charge.py::test_charge[amount=17,currency='EUR']" --rng-seed=S`.
 3. The same seed, rootdir and plugin version give the same rows whether you run the
-   suite, one file or one test, in any order, with or without xdist.
-4. Once fixed, add the failing values as a directed vector (`"bug_1234": (17, "EUR")`)
-   so they run every time, not only under that seed.
+   suite, one file or one test, in any order, with or without xdist. The test's path
+   relative to the rootdir is part of its random stream: compare the `rootdir:` line
+   of the CI log with yours. Without an ini file the rootdir depends on where pytest
+   is run from, so run from the same folder as CI (or add a `pytest.ini` or
+   `[tool.pytest.ini_options]`).
+4. Once fixed, add the failing values as a directed vector (`"bug_1234": (17, "EUR")`;
+   one argument needs a trailing comma, `(-2,)`) so they run every time, not only
+   under that seed. Run it with `--vector-name=bug_1234`, which needs no seed. Its ID
+   is built from the values, not the name, and when it equals a random row's ID
+   pytest adds suffixes (`[n=-2_0]`, `[n=-2_1]`), so the old node ID no longer
+   matches under that seed.
 
 ## Traps
 
 - **Fixtures cannot reach factories.** Factories run at collection. Use the
   `ctx` hook for configuration, and keep runtime objects (connections, devices) as
-  fixtures of the test.
+  fixtures of the test. The hook's result reaches factories only: a fixture that
+  needs the same configuration reads it again, for example from
+  `pytestconfig.getoption(...)` (share one loader function between the two).
 - **Plain `random` is not seeded by the plugin.** Since 3.0.0 the plugin never
   calls `random.seed()`. `random.randint()` in a factory, at the top of a
   strategies file or in a test body is not reproduced by `--rng-seed`. Draw
@@ -301,5 +315,7 @@ To reproduce a failure:
 ## Checking your work
 
 Run the tests twice without a seed (new rows each time), with `--nsamples=auto` when
-there are `Series`/`RNGSequence` arguments, and with `--vector-mode=directed_only`.
+there are `Series`/`RNGSequence` arguments, and with `--vector-mode=directed_only`
+when the strategy has directed vectors (without any, that mode leaves the test
+skipped with "got empty parameter set").
 After upgrading the library, refresh this skill with `pytest-strategies skill install`.

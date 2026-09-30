@@ -177,6 +177,9 @@ class TestScopedNames:
 
         result.stdout.fnmatch_lines(
             [
+                # Each folder's registration counts
+                "Found 3 registered strategies:",
+                "*",
                 "*✓ default (tests/dma/strategies.py)",
                 "*✓ default (tests/esm/strategies.py)",
                 "*✓ default (tests/strategies.py)",
