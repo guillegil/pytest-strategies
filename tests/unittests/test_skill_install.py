@@ -26,11 +26,6 @@ from pytest_strategy import _cli
 
 SKILL = "pytest-strategies"
 
-# The library version the skill documents.
-# TODO(3.0.0 version bump): compare against pytest_strategy.__version__ instead of
-# this constant once __version__ is "3.0.0", and delete SKILL_VERSION.
-SKILL_VERSION = "3.0.0"
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_DIR = REPO_ROOT / "src" / "pytest_strategy"
 
@@ -157,8 +152,7 @@ class TestPackagedSkill:
         assert yaml.safe_load(raw) == _frontmatter(skill_md)
 
     def test_skill_documents_the_release_version(self, skill_md):
-        # TODO(3.0.0 version bump): use pytest_strategy.__version__ here
-        assert f"Documents pytest-strategies {SKILL_VERSION}." in skill_md
+        assert f"Documents pytest-strategies {pytest_strategy.__version__}." in skill_md
 
     def test_referenced_files_exist(self, packaged, skill_md):
         referenced = set(re.findall(r"references/[\w.-]+\.md", skill_md))

@@ -19,19 +19,18 @@ To run with random sampling (normal mode):
     pytest examples/sequence_example.py --nsamples=5 -v
 """
 
-from pytest_strategy import Strategy, Parameter, TestArg, RNGInteger, RNGFloat
-from pytest_strategy.rng import RNGSequence
+from pytest_strategy import Parameter, RNGFloat, RNGInteger, RNGSequence, TestArg, register, strategy
 
 # 1. Basic Sequence Strategy
 # This strategy iterates through a list of user roles.
-@Strategy.register("user_roles")
+@register("user_roles")
 def user_roles_strategy(nsamples):
     return Parameter(
         TestArg("role", rng_type=RNGSequence(["admin", "editor", "viewer", "guest"])),
         TestArg("active", rng_type=RNGSequence([True, False]))
     )
 
-@Strategy.strategy("user_roles")
+@strategy("user_roles")
 def test_permissions(role, active):
     """
     Test permissions for different user roles and states.
@@ -45,7 +44,7 @@ def test_permissions(role, active):
 
 # 2. Mixed Sequence and Random Strategy
 # This strategy combines a sequence (endpoints) with random data (payloads).
-@Strategy.register("api_endpoints")
+@register("api_endpoints")
 def api_endpoints_strategy(nsamples):
     return Parameter(
         # Exhaustive: We want to test ALL these endpoints
@@ -55,7 +54,7 @@ def api_endpoints_strategy(nsamples):
         TestArg("load_factor", rng_type=RNGFloat(0.0, 1.0))
     )
 
-@Strategy.strategy("api_endpoints")
+@strategy("api_endpoints")
 def test_api_stability(endpoint, id, load_factor):
     """
     Test API stability across endpoints with random load.
@@ -70,7 +69,7 @@ def test_api_stability(endpoint, id, load_factor):
 
 
 # 3. Sequences with Constraints
-@Strategy.register("constrained_sequence")
+@register("constrained_sequence")
 def constrained_sequence_strategy(nsamples):
     return Parameter(
         TestArg("a", rng_type=RNGSequence([1, 2, 3, 4])),
@@ -79,7 +78,7 @@ def constrained_sequence_strategy(nsamples):
         vector_constraints=[lambda v: v[0] < v[1]]
     )
 
-@Strategy.strategy("constrained_sequence")
+@strategy("constrained_sequence")
 def test_pairs(a, b):
     """
     Test pairs where a < b.
@@ -92,7 +91,7 @@ def test_pairs(a, b):
 
 
 # 4. Filtered Sequence (Predicate Support)
-@Strategy.register("filtered_sequence")
+@register("filtered_sequence")
 def filtered_sequence_strategy(nsamples):
     return Parameter(
         # Use a predicate to filter the sequence during initialization
@@ -101,7 +100,7 @@ def filtered_sequence_strategy(nsamples):
         TestArg("label", rng_type=RNGSequence(["A", "B"]))
     )
 
-@Strategy.strategy("filtered_sequence")
+@strategy("filtered_sequence")
 def test_filtered(val, label):
     """
     Test with a filtered sequence.

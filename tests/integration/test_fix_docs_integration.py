@@ -8,6 +8,7 @@ would run them. These documents went stale before (they called the renamed
 nothing ran examples/, so a flaky example went unnoticed.
 """
 
+import argparse
 import importlib.util
 import random
 import re
@@ -18,7 +19,7 @@ from pathlib import Path
 import pytest
 
 import pytest_strategy
-from pytest_strategy import RNG, Strategy
+from pytest_strategy import RNG, Strategy, _cli
 from pytest_strategy._registry import registry
 
 pytest_plugins = ["pytester"]
@@ -27,6 +28,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = sorted((REPO_ROOT / "examples").glob("*.py"))
 OPTION_RE = re.compile(r"(?<![\w-])--[a-z][\w-]*")
 DEFINED_OPTION_RE = re.compile(r"addoption\(\s*[\"'](--[a-z][\w-]*)")
+REGISTER_RE = re.compile(r"@(?:Strategy\.)?register\(")
+STRATEGY_RE = re.compile(r"@(?:Strategy\.)?strategy\(")
 
 
 @pytest.fixture(autouse=True)
@@ -40,6 +43,16 @@ def _restore_global_state():
     Strategy._registry.update(registry)
     RNG.seed(seed)
     random.setstate(state)
+
+
+def _cli_actions(parser: argparse.ArgumentParser) -> list:
+    """The actions of ``parser`` and of its subcommands, recursively."""
+    actions = list(parser._actions)
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for subparser in action.choices.values():
+                actions.extend(_cli_actions(subparser))
+    return actions
 
 
 def _package_docstring_example() -> str:
@@ -62,7 +75,7 @@ def _runnable_markdown_blocks() -> list:
         text = (REPO_ROOT / doc).read_text(encoding="utf-8")
         for match in re.finditer(r"```python\n(.*?)```", text, re.S):
             source = match.group(1)
-            if "@Strategy.register(" in source and "@Strategy.strategy(" in source:
+            if REGISTER_RE.search(source) and STRATEGY_RE.search(source):
                 line = text[: match.start()].count("\n") + 2
                 params.append(pytest.param(source, id=f"{doc}:{line}"))
     return params
@@ -108,6 +121,16 @@ class TestDocumentedCliOptions:
         defined = {option for text in sources for option in DEFINED_OPTION_RE.findall(text)}
 
         known = set(OPTION_RE.findall(pytester.runpytest("--help").stdout.str()))
+        # The options of the pytest-strategies command (skill install)
+        parser = _cli.build_parser()
+        known.update(
+            option
+            for action in _cli_actions(parser)
+            for option in action.option_strings
+            if option.startswith("--")
+        )
+        # Options of the other tools the contributing guide runs (black, mypy)
+        known.update({"--check", "--strict"})
         assert documented - known - defined == set()
 
 

@@ -300,9 +300,10 @@ Reporting:
 ## 11. Strategies files and name lookup
 
 **File names:** `strategies.py`, `strategy.py`, `*_strategies.py`, `*_strategy.py`,
-`test_strategies.py`. A file is loaded only if its text contains `@register(`,
-`@Strategy.register(` or `@<module>.register(` (for example `@ps.register(` after
-`import pytest_strategy as ps`). A `conftest.py` may also register strategies.
+`test_strategies.py`. A file is loaded only if its text contains `@register("`,
+`@Strategy.register(` or `@<module>.register("` (for example `@ps.register("` after
+`import pytest_strategy as ps`); outside `@Strategy.register(`, the name must be
+written as a string literal. A `conftest.py` may also register strategies.
 
 **Lazy loading:** when pytest collects a test module, the plugin first loads the
 strategies files in the module's folder and then in each parent folder up to the

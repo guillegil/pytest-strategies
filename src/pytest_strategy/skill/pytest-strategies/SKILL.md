@@ -91,9 +91,11 @@ same module object the plugin loaded.
 
 A strategies file is a file named `strategies.py`, `strategy.py`,
 `*_strategies.py`, `*_strategy.py` or `test_strategies.py` that contains a
-register decorator (`@register(`, `@Strategy.register(` or `@<module>.register(`).
-A `conftest.py` can register strategies too. A strategies file that only
-registers with a plain call (`register("x")(fn)`) is not loaded.
+register decorator (`@register("name")`, `@Strategy.register(...)` or
+`@<module>.register("name")`, the name written as a string literal). A
+`conftest.py` can register strategies too. A strategies file that only
+registers with a plain call (`register("x")(fn)`) or a name held in a variable
+(`@register(NAME)`) is not loaded.
 
 Names are scoped by folder, like fixtures:
 

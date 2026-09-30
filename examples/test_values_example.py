@@ -1,8 +1,8 @@
 """
 Example of Test Values feature with pytest-strategies.
 
-This example demonstrates how to use `test_values` and `test_vectors` to define
-test-specific values that only run when using --vector-mode=test.
+This example demonstrates how to use `test_vectors` to define test-specific
+vectors that only run when using --vector-mode=test.
 
 To run this example with test vectors only:
     pytest examples/test_values_example.py --vector-mode=test -v
@@ -11,12 +11,11 @@ To run with all vectors (directed + random):
     pytest examples/test_values_example.py --nsamples=5 -v
 """
 
-from pytest_strategy import Strategy, Parameter, TestArg, RNGInteger, RNGChoice
-from pytest_strategy.rng import RNGSequence
+from pytest_strategy import Parameter, RNGChoice, RNGInteger, RNGSequence, TestArg, register, strategy
 
 # 1. Basic Test Vectors
 # This strategy defines specific test cases that should always be verified.
-@Strategy.register("api_test_cases")
+@register("api_test_cases")
 def api_test_cases_strategy(nsamples):
     return Parameter(
         TestArg("endpoint", rng_type=RNGChoice(["/users", "/products", "/orders"])),
@@ -30,7 +29,7 @@ def api_test_cases_strategy(nsamples):
         }
     )
 
-@Strategy.strategy("api_test_cases")
+@strategy("api_test_cases")
 def test_api_responses(endpoint, status_code):
     """
     Test API responses.
@@ -46,7 +45,7 @@ def test_api_responses(endpoint, status_code):
 
 # 2. Test Vectors with Directed Vectors
 # You can combine test vectors with directed vectors for different testing modes.
-@Strategy.register("user_validation")
+@register("user_validation")
 def user_validation_strategy(nsamples):
     return Parameter(
         TestArg("age", rng_type=RNGInteger(0, 120)),
@@ -64,7 +63,7 @@ def user_validation_strategy(nsamples):
         }
     )
 
-@Strategy.strategy("user_validation")
+@strategy("user_validation")
 def test_user_permissions(age, role):
     """
     Test user permissions.
@@ -79,24 +78,25 @@ def test_user_permissions(age, role):
     assert role in ["admin", "user", "guest"]
 
 
-# 3. Test Values in TestArg
-# TestArg also accepts test_values. A Parameter does not generate vectors from
-# them (only its test_vectors run in test mode); they are recorded as
-# "has_test_values" in Strategy.export_strategies().
-@Strategy.register("payment_test")
+# 3. Test Vectors Next to Directed Vectors
+# Directed vectors run in the default mode, test vectors only with
+# --vector-mode=test.
+@register("payment_test")
 def payment_test_strategy(nsamples):
     return Parameter(
-        # Test values: documentation of the amounts worth testing
-        TestArg("amount", rng_type=RNGInteger(1, 10000), test_values=[0, 1, 100, 9999]),
-        TestArg("currency", rng_type=RNGChoice(["USD", "EUR", "GBP"]), test_values=["USD"]),
-        # Test vectors: the scenarios that actually run with --vector-mode=test
+        TestArg("amount", rng_type=RNGInteger(1, 10000)),
+        TestArg("currency", rng_type=RNGChoice(["USD", "EUR", "GBP"])),
+        directed_vectors={
+            "smallest": (1, "USD"),
+        },
+        # Test vectors: the scenarios that run with --vector-mode=test
         test_vectors={
             "zero_amount": (0, "USD"),
             "large_amount": (9999, "EUR")
         }
     )
 
-@Strategy.strategy("payment_test")
+@strategy("payment_test")
 def test_payment_processing(amount, currency):
     """
     Test payment processing.
@@ -110,7 +110,7 @@ def test_payment_processing(amount, currency):
 
 # 4. Complex Test Scenario
 # Combine test vectors with constraints for complex testing scenarios.
-@Strategy.register("date_range_test")
+@register("date_range_test")
 def date_range_test_strategy(nsamples):
     return Parameter(
         TestArg("start_day", rng_type=RNGInteger(1, 31)),
@@ -127,7 +127,7 @@ def date_range_test_strategy(nsamples):
         vector_constraints=[lambda v: v[0] <= v[1]]
     )
 
-@Strategy.strategy("date_range_test")
+@strategy("date_range_test")
 def test_date_ranges(start_day, end_day):
     """
     Test date range validation.

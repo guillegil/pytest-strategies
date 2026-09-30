@@ -39,8 +39,8 @@ HINT = (
     "they contain no registration decorator (use @register(...)):"
 )
 LAZY_LOAD_NOTE = (
-    "\nStrategy files are imported when a test in their folder or below first needs "
-    "a strategy, so an import that only works after other test modules are collected fails."
+    "\nStrategy files are imported when pytest first collects a test module in their "
+    "folder or below, so an import that only works after other test modules are collected fails."
 )
 
 

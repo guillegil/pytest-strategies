@@ -186,9 +186,9 @@ class TestFailedFileIsListed:
                 "In test_*: Strategy 'ns_late' not found. Available strategies: none",
                 "*Strategy files that failed to load:",
                 "*strategies.py: ModuleNotFoundError: No module named 'ns_missing_helpers'",
-                "*Strategy files are imported when a test in their folder or below first needs "
-                "a strategy, so an import that only works after other test modules are "
-                "collected fails.",
+                "*Strategy files are imported when pytest first collects a test module in "
+                "their folder or below, so an import that only works after other test "
+                "modules are collected fails.",
             ]
         )
         assert result.ret == pytest.ExitCode.INTERRUPTED

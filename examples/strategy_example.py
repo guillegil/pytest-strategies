@@ -1,18 +1,20 @@
 """
-Example demonstrating the new Parameter-based Strategy system.
+Example of Parameter-based strategies.
 
-This example shows how to use the refactored Strategy class with Parameter
-instances to enable full CLI support and leverage all Parameter features.
+A strategy is a factory that returns a Parameter. Register it with @register
+and apply it to tests with @strategy, by name or by passing the factory itself.
+All CLI options (--nsamples, --vector-mode, --vector-name, --vector-index)
+apply to it.
 """
 
 from pytest_strategy import (
-    Strategy,
     Parameter,
-    TestArg,
-    RNG,
-    RNGInteger,
-    RNGFloat,
     RNGChoice,
+    RNGFloat,
+    RNGInteger,
+    TestArg,
+    register,
+    strategy,
 )
 
 
@@ -20,7 +22,7 @@ from pytest_strategy import (
 # EXAMPLE 1: Basic Parameter-Based Strategy
 # ============================================================================
 
-@Strategy.register("addition_strategy")
+@register("addition_strategy")
 def create_addition_strategy(nsamples):
     """
     Strategy using Parameter class (NEW RECOMMENDED WAY).
@@ -42,7 +44,7 @@ def create_addition_strategy(nsamples):
     )
 
 
-@Strategy.strategy("addition_strategy")
+@strategy("addition_strategy")
 def test_addition(a, b):
     """Test addition with Parameter-based strategy."""
     result = a + b
@@ -54,7 +56,7 @@ def test_addition(a, b):
 # EXAMPLE 2: Strategy with Constraints
 # ============================================================================
 
-@Strategy.register("range_strategy")
+@register("range_strategy")
 def create_range_strategy(nsamples):
     """Strategy with constraints ensuring min < max."""
     return Parameter(
@@ -70,7 +72,7 @@ def create_range_strategy(nsamples):
     )
 
 
-@Strategy.strategy("range_strategy")
+@strategy("range_strategy")
 def test_range_validation(min_val, max_val):
     """Test range validation with constraints."""
     assert min_val < max_val
@@ -82,7 +84,7 @@ def test_range_validation(min_val, max_val):
 # EXAMPLE 3: Complex Strategy with Multiple Types
 # ============================================================================
 
-@Strategy.register("api_endpoint_strategy")
+@register("api_endpoint_strategy")
 def create_api_test_strategy(nsamples):
     """Strategy simulating API endpoint testing."""
     return Parameter(
@@ -97,7 +99,7 @@ def create_api_test_strategy(nsamples):
     )
 
 
-@Strategy.strategy("api_endpoint_strategy")
+@strategy("api_endpoint_strategy")
 def test_api_endpoint(user_id, timeout, method):
     """Test API endpoint with various parameters."""
     assert 1 <= user_id <= 10000
@@ -106,28 +108,26 @@ def test_api_endpoint(user_id, timeout, method):
 
 
 # ============================================================================
-# EXAMPLE 4: Backward Compatible Tuple-Based Strategy
+# EXAMPLE 4: Passing the Factory Instead of a Name
 # ============================================================================
 
-@Strategy.register("legacy_strategy")
-def create_legacy_strategy(nsamples):
+def create_doubling_strategy(nsamples):
     """
-    Legacy tuple-based strategy (BACKWARD COMPATIBILITY).
+    A factory that is not registered: the test passes the function itself.
 
-    This still works, but of the CLI options only --nsamples reaches it (as the
-    factory's nsamples argument); --vector-mode, --vector-name and --vector-index
-    do not apply to it. Under --nsamples=auto the factory receives the string
-    "auto", which range() rejects, so this file fails to collect with auto.
+    No name is looked up, so the test cannot pick up another folder's strategy
+    by mistake. A registered factory can be passed the same way.
     """
-    argnames = ("x", "y")
-    samples = [(i, i * 2) for i in range(nsamples)]
-    return argnames, samples
+    return Parameter(
+        TestArg("x", rng_type=RNGInteger(-1000, 1000)),
+        directed_vectors={"zero": (0,)},
+    )
 
 
-@Strategy.strategy("legacy_strategy")
-def test_legacy(x, y):
-    """Test with legacy tuple-based strategy."""
-    assert y == x * 2
+@strategy(create_doubling_strategy)
+def test_doubling(x):
+    """Test with a strategy passed by reference."""
+    assert 2 * x == x + x
 
 
 # ============================================================================

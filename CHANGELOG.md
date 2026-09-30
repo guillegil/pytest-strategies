@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-09-30
+
+For the same `--rng-seed`, 3.0.0 generates the same values and test IDs as 2.0.0 for strategies that draw through the RNG types, so recorded seeds and node IDs keep working. What changes is where strategies are looked up, when strategy files run, and who owns the random state.
+
+### Breaking changes and how to upgrade from 2.0.0
+- **The plugin no longer seeds Python's global `random` module.** It draws from a `random.Random` instance of its own. A factory that calls `random.randint()` and similar directly is no longer reproduced by `--rng-seed`: call the same methods on `RNG.generator()`, or use the RNG types. Test bodies that relied on the plugin's seeding can seed `random` per test from `RNG.get_seed()` (the README shows an autouse fixture).
+- **Strategy files are imported later, and only where needed.** A folder's strategy files are imported when pytest first collects a test module in that folder or below, not at session start, and files in folders with no collected tests are not imported unless a test asks for a name that no folder above it registers. They are imported the way pytest imports a test module (following `--import-mode`) instead of as standalone modules. A strategy file whose side effects must happen at startup should be imported from `conftest.py`.
+- **Strategy names are scoped by folder, and a name registered twice in one folder is an error.** The nearest folder's registration wins, like fixtures. Two different functions registering one name in the same folder now stop the run with a usage error (exit 4) after collection, instead of a warning with the last registration winning. Rename one, or move it to a subfolder.
+- **`pytest_strategy.strategy` is now the `strategy` decorator.** `from pytest_strategy.strategy import Strategy, PytestStrategiesWarning` and warning filters that name `pytest_strategy.strategy.PytestStrategiesWarning` keep working, but `import pytest_strategy.strategy as m` now gives the decorator. Import from `pytest_strategy` instead.
+- **Very large exhaustive runs fail at collection.** `--nsamples=auto` (and `per_sequence_samples=True`) is limited to 100,000 rows per strategy. Raise the limit with `Parameter(max_exhaustive=...)` or the `strategies_max_exhaustive` ini option.
+- **Two arguments with the same name in one `Parameter`** raise `RNGValueError` when the `Parameter` is built.
+
+### Added
+- `register` and `strategy` as plain functions: `from pytest_strategy import register, strategy`, then `@register("name")` and `@strategy("name")`. `Strategy.register` and `Strategy.strategy` are the same functions. `export_strategies` is exported too.
+- `@strategy(factory)`: pass the factory itself instead of its name. It needs no lookup and no registration; a registered factory gives the same values and IDs as its name.
+- Folder-scoped strategy names. A test uses the registration in its own folder or the nearest folder above it. When none of them registers the name, a single registration elsewhere (a sibling folder, or an installed package outside the rootdir) is used, and several are an error that lists them.
+- `pytest-strategies skill install [--claude | --agents | --all] [--global]` (also `python -m pytest_strategy`): installs an agent skill that teaches Claude Code, Codex and other agents to write strategies, into `.claude/skills/` and `.agents/skills/` of the project or the home folder.
+- `RNG.generator()`: the `random.Random` instance every draw comes from, for factories that need `shuffle`, `gauss` and the like.
+- Size guard: `Parameter(max_exhaustive=...)` and the `strategies_max_exhaustive` ini option (default 100,000).
+- A failed run ends with `pytest-strategies: reproduce with --rng-seed=S`, also under `-q`. With `-v`, the Strategy Summary lists each strategy with its tests, its directed, random and test rows, and where `nsamples` came from.
+- Error messages: a misspelled strategy name gets "Did you mean ...?", and "Could not generate valid vector" says how many draws each constraint rejected, by name.
+- Type hints for the whole package, checked with `mypy --strict`. `register` and `strategy` keep the decorated function's type, and the RNG types are generic (`RNGEnum(Color).generate()` is a `Color`).
+- `PytestStrategiesWarning` can be imported from `pytest_strategy`.
+- `--list-strategies` shows the file of each registration when a name is registered in several folders.
+
+### Changed
+- Strategies are resolved when pytest collects the test (`pytest_generate_tests`), not when the test module is imported. `@strategy` only adds a `strategy` marker. A strategy can be registered after the tests that use it, and resolution errors are collection errors in the style of pytest's own parametrize errors (`In test_x: ...`), showing the factory's frames but not the plugin's; `--full-trace` shows everything.
+- `RNGValueError` is a `ValueError` subclass, so `except ValueError` catches it.
+- Strategy files are recognized by `@register("...")` and aliased decorators such as `@S.register("...")`, not only `@Strategy.register`. A strategy file can import modules next to it under the default `--import-mode=prepend`, and a test module that imports it gets the same module.
+- Values that a strategy file draws when it is imported come from a stream keyed by the file's path, so they no longer depend on which files or test modules were loaded first.
+- The "Strategy 'name' not found" error names the test and lists only the strategies that test can use.
+- The report header shows only the seed.
+
+### Deprecated
+These emit a `DeprecationWarning` that points at your code, keep working in 3.x, and will be removed in 4.0:
+- Factories that return an `(argnames, samples)` tuple. Return a `Parameter`.
+- `RNG.set_max_retries()`. Use `Parameter(max_retries=...)` with `vector_constraints`, or a predicate that accepts more values.
+- `configure()`, which did nothing.
+- `Strategy.set_config()`: the plugin uses the config of the session that collects each test.
+- `TestArg(directed_values=..., test_values=...)`, which a `Parameter` never used. Use `Parameter(directed_vectors=..., test_vectors=...)`.
+
+### Removed
+- The private `Strategy` helpers (`_validate_signature`, `_is_dataclass_mode`, `_convert_to_dataclass`, `_generate_test_ids`, `_generate_dataclass_ids`), `_print_import_message`, and the plugin's empty session hooks.
+- The demo that ran with `python -m pytest_strategy.rng`. It is now `examples/rng_example.py`.
+- `run_tests.py`. CI runs pytest directly, on pytest 8.4.2 and 9, Linux and Windows, with and without pytest-xdist.
+
+### Fixed
+- Without `--rng-seed`, draws at module level in a test module came from an unseeded generator, so the printed seed did not reproduce them and pytest-xdist workers could collect different tests. They now follow the seed.
+- A strategy file that a test module imported before the plugin loaded it no longer shifts the values that other strategy files draw at import time.
+
 ## [2.0.0] - 2026-09-30
 
 2.0.0 is the first release after 1.0.0. 1.1.0a1 and 1.1.0a2 were pre-releases that were never tagged; their changes are part of it.
@@ -133,6 +183,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed `AttributeError: 'Parameter' object has no attribute 'generate_samples'` by renaming method to `generate_vectors`.
 - Improved error handling in `Strategy` decorator.
 
-[Unreleased]: https://github.com/guillegil/pytest-strategies/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/guillegil/pytest-strategies/compare/v3.0.0...HEAD
+[3.0.0]: https://github.com/guillegil/pytest-strategies/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/guillegil/pytest-strategies/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/guillegil/pytest-strategies/releases/tag/v1.0.0

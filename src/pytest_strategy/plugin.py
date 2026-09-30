@@ -1056,9 +1056,9 @@ def strategy_not_found_message(name: str, directory: str, rootpath: str | None) 
         # A common cause: an import that only works once pytest has collected
         # another test module (e.g. added its directory to sys.path)
         message += (
-            "\nStrategy files are imported when a test in their folder or below first "
-            "needs a strategy, so an import that only works after other test modules "
-            "are collected fails."
+            "\nStrategy files are imported when pytest first collects a test module in "
+            "their folder or below, so an import that only works after other test "
+            "modules are collected fails."
         )
     # So are strategy files that skipped themselves (pytest.importorskip)
     if runtime.skipped_files:

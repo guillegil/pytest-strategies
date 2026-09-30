@@ -18,7 +18,7 @@ Strategies can be registered in the test module, as in the example below, in a
 conftest.py, or in files named strategies.py, strategy.py, *_strategies.py or
 *_strategy.py. A name is visible to the tests in that file's directory and
 below, and the nearest registration wins. The plugin loads a directory's
-strategies files when a test there first needs a strategy.
+strategy files when pytest first collects a test module there or below.
 
 Example Usage:
     from pytest_strategy import Parameter, RNGInteger, TestArg, register, strategy
@@ -59,11 +59,10 @@ CLI Options:
     pytest --vector-index 0           # Run the directed vector at index 0
 """
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"
 __author__ = "Guillermo Gil"
 __email__ = "guillegil@proton.me"
 
-from typing import Any
 
 # Core components
 # The 2.x module first: binding the strategy decorator below replaces the package
@@ -148,7 +147,7 @@ def list_strategies() -> list[str]:
     return list(Strategy._registry.keys())
 
 
-def get_strategy_info(name: str) -> dict[str, Any]:
+def get_strategy_info(name: str) -> dict[str, object]:
     """
     Get information about a registered strategy.
 

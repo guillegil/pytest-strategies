@@ -6,7 +6,7 @@ including weighted probabilities and predicate filtering.
 """
 
 from enum import Enum
-from pytest_strategy import Strategy, Parameter, TestArg, RNGEnum, RNGInteger
+from pytest_strategy import Parameter, RNGEnum, RNGInteger, TestArg, register, strategy
 
 
 # Define example Enums
@@ -42,7 +42,7 @@ class UserRole(Enum):
 # STRATEGY 1: Simple Enum Strategy
 # ============================================================================
 
-@Strategy.register("http_status_strategy")
+@register("http_status_strategy")
 def create_http_status_strategy(nsamples: int) -> Parameter:
     """Strategy with simple enum selection"""
     return Parameter(
@@ -56,7 +56,7 @@ def create_http_status_strategy(nsamples: int) -> Parameter:
     )
 
 
-@Strategy.strategy("http_status_strategy")
+@strategy("http_status_strategy")
 def test_http_status(status_code: HttpStatus, method: RequestMethod):
     """Test HTTP status codes with methods"""
     assert isinstance(status_code, HttpStatus)
@@ -68,7 +68,7 @@ def test_http_status(status_code: HttpStatus, method: RequestMethod):
 # STRATEGY 2: Weighted Enum Strategy
 # ============================================================================
 
-@Strategy.register("weighted_status_strategy")
+@register("weighted_status_strategy")
 def create_weighted_status_strategy(nsamples: int) -> Parameter:
     """Strategy with weighted enum selection (mostly success cases)"""
     return Parameter(
@@ -90,7 +90,7 @@ def create_weighted_status_strategy(nsamples: int) -> Parameter:
     )
 
 
-@Strategy.strategy("weighted_status_strategy")
+@strategy("weighted_status_strategy")
 def test_weighted_status(status_code: HttpStatus, user_id: int):
     """Test with weighted status codes (mostly successful requests)"""
     assert isinstance(status_code, HttpStatus)
@@ -105,7 +105,7 @@ def test_weighted_status(status_code: HttpStatus, user_id: int):
 # STRATEGY 3: Enum with Predicate
 # ============================================================================
 
-@Strategy.register("filtered_status_strategy")
+@register("filtered_status_strategy")
 def create_filtered_status_strategy(nsamples: int) -> Parameter:
     """Strategy with predicate filtering (only success codes)"""
     return Parameter(
@@ -124,7 +124,7 @@ def create_filtered_status_strategy(nsamples: int) -> Parameter:
     )
 
 
-@Strategy.strategy("filtered_status_strategy")
+@strategy("filtered_status_strategy")
 def test_filtered_status(status_code: HttpStatus, method: RequestMethod):
     """Test with filtered status codes (only success)"""
     # Should only get success codes
@@ -137,7 +137,7 @@ def test_filtered_status(status_code: HttpStatus, method: RequestMethod):
 # STRATEGY 4: Weighted with Predicate
 # ============================================================================
 
-@Strategy.register("role_based_strategy")
+@register("role_based_strategy")
 def create_role_based_strategy(nsamples: int) -> Parameter:
     """Strategy with weighted roles and filtered methods"""
     return Parameter(
@@ -170,7 +170,7 @@ def create_role_based_strategy(nsamples: int) -> Parameter:
     )
 
 
-@Strategy.strategy("role_based_strategy")
+@strategy("role_based_strategy")
 def test_role_based_access(role: UserRole, method: RequestMethod):
     """Test role-based access control"""
     assert isinstance(role, UserRole)
@@ -192,7 +192,7 @@ def test_role_based_access(role: UserRole, method: RequestMethod):
 # STRATEGY 5: Complex Multi-Enum Strategy
 # ============================================================================
 
-@Strategy.register("api_test_strategy")
+@register("api_test_strategy")
 def create_api_test_strategy(nsamples: int) -> Parameter:
     """Complex strategy with multiple enums and constraints"""
     return Parameter(
@@ -215,7 +215,7 @@ def create_api_test_strategy(nsamples: int) -> Parameter:
     )
 
 
-@Strategy.strategy("api_test_strategy")
+@strategy("api_test_strategy")
 def test_api_endpoint(
     method: RequestMethod,
     status_code: HttpStatus,
