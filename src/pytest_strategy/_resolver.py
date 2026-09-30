@@ -19,7 +19,7 @@ import pytest
 
 from ._dataclass import convert_to_dataclass
 from ._ids import generate_dataclass_ids, generate_test_ids, make_unique_ids
-from ._introspection import detect_dataclass_param, validate_signature
+from ._introspection import detect_dataclass_param, lazy_signature, validate_signature
 from ._runtime import runtime
 from ._warnings import PytestStrategiesWarning
 from .parameters import Parameter
@@ -82,12 +82,7 @@ def _unique_ids(
     collection error instead of suffixing them. The ID of a ``pytest.param(...,
     id=...)`` row overrides its ``ids`` entry, so duplicates are suffixed among these
     effective IDs, and such a row is rebuilt with its new ID.
-
-    Only from pytest 8.4: earlier versions escape an explicit id when the row is
-    created (so a rebuilt row would be escaped twice), and have no strict IDs.
     """
-    if tuple(pytest.version_tuple[:2]) < (8, 4):
-        return rows, ids
     effective = [
         row.id if isinstance(row, _ParameterSet) and row.id is not None else row_id
         for row, row_id in zip(rows, ids)
@@ -193,7 +188,7 @@ def call_factory(name: str, factory: Callable[..., Any], nsamples: int | str) ->
     try:
         # follow_wrapped=False: a wraps() decorator's __wrapped__ describes the inner
         # function, not the wrapper that is called
-        sig: inspect.Signature | None = inspect.signature(factory, follow_wrapped=False)
+        sig: inspect.Signature | None = lazy_signature(factory, follow_wrapped=False)
     except (TypeError, ValueError):
         # No introspectable signature (e.g. some builtins)
         sig = None

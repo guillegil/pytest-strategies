@@ -2,9 +2,10 @@
 Dataclass conversion utilities for strategy samples.
 """
 
-import inspect
 from collections.abc import Sequence
 from dataclasses import fields
+
+from ._introspection import lazy_signature
 
 
 def convert_to_dataclass(
@@ -52,7 +53,7 @@ def convert_to_dataclass(
         raise ValueError(error_msg)
 
     try:
-        inspect.signature(dataclass_type).bind(**dict.fromkeys(argnames))
+        lazy_signature(dataclass_type).bind(**dict.fromkeys(argnames))
     except TypeError:
         # Hand-written __init__ with other or positional-only parameter names
         order = [f.name for f in fields(dataclass_type) if f.init]

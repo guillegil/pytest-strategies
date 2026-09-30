@@ -299,7 +299,7 @@ class TestExhaustiveUnsatisfiableRaises:
 
 
 class TestRNGEnumFlagWithoutCanonicalMembers:
-    """Iterating such a Flag yields nothing on 3.11+, but weights can still name members."""
+    """Iterating such a Flag yields nothing, but weights can still name members."""
 
     def test_weights_naming_members_accepted(self):
         RNG.seed(0)
@@ -311,7 +311,6 @@ class TestRNGEnumFlagWithoutCanonicalMembers:
         rng_enum = RNGEnum(Mode, weights={Mode.BOTH: 1, Mode.NONE: 1}, predicate=bool)
         assert {rng_enum.generate() for _ in range(50)} == {Mode.BOTH}
 
-    @pytest.mark.skipif(len(Mode) != 0, reason="iterating a Flag yields every member before 3.11")
     @pytest.mark.parametrize("predicate", [None, bool])
     def test_without_weights_rejected(self, predicate):
         with pytest.raises(RNGValueError, match="Mode has no members to choose from"):

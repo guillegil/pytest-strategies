@@ -5,7 +5,7 @@ description = "A pytest plugin for constrained-randomized test parametrization w
 authors = [{ name = "Guillermo Gil", email = "guillegirod@gmail.com" }]
 license = { text = "Apache-2.0" }
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 
 keywords = [
     "pytest",
@@ -26,34 +26,32 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Testing",
     "Topic :: Software Development :: Testing :: Unit",
     "Typing :: Typed",
 ]
 
-dependencies = ["pytest>=7.0.0"]
+dependencies = ["pytest>=8.4.2"]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0.0",
-    "pytest-cov>=4.0.0",
-    "pytest-xdist>=3.0",
-    "black>=23.0.0",
-    "ruff>=0.1.0",
-    "mypy>=1.0.0",
-    "pre-commit>=3.0.0",
+    "pytest>=8.4.2",
+    "pytest-cov>=7.0",
+    "pytest-xdist>=3.6",
+    "black>=26.1,<27",
+    "ruff>=0.13",
+    "mypy>=2.0",
+    "pre-commit>=4.0",
 ]
-
-docs = ["sphinx>=6.0.0", "sphinx-rtd-theme>=1.2.0", "myst-parser>=1.0.0"]
 
 [project.urls]
 Homepage = "https://github.com/guillegil/pytest-strategies"
 Repository = "https://github.com/guillegil/pytest-strategies"
-Documentation = "https://pytest-strategies.readthedocs.io"
+Documentation = "https://github.com/guillegil/pytest-strategies/blob/main/docs/dev.md"
 "Bug Tracker" = "https://github.com/guillegil/pytest-strategies/issues"
 Changelog = "https://github.com/guillegil/pytest-strategies/blob/main/CHANGELOG.md"
 
@@ -61,7 +59,7 @@ Changelog = "https://github.com/guillegil/pytest-strategies/blob/main/CHANGELOG.
 pytest_strategy = "pytest_strategy.plugin"
 
 [build-system]
-requires = ["setuptools>=65.0", "wheel"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
@@ -80,7 +78,7 @@ pytest_strategy = ["py.typed"]
 # ============================================================================
 [tool.black]
 line-length = 100
-target-version = ["py310", "py311", "py312"]
+target-version = ["py311", "py312", "py313", "py314"]
 include = '\.pyi?$'
 extend-exclude = '''
 /(
@@ -98,7 +96,7 @@ extend-exclude = '''
 # ============================================================================
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = [
@@ -127,7 +125,7 @@ ignore = [
 # MYPY - Type Checking
 # ============================================================================
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false    # Set to true for stricter typing
@@ -143,7 +141,7 @@ strict_equality = true
 # PYTEST - Testing Configuration
 # ============================================================================
 [tool.pytest.ini_options]
-minversion = "7.0"
+minversion = "8.4.2"
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]

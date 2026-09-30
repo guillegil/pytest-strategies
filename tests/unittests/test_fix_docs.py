@@ -12,6 +12,7 @@ its ``@Strategy.strategy`` decorators and registers its strategies globally.
 
 import ast
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -32,8 +33,7 @@ def _python_blocks(relative_path: str):
 
 @pytest.fixture(scope="module")
 def pyproject():
-    """Parsed pyproject.toml (tomllib is stdlib from Python 3.11)."""
-    tomllib = pytest.importorskip("tomllib")
+    """Parsed pyproject.toml."""
     return tomllib.loads(_read("pyproject.toml"))
 
 
@@ -140,7 +140,9 @@ class TestPackagingMetadata:
     def test_black_targets_match_requires_python(self, pyproject):
         """black must not target Python versions the package does not support."""
         minors = [int(t[len("py3") :]) for t in pyproject["tool"]["black"]["target-version"]]
-        assert min(minors) == 10
+        minimum = re.fullmatch(r">=3\.(\d+)", pyproject["project"]["requires-python"])
+        assert minimum is not None
+        assert min(minors) == int(minimum.group(1))
 
 
 # ---------------------------------------------------------------------------

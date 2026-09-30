@@ -29,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `PytestStrategiesWarning`s raised while generating vectors start with the strategy and the test (`Strategy 'name' (test_fn): ...`) and point at the test function instead of the plugin's code.
 - `Series` and `RNGSequence` reject `None` and a predicate that is not callable with `RNGValueError`.
 - A "Strategy not found" error also lists files named like strategy files that mention `register` but were not imported because they lack the literal `@Strategy.register` (an alias or a plain call), and notes that strategy files are imported when the session starts.
-- With pytest 8.4 or later, the plugin makes repeated test IDs unique itself, with pytest's own suffixes, so strategies whose rows repeat (for example with `per_sequence_samples=True`) also collect under pytest 9's `strict_parametrization_ids`. IDs in normal runs are unchanged.
+- The plugin makes repeated test IDs unique itself, with pytest's own suffixes, so strategies whose rows repeat (for example with `per_sequence_samples=True`) also collect under pytest 9's `strict_parametrization_ids`. IDs in normal runs are unchanged.
 - Strategy factories are called exactly once, with `nsamples` passed by keyword, positionally or not at all, depending on their signature. An exception raised inside a factory is reported as `Error calling strategy factory '<name>' (nsamples=<n>): <Type>: <message>`.
 - Strategy file discovery searches the `testpaths` entries (glob patterns expanded; the rootdir without `testpaths`) and the directories of command-line paths. Below them it skips hidden directories, `norecursedirs` matches and virtual environments, and it loads the files in sorted path order.
 - Strategy files that fail to load are always reported, and a "Strategy not found" error lists the files that failed to load or skipped themselves.
@@ -37,9 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dataclass mode is chosen by annotation: the parameter annotated with a dataclass whose fields are the strategy's arguments receives the vector, and every other parameter is treated as a fixture. Custom fixture names no longer need to be added to `Strategy.PYTEST_FIXTURES`.
 - `Parameter` copies the `directed_vectors`, `test_vectors` and `vector_constraints` it is given.
 - `--list-strategies` exits with code 2 when collection had errors.
-- Package metadata: Python 3.13 added and 3.9 removed from the classifiers; development status is Alpha.
+- **Requirements**: Python 3.11 or later (Python 3.10 is no longer supported) and pytest 8.4.2 or later. Python 3.14 is supported.
+- Package metadata: development status is Alpha, and the `docs` extra (Sphinx, never configured) is removed.
 
 ### Fixed
+- **Python 3.14**: a test, factory or dataclass annotated with a name that is not defined yet (an import under `TYPE_CHECKING`, a class defined later) no longer fails with `NameError` when the strategy is applied.
 - Strategy files in a source encoding other than UTF-8 are found (the `@Strategy.register` marker is searched in the file's bytes).
 - **RNG**: weighted generators with a predicate no longer fail when only some of their ranges can satisfy it.
 - **RNG**: `RNGEnum` with a predicate no longer fails while a valid member exists.

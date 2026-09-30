@@ -5,6 +5,7 @@ Pure functions — no pytest runtime dependency beyond inspect/dataclasses.
 """
 
 import inspect
+import sys
 import typing
 from collections.abc import Sequence
 from dataclasses import fields, is_dataclass
@@ -34,6 +35,24 @@ PYTEST_FIXTURES: frozenset[str] = frozenset(
 )
 
 
+def lazy_signature(fn: Any, **kwargs: Any) -> inspect.Signature:
+    """
+    ``inspect.signature`` that never evaluates annotations.
+
+    Python 3.14 (PEP 649) evaluates annotations lazily, so a test or factory may
+    annotate with a name that is not defined yet (a ``TYPE_CHECKING`` import, a
+    class defined later). ``inspect.signature`` evaluates them by default and
+    raises ``NameError``; ``Format.FORWARDREF`` keeps unresolvable ones as
+    ``ForwardRef`` objects instead. Older versions already evaluated them at
+    ``def`` time.
+    """
+    if sys.version_info >= (3, 14):
+        from annotationlib import Format
+
+        return inspect.signature(fn, annotation_format=Format.FORWARDREF, **kwargs)
+    return inspect.signature(fn, **kwargs)
+
+
 def validate_signature(
     test_fn,
     argnames: Sequence[str],
@@ -58,7 +77,7 @@ def validate_signature(
     Raises:
         ValueError: When the test-function signature does not match *argnames*.
     """
-    sig = inspect.signature(test_fn)
+    sig = lazy_signature(test_fn)
     test_params = list(sig.parameters.keys())
 
     actual_params = []
@@ -119,7 +138,7 @@ def detect_dataclass_param(
     if len(argnames) < 2:
         return False, None, None
 
-    sig = inspect.signature(test_fn)
+    sig = lazy_signature(test_fn)
     if any(name in sig.parameters for name in argnames):
         return False, None, None
 
@@ -141,8 +160,6 @@ def detect_dataclass_param(
         annotation = hints.get(name, param.annotation)
         if isinstance(annotation, str):
             annotation = _eval_annotation(test_fn, annotation)
-        if param.default is None:
-            annotation = _strip_implicit_optional(test_fn, annotation, param.annotation)
         if isinstance(annotation, type) and is_dataclass(annotation):
             candidates.append((name, annotation))
 
@@ -174,25 +191,6 @@ def detect_dataclass_mode(
     """
     is_dc_mode, dc_type, _ = detect_dataclass_param(test_fn, argnames, pytest_fixtures)
     return is_dc_mode, dc_type
-
-
-def _strip_implicit_optional(test_fn, hint: Any, written: Any) -> Any:
-    """
-    Undo the ``Optional[...]`` that ``typing.get_type_hints`` adds on Python 3.10.
-
-    Python 3.10 turns ``p: DC = None`` into ``Optional[DC]`` (3.11+ keeps ``DC``).
-    Only that implicit wrapping is removed: ``Optional[X]``/``Union[X, None]`` is
-    unwrapped to ``X`` when the annotation as written is ``X`` itself, so an
-    explicit ``Optional[DC]`` annotation is kept as written.
-    """
-    if typing.get_origin(hint) is not typing.Union:
-        return hint
-    args = [a for a in typing.get_args(hint) if a is not type(None)]
-    if len(args) != 1:
-        return hint
-    if isinstance(written, str):
-        written = _eval_annotation(test_fn, written)
-    return args[0] if written is args[0] else hint
 
 
 def _eval_annotation(test_fn, annotation: str) -> Any:
