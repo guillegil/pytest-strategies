@@ -153,14 +153,17 @@ python_functions = ["test_*"]
 
 addopts = [
     "-ra", # Show summary of all test outcomes
-    # "--strict-markers",       # Raise error on unknown markers
-    # "--strict-config",        # Raise error on unknown config options
-    # "--showlocals",           # Show local variables in tracebacks
-    # "--tb=short",             # Shorter traceback format
-    # "--cov=pytest_strategy", # Coverage for our package
-    # "--cov-report=term-missing", # Show missing lines in coverage
-    # "--cov-report=html",      # Generate HTML coverage report
-    # "--cov-report=xml",       # Generate XML coverage report (for CI)
+    "--strict-markers", # Raise error on unknown markers
+    "--strict-config", # Raise error on unknown config options
+]
+# A strategy that yields no rows fails collection instead of skipping silently
+empty_parameter_set_mark = "fail_at_collect"
+filterwarnings = [
+    "error",
+    # The suite keeps testing the APIs deprecated in 3.0 until 4.0 removes them
+    "ignore:Strategy '.*' returns an \\(argnames, samples\\) tuple:DeprecationWarning",
+    "ignore:TestArg\\((directed|test)_values=\\.\\.\\.\\) is deprecated:DeprecationWarning",
+    "ignore:RNG.set_max_retries\\(\\) is deprecated:DeprecationWarning",
 ]
 
 markers = [
