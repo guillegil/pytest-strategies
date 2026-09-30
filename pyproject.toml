@@ -55,6 +55,9 @@ Documentation = "https://github.com/guillegil/pytest-strategies/blob/main/docs/d
 "Bug Tracker" = "https://github.com/guillegil/pytest-strategies/issues"
 Changelog = "https://github.com/guillegil/pytest-strategies/blob/main/CHANGELOG.md"
 
+[project.scripts]
+pytest-strategies = "pytest_strategy._cli:main"
+
 [project.entry-points.pytest11]
 pytest_strategy = "pytest_strategy.plugin"
 
@@ -71,7 +74,8 @@ include = ["pytest_strategy*"]
 exclude = ["tests*", "docs*"]
 
 [tool.setuptools.package-data]
-pytest_strategy = ["py.typed"]
+# The agent skill (skill/pytest-strategies/) is package data, read with importlib.resources
+pytest_strategy = ["py.typed", "skill/**/*.md"]
 
 # ============================================================================
 # BLACK - Code Formatting
