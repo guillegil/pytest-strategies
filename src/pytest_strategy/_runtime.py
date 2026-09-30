@@ -22,6 +22,7 @@ from __future__ import annotations
 import random
 from collections.abc import Callable
 from pathlib import Path
+from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
 from .rng import RNG
@@ -50,6 +51,13 @@ class SessionState:
         self.vector_filter_resolved: bool = False
         self.vector_filter_matched: bool = False
         self.vector_filter_misses: dict[str, list[str]] = {}
+        # pytest_strategies_context: called when a factory first needs ctx. Its
+        # result, or the exception it raised (with that traceback), is kept for
+        # the rest of the session, so the hook runs at most once.
+        self.context_loaded: bool = False
+        self.context: Any = None
+        self.context_error: BaseException | None = None
+        self.context_traceback: TracebackType | None = None
         # Process-global state in effect when this session began, restored on pop:
         # a nested session's --rng-seed, random draws and strategy registrations
         # must not leak into the enclosing session or later sibling sessions.
@@ -156,6 +164,34 @@ class StrategyRuntime:
         """Record a file named like a strategy file that was not imported (no-op if no session)."""
         if self.current is not None:
             self.current.unimported_files.append(path)
+
+    def strategy_context(self) -> Any:
+        """
+        Return the active session's ``pytest_strategies_context`` result.
+
+        The hook is called on first use and its result reused afterwards. Without
+        a session or a config there is no hook to call, and the result is ``None``.
+
+        Raises:
+            Whatever the hook raised (an exception, ``pytest.skip``, ``pytest.fail``),
+            again on every later call in the session.
+        """
+        import pytest
+
+        state = self.current
+        if state is None or state.config is None:
+            return None
+        if not state.context_loaded:
+            state.context_loaded = True
+            try:
+                state.context = state.config.hook.pytest_strategies_context(config=state.config)
+            except (Exception, pytest.skip.Exception, pytest.fail.Exception) as e:
+                state.context_error = e
+                state.context_traceback = e.__traceback__
+        if state.context_error is not None:
+            # Restore the original traceback, so re-raising does not stack frames
+            raise state.context_error.with_traceback(state.context_traceback)
+        return state.context
 
     def record_vector_filter(
         self, strategy: str, matched: bool, vector_names: list[str] | None = None

@@ -86,6 +86,7 @@ src/pytest_strategy/
 ├── parameters.py        # Parameter class (vector container)
 ├── test_args.py         # TestArg class (single argument definition)
 ├── rng.py               # Random number generation and RNG types
+├── hookspecs.py         # Hooks the plugin adds (pytest_strategies_context)
 ├── py.typed             # PEP 561 marker: type checkers use the package's annotations
 └── _*.py                # Internal helpers (resolver, introspection, test IDs, dataclasses,
                          # runtime state, warning categories)
@@ -437,6 +438,7 @@ own `nsamples`, or 10. A strategy that lacks the vector requested by
 skipped). If no strategy has it, the run stops with a usage error.
 
 **Pytest Hooks:**
+- `pytest_addhooks` - Adds the `pytest_strategies_context` hook (see below)
 - `pytest_addoption` - Adds CLI options
 - `pytest_configure` - Sets the config and the run's seed. An explicit
   `--rng-seed` also seeds the global random state; a pytest-xdist worker without
@@ -464,6 +466,14 @@ is skipped (reported with `-v`). Both kinds are listed in any
 "Strategy 'name' not found" error, together with the files matching a pattern
 that mention `register` but lack `@Strategy.register` (so were not imported).
 The marker is searched in the file's bytes, so any source encoding works.
+
+**`pytest_strategies_context(config)`:** a `firstresult` hook the plugin adds.
+A factory with a `ctx` parameter gets its result as `ctx=` (`None` when no
+implementation returns a value); other factories are called as before.
+`call_factory` calls it through `runtime.strategy_context()` the first time a
+factory needs it, and the session keeps the result, or the exception it raised,
+for every later factory. Each (nested) session and each pytest-xdist worker
+calls it once. See the README for an example.
 
 ---
 

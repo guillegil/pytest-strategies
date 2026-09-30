@@ -379,6 +379,46 @@ Each strategy file is imported as a standalone module, not as part of a package.
 
 A strategy file that fails to import does not stop the run. The plugin prints `pytest-strategies: Warning - Failed to load <path>: <error>` when the session starts. A file that calls `pytest.skip(..., allow_module_level=True)` or `pytest.importorskip()` at module level is skipped, and that is reported with `-v`. Any "Strategy 'name' not found" error lists the files that failed to load or were skipped. It also lists files with a strategy file name that mention `register` but were not imported because they lack the literal `@Strategy.register` (an alias such as `@S.register`, or a plain `Strategy.register("x")(fn)` call). `pytest -vv` prints each loaded file, and `pytest --list-strategies` lists the registered strategy names and exits.
 
+### 11. Configuration-Dependent Strategies (New in v2.0.0)
+
+Some vectors depend on configuration that is only known when the session runs, such as a testbench description whose file is named on the command line. Strategy factories run before any fixture exists, so they cannot use one. Instead, implement the `pytest_strategies_context` hook in the rootdir's `conftest.py`: what it returns is passed as `ctx` to every factory that has a `ctx` parameter.
+
+```python
+# conftest.py
+from testbench import Testbench  # your project's code
+
+def pytest_addoption(parser):
+    parser.addoption("--tb-config", default="testbench.yaml")
+
+def pytest_strategies_context(config):
+    return Testbench.parse_config(config.getoption("--tb-config"))
+```
+
+```python
+# esm_strategies.py
+from pytest_strategy import Parameter, RNGInteger, RNGSequence, Strategy, TestArg
+
+@Strategy.register("esm_rw")
+def esm_rw(nsamples, ctx):
+    channels = [p.channel for p in ctx.peripherals.values() if p.type == "Esm"]
+    return Parameter(
+        TestArg("channel", rng_type=RNGSequence(channels, skip_if_empty="no Esm peripheral")),
+        TestArg("wdata", rng_type=RNGInteger(min=0, max=255)),
+        per_sequence_samples=True,
+    )
+```
+
+Tests use the strategy as usual, with `@Strategy.strategy("esm_rw")`. With two Esm channels in the configuration they run 10 writes per channel; with none they are skipped with the reason.
+
+- The hook is called at most once per session, the first time a factory with a `ctx` parameter runs, and its result is reused for the others. Factories without `ctx` are called as before and never trigger it.
+- When no implementation returns a value, `ctx` is `None`. Give the parameter a default (`ctx=None`) if the factory should also work then.
+- If the hook raises, each test module that uses a factory with `ctx` fails collection with `Strategy factory '<name>' has a 'ctx' parameter, but the pytest_strategies_context hook raised <error>`. The hook can also call `pytest.skip(..., allow_module_level=True)` to skip those modules.
+- Implement it in the rootdir's `conftest.py` or in a plugin. Factories run while test modules are collected, and a `conftest.py` further down may not be loaded yet.
+- Under pytest-xdist every worker calls the hook, so it must return the same configuration in each, or the workers collect different tests.
+- `Strategy.export_strategies()` passes the same `ctx`.
+
+Your testbench fixture does not change: the hook only has to describe the configuration the vectors depend on.
+
 ## 🔌 Fixture Integration
 
 Strategies work seamlessly with standard pytest fixtures. You don't need any special configuration; just add the fixture to your test signature.

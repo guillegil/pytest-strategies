@@ -155,6 +155,28 @@ def _factory_error(name: str, nsamples: int | str, error: Exception) -> ValueErr
     )
 
 
+def _declares_ctx(sig: inspect.Signature | None) -> bool:
+    """Return True if a signature has a ``ctx`` parameter that can be passed by keyword."""
+    if sig is None:
+        return False
+    param = sig.parameters.get("ctx")
+    return param is not None and param.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    )
+
+
+def _factory_context(name: str) -> Any:
+    """Return the ``ctx`` for strategy ``name``: the session's pytest_strategies_context."""
+    try:
+        return runtime.strategy_context()
+    except Exception as e:
+        raise ValueError(
+            f"Strategy factory '{name}' has a 'ctx' parameter, but the "
+            f"pytest_strategies_context hook raised {type(e).__name__}: {e}"
+        ) from e
+
+
 def call_factory(name: str, factory: Callable[..., Any], nsamples: int | str) -> Any:
     """
     Call a strategy factory, passing ``nsamples`` the way it accepts it.
@@ -171,6 +193,10 @@ def call_factory(name: str, factory: Callable[..., Any], nsamples: int | str) ->
     ``nsamples``. Such a factory is called as ``factory(nsamples=...)`` and, if that
     raises ``TypeError``, once more as ``factory(nsamples)``.
 
+    A factory with a ``ctx`` parameter also gets ``ctx=`` the session's
+    ``pytest_strategies_context`` result (``None`` without an implementation). For
+    a wrapper with only ``*args``/``**kwargs``, the function it wraps decides.
+
     Args:
         name: Name of the strategy (for error messages)
         factory: The registered factory function
@@ -180,11 +206,11 @@ def call_factory(name: str, factory: Callable[..., Any], nsamples: int | str) ->
         Whatever the factory returns
 
     Raises:
-        ValueError: If the signature cannot accept any of these calls, or if the
-            factory itself raises (chained to the original exception)
+        ValueError: If the signature cannot accept any of these calls, if the
+            factory itself raises (chained to the original exception), or if the
+            pytest_strategies_context hook raised for a factory that needs ``ctx``
     """
     args: tuple[Any, ...] = ()
-    kwargs: dict[str, Any] = {"nsamples": nsamples}
     try:
         # follow_wrapped=False: a wraps() decorator's __wrapped__ describes the inner
         # function, not the wrapper that is called
@@ -194,28 +220,40 @@ def call_factory(name: str, factory: Callable[..., Any], nsamples: int | str) ->
         sig = None
 
     if sig is None or _only_var_args(sig):
+        # The wrapper does not say whether ctx is wanted; the wrapped function does
         try:
-            return factory(nsamples=nsamples)
+            wrapped: inspect.Signature | None = lazy_signature(factory)
+        except (TypeError, ValueError):
+            wrapped = None
+        extra = {"ctx": _factory_context(name)} if _declares_ctx(wrapped) else {}
+        try:
+            return factory(nsamples=nsamples, **extra)
         except TypeError as e:
             # The keyword may not be accepted: retry positionally, and report the
             # original error if that fails too
             try:
-                return factory(nsamples)
+                return factory(nsamples, **extra)
             except Exception as retry_error:
                 raise _factory_error(name, nsamples, e) from retry_error
         except Exception as e:
             raise _factory_error(name, nsamples, e) from e
 
-    if not _accepts(sig, nsamples=nsamples):
-        if _accepts(sig, nsamples):
-            args, kwargs = (nsamples,), {}
-        elif _accepts(sig):
-            kwargs = {}
+    extra = {"ctx": None} if _declares_ctx(sig) else {}
+    kwargs: dict[str, Any] = {"nsamples": nsamples, **extra}
+    if not _accepts(sig, nsamples=nsamples, **extra):
+        if _accepts(sig, nsamples, **extra):
+            args, kwargs = (nsamples,), dict(extra)
+        elif _accepts(sig, **extra):
+            kwargs = dict(extra)
         else:
             raise ValueError(
                 f"Strategy factory '{name}' cannot be called with its signature {sig}. "
-                f"Factory should accept an 'nsamples' parameter (or no parameters)."
+                f"Factory should accept an 'nsamples' parameter (or no parameters), "
+                f"and optionally 'ctx'."
             )
+    if extra:
+        # Only now: a factory whose signature is rejected never triggers the hook
+        kwargs["ctx"] = _factory_context(name)
 
     try:
         return factory(*args, **kwargs)

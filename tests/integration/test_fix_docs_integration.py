@@ -25,6 +25,7 @@ pytest_plugins = ["pytester"]
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = sorted((REPO_ROOT / "examples").glob("*.py"))
 OPTION_RE = re.compile(r"(?<![\w-])--[a-z][\w-]*")
+DEFINED_OPTION_RE = re.compile(r"addoption\(\s*[\"'](--[a-z][\w-]*)")
 
 
 @pytest.fixture(autouse=True)
@@ -102,9 +103,11 @@ class TestDocumentedCliOptions:
             *(path.read_text(encoding="utf-8") for path in EXAMPLES),
         ]
         documented = {option for text in sources for option in OPTION_RE.findall(text)}
+        # Options an example conftest.py adds itself (parser.addoption("--x"))
+        defined = {option for text in sources for option in DEFINED_OPTION_RE.findall(text)}
 
         known = set(OPTION_RE.findall(pytester.runpytest("--help").stdout.str()))
-        assert documented - known == set()
+        assert documented - known - defined == set()
 
 
 def _load_example_factories(path: Path, monkeypatch) -> tuple:

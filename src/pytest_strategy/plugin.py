@@ -564,6 +564,13 @@ def _nsamples_type(value: str) -> int | str:
     return nsamples
 
 
+def pytest_addhooks(pluginmanager) -> None:
+    """Add the plugin's hooks (``pytest_strategies_context``)."""
+    from . import hookspecs
+
+    pluginmanager.add_hookspecs(hookspecs)
+
+
 def pytest_addoption(parser) -> None:
     """Add command-line options for the plugin."""
     group = parser.getgroup("pytest-strategies", "Pytest Strategies Plugin Options")
