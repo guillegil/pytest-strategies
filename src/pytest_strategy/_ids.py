@@ -4,14 +4,25 @@ Test ID generation for parametrized strategies.
 
 import re
 import reprlib
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, namedtuple
 from collections.abc import Sequence
-from dataclasses import fields
+from dataclasses import dataclass, fields, is_dataclass
 from typing import Any
 
 # The memory address in a default repr (``<Foo object at 0x7f...>``, a function, a
 # bound method or a container of such objects) is directly followed by ``>``.
 _ADDRESS = re.compile(r" at 0x[0-9a-fA-F]+>")
+
+
+@dataclass
+class _DataclassProbe:
+    pass
+
+
+# Every dataclass and namedtuple class that keeps its generated __repr__ shares
+# that function's code object, so a class with its own __repr__ is left alone.
+_DATACLASS_REPR = _DataclassProbe.__repr__.__code__
+_NAMEDTUPLE_REPR = namedtuple("_NamedTupleProbe", "").__repr__.__code__
 
 
 def _sorted_elements(values: set | frozenset) -> list:
@@ -31,7 +42,8 @@ def _stable_repr(value: Any) -> str:
     Return ``repr(value)``, with the elements of sets in a deterministic order.
 
     A set of strings reprs in hash order, which changes with ``PYTHONHASHSEED``
-    (so between xdist workers). Sets nested in plain tuples, lists and dicts
+    (so between xdist workers). Sets nested in plain tuples, lists and dicts,
+    and in dataclass and namedtuple instances that keep their generated repr,
     are ordered too; a container that contains itself is shown as ``...``.
     """
     if isinstance(value, (set, frozenset)) and value:
@@ -45,6 +57,14 @@ def _stable_repr(value: Any) -> str:
     if type(value) is dict:
         pairs = (f"{_stable_repr(k)}: {_stable_repr(v)}" for k, v in value.items())
         return "{" + ", ".join(pairs) + "}"
+    code = getattr(type(value).__repr__, "__code__", None)
+    if code is _DATACLASS_REPR and is_dataclass(value):
+        shown = (f for f in fields(value) if f.repr)
+        args = (f"{f.name}={_stable_repr(getattr(value, f.name))}" for f in shown)
+        return f"{type(value).__qualname__}(" + ", ".join(args) + ")"
+    if code is _NAMEDTUPLE_REPR:
+        args = (f"{n}={_stable_repr(v)}" for n, v in zip(value._fields, value))
+        return f"{type(value).__name__}(" + ", ".join(args) + ")"
     return repr(value)
 
 

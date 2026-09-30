@@ -11,6 +11,17 @@ from .rng import SequenceLike, Series
 from .test_args import TestArg
 
 
+def _as_vector(values: Any) -> tuple:
+    """
+    Store a directed or test vector as a tuple.
+
+    A list (e.g. loaded from JSON or YAML) becomes a tuple, so a single-argument
+    strategy gets its element rather than the list. A tuple, including a
+    pytest.param(...), is kept as it is.
+    """
+    return values if isinstance(values, tuple) else tuple(values)
+
+
 class Parameter:
     """
     Manages a collection of TestArg instances and generates parameter vectors.
@@ -92,8 +103,8 @@ class Parameter:
 
         # Copy the caller's containers so add_*/remove_* never mutate shared objects
         self.test_args = list(test_args)
-        self.directed_vectors = dict(directed_vectors or {})
-        self.test_vectors = dict(test_vectors or {})
+        self.directed_vectors = {k: _as_vector(v) for k, v in (directed_vectors or {}).items()}
+        self.test_vectors = {k: _as_vector(v) for k, v in (test_vectors or {}).items()}
         self.always_include_directed = always_include_directed
         self.vector_constraints = list(vector_constraints or [])
         self.max_retries = max_retries
@@ -165,7 +176,7 @@ class Parameter:
         """
         if len(values) != len(self.test_args):
             raise ValueError(f"Vector must have {len(self.test_args)} values, got {len(values)}")
-        self.directed_vectors[name] = values
+        self.directed_vectors[name] = _as_vector(values)
 
     def remove_directed_vector(self, name: str):
         """
@@ -197,7 +208,7 @@ class Parameter:
         """
         if len(values) != len(self.test_args):
             raise ValueError(f"Vector must have {len(self.test_args)} values, got {len(values)}")
-        self.test_vectors[name] = values
+        self.test_vectors[name] = _as_vector(values)
 
     def remove_test_vector(self, name: str):
         """
@@ -366,7 +377,7 @@ class Parameter:
 
         # Handle CLI filters first (override mode). A missing vector raises even when
         # the Parameter is skipped, so callers can still tell whether a filter matched.
-        if filter_by_name:
+        if filter_by_name is not None:
             vector = self.get_vector_by_name(filter_by_name)
             return [] if self.skip_reason is not None else [vector]
 

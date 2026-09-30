@@ -22,7 +22,7 @@ from __future__ import annotations
 import random
 from collections.abc import Callable
 from pathlib import Path
-from types import TracebackType
+from types import ModuleType, TracebackType
 from typing import TYPE_CHECKING, Any
 
 from .rng import RNG
@@ -38,6 +38,9 @@ class SessionState:
         self.config: pytest.Config | None = config
         self.strategies_loaded: bool = False
         self.discovered_files: list[Path] = []
+        # Module of each loaded strategy file, by real path: an import of the file
+        # reuses it instead of running the file again (see plugin._StrategyFileFinder).
+        self.strategy_modules: dict[str, ModuleType] = {}
         # Strategy files that raised while loading, as (path, "ErrorType: message").
         self.load_errors: list[tuple[Path, str]] = []
         # Strategy files that called pytest.skip()/importorskip(), as (path, reason).

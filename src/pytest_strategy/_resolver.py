@@ -59,13 +59,16 @@ def _attributed_warnings(name: str, test_fn: Callable) -> Iterator[None]:
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", PytestStrategiesWarning)
         yield
-    code = getattr(inspect.unwrap(test_fn), "__code__", None)
+    fn = inspect.unwrap(test_fn)
+    code = getattr(fn, "__code__", None)
     for w in caught:
         if issubclass(w.category, PytestStrategiesWarning) and code is not None:
+            # co_filename can be stale (pytest's rewritten pyc after a checkout moved)
+            filename: str = getattr(fn, "__globals__", {}).get("__file__") or code.co_filename
             warnings.warn_explicit(
                 f"Strategy '{name}' ({test_fn.__qualname__}): {w.message}",
                 w.category,
-                code.co_filename,
+                filename,
                 code.co_firstlineno,
             )
         else:
@@ -200,10 +203,13 @@ def call_factory(name: str, factory: Callable[..., Any], nsamples: int | str) ->
     ``**kwargs``), ``factory(nsamples)`` when it has a positional parameter, and
     ``factory()`` when it takes no arguments.
 
-    The exception is a signature with only ``*args``/``**kwargs`` (e.g. a decorator
-    without ``functools.wraps``), or none at all, which does not say how to pass
-    ``nsamples``. Such a factory is called as ``factory(nsamples=...)`` and, if that
-    raises ``TypeError``, once more as ``factory(nsamples)``.
+    The exception is a signature with only ``*args``/``**kwargs`` (e.g. a
+    ``functools.wraps`` decorator's wrapper), or none at all (``functools.cache``),
+    which does not say how to pass ``nsamples``. Then the signature of the
+    function it wraps decides, the same way. When that does not tell either (a
+    decorator without ``functools.wraps``, ``unittest.mock.patch``), the factory
+    is called as ``factory(nsamples=...)`` and, if that raises ``TypeError``, once
+    more as ``factory(nsamples)``.
 
     A factory with a ``ctx`` parameter also gets ``ctx=`` the session's
     ``pytest_strategies_context`` result. When no implementation answers, ``ctx``
@@ -239,6 +245,27 @@ def call_factory(name: str, factory: Callable[..., Any], nsamples: int | str) ->
         except (TypeError, ValueError):
             wrapped = None
         extra = _ctx_kwargs(name, wrapped)
+        # mock.patch passes its mocks as extra arguments the wrapped signature lists
+        if (
+            wrapped is not None
+            and not _only_var_args(wrapped)
+            and not hasattr(factory, "patchings")
+        ):
+            # Checked with a ctx, so nsamples is never bound to it positionally
+            bind_extra = {"ctx": None} if _declares_ctx(wrapped) else {}
+            calls: tuple[tuple[tuple[Any, ...], dict[str, Any]], ...] = (
+                ((), {"nsamples": nsamples}),
+                ((nsamples,), {}),
+                ((), {}),
+            )
+            for call_args, call_kwargs in calls:
+                if _accepts(wrapped, *call_args, **call_kwargs, **bind_extra) and (
+                    sig is None or _accepts(sig, *call_args, **call_kwargs, **extra)
+                ):
+                    try:
+                        return factory(*call_args, **call_kwargs, **extra)
+                    except Exception as e:
+                        raise _factory_error(name, nsamples, e) from e
         try:
             return factory(nsamples=nsamples, **extra)
         except TypeError as e:
@@ -362,7 +389,7 @@ def resolve_and_parametrize(
                         filter_by_index=vector_index,
                     )
                     if (
-                        not vector_name
+                        vector_name is None
                         and vector_index is None
                         and vector_mode not in ("test", "directed_only")
                     ):
@@ -379,7 +406,7 @@ def resolve_and_parametrize(
             # If filtering by name (KeyError) or index (IndexError) and the vector
             # doesn't exist, return empty samples
             # This allows CLI filtering to work gracefully across multiple strategies
-            if vector_name or vector_index is not None:
+            if vector_name is not None or vector_index is not None:
                 samples = []
                 # The plugin reports a filter that no strategy in the run matches
                 runtime.record_vector_filter(name, False, list(param.directed_vectors))
@@ -388,7 +415,7 @@ def resolve_and_parametrize(
         except Exception as e:
             raise ValueError(f"Error generating samples for strategy '{name}': {e}") from e
         else:
-            if vector_name or vector_index is not None:
+            if vector_name is not None or vector_index is not None:
                 runtime.record_vector_filter(name, True)
             # The generators return nothing for a skipped Parameter. A vector filter
             # that names none of its vectors keeps the empty set, as for any strategy.

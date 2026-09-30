@@ -177,7 +177,7 @@ class RNG:
         """
         return cast(
             builtins.float,
-            RNG._generate_with_constraint(lambda: random.uniform(min, max), predicate),
+            RNG._generate_with_constraint(lambda: _uniform(min, max), predicate),
         )
 
     @staticmethod
@@ -328,6 +328,52 @@ class RNG:
 # ====
 
 
+def _uniform(a: float, b: float) -> float:
+    """
+    Return random.uniform(a, b), without overflowing when b - a exceeds the largest float.
+
+    The same draw and formula as the standard library, so a seed gives the same
+    values. b - a only overflows when a and b have opposite signs, and the second
+    form cannot overflow then, and stays within [a, b].
+    """
+    r = random.random()
+    x = a + (b - a) * r
+    return x if math.isfinite(x) else a * (1.0 - r) + b * r
+
+
+def _is_finite(value: float) -> bool:
+    """math.isfinite, also False for an int too large for a float."""
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _check_finite(owner: str, *bounds: float) -> None:
+    """Raise RNGValueError if a float bound is inf or nan."""
+    for bound in bounds:
+        if not _is_finite(bound):
+            raise RNGValueError(f"{owner} bounds must be finite, got {bound!r}")
+
+
+def _check_ranges(owner: str, ranges: Mapping, finite: bool = False) -> None:
+    """
+    Raise RNGValueError unless every key of ranges is a (min, max) pair with min <= max.
+
+    Args:
+        owner: Name of the RNG type, used in the error message
+        ranges: Mapping of (min, max) tuples to their weights
+        finite: Also require finite bounds (float ranges)
+    """
+    for key in ranges:
+        if not (isinstance(key, tuple) and len(key) == 2):
+            raise RNGValueError(f"{owner} range {key!r} must be a (min, max) tuple")
+        if finite and not all(_is_finite(bound) for bound in key):
+            raise RNGValueError(f"{owner} range {key!r} must have finite bounds")
+        if not key[0] <= key[1]:  # also rejects NaN, like _check_bounds
+            raise RNGValueError(f"{owner} range {key!r} must have min <= max")
+
+
 def _check_bounds(
     owner: str, min_val: float, max_val: float, min_given: bool, max_given: bool
 ) -> None:
@@ -369,18 +415,25 @@ def _check_weights(owner: str, weights: Mapping) -> None:
 
     Raises:
         RNGValueError: If weights is empty, contains a negative or non-finite
-            weight, or all weights are zero
+            weight, all weights are zero, or their total is not finite
     """
     if not weights:
         raise RNGValueError(f"{owner} weights cannot be empty")
 
     for key, weight in weights.items():
-        if not math.isfinite(weight) or weight < 0:
+        if not _is_finite(weight) or weight < 0:
             raise RNGValueError(
                 f"{owner} weight for {key!r} must be a finite number >= 0, got {weight!r}"
             )
 
-    if sum(weights.values()) <= 0:
+    # random.choices rejects a total that overflows, on every draw
+    try:
+        total = float(sum(weights.values()))
+    except OverflowError:
+        total = math.inf
+    if not math.isfinite(total):
+        raise RNGValueError(f"{owner} weights must have a finite total")
+    if total <= 0:
         raise RNGValueError(f"{owner} weights cannot all be zero")
 
 
@@ -425,6 +478,7 @@ class RNGFloat(RNGType):
         self.min = min if min is not None else 0.0
         self.max = max if max is not None else 1.0
         self.predicate = predicate
+        _check_finite("RNGFloat", self.min, self.max)
         _check_bounds("RNGFloat", self.min, self.max, min is not None, max is not None)
 
     def generate(self):
@@ -754,6 +808,7 @@ class RNGWeightedInteger(RNGType):
 
     def __init__(self, ranges: dict[tuple[int, int], float], predicate: Callable | None = None):
         _check_weights("RNGWeightedInteger", ranges)
+        _check_ranges("RNGWeightedInteger", ranges)
         self.ranges = ranges
         self.predicate = predicate
 
@@ -770,6 +825,7 @@ class RNGWeightedFloat(RNGType):
 
     def __init__(self, ranges: dict[tuple[float, float], float], predicate: Callable | None = None):
         _check_weights("RNGWeightedFloat", ranges)
+        _check_ranges("RNGWeightedFloat", ranges, finite=True)
         self.ranges = ranges
         self.predicate = predicate
 

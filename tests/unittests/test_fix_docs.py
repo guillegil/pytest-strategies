@@ -160,6 +160,17 @@ class TestPackagingMetadata:
         if re.fullmatch(r"\d+\.\d+\.\d+", version):
             assert f"\n## [{version}] - " in _read("CHANGELOG.md")
 
+    def test_changelog_agrees_with_the_development_status(self, pyproject):
+        """The 2.0.0 notes said "development status is Alpha" for a Production/Stable package."""
+        project = pyproject["project"]
+        (status,) = [c for c in project["classifiers"] if c.startswith("Development Status")]
+        section = _read("CHANGELOG.md").split(f"\n## [{project['version']}]", 1)[-1]
+        section = section.split("\n## [", 1)[0]
+        for claimed in re.findall(r"development status is ([\w/-]+)", section, re.I):
+            assert (
+                claimed.lower() in status.lower()
+            ), f"CHANGELOG says {claimed!r}, pyproject {status!r}"
+
     def test_license_is_the_same_everywhere(self, pyproject):
         """LICENSE said GPL-3.0, the metadata Apache-2.0 and the README MIT."""
         project = pyproject["project"]

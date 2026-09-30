@@ -1,4 +1,7 @@
+import functools
+import inspect
 import os
+import sys
 import warnings
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -15,30 +18,62 @@ from ._warnings import PytestStrategiesWarning
 from .parameters import Parameter
 
 
-def _factory_origin(fn: Callable[..., Any]) -> tuple[str | None, str | None]:
+def _factory_origin(fn: Callable[..., Any]) -> tuple[str | None, str | None, int | None]:
     """
-    Identify a factory by its source file and qualified name.
+    Identify a factory by its source file, qualified name and first line.
 
     The module name is deliberately not used: the plugin executes each strategies
     file under a fresh module name in every (possibly nested) pytest session.
     The file path is normalized, so one file reached through different path
     strings (``proj/../shared/x.py`` and ``shared/x.py``, a symlink) is the same.
+    The first line tells apart two functions of the same name in one file.
+
+    ``functools.wraps`` decorators and ``functools.cache`` are looked through, so
+    the decorated function counts, not the decorator's wrapper. A
+    ``functools.partial`` counts as the function it wraps, and a class or any
+    other callable object as its class. So factories built by one function or
+    class (closures, partials, instances) cannot be told apart.
     """
+    fn = _unwrap(fn)
+    while isinstance(fn, functools.partial):
+        fn = _unwrap(fn.func)
     code = getattr(fn, "__code__", None)
-    # The module's __file__ is set by the import system from the real location;
-    # co_filename can be stale (pytest's rewritten pyc after a checkout moved)
-    filename = getattr(fn, "__globals__", {}).get("__file__") or (
-        code.co_filename if code is not None else None
+    if code is not None:
+        # The module's __file__ is set by the import system from the real location;
+        # co_filename can be stale (pytest's rewritten pyc after a checkout moved)
+        filename = getattr(fn, "__globals__", {}).get("__file__") or code.co_filename
+        return (_normalize(filename), getattr(fn, "__qualname__", None), code.co_firstlineno)
+    cls = fn if isinstance(fn, type) else type(fn)
+    module = sys.modules.get(getattr(cls, "__module__", None) or "")
+    return (
+        _normalize(getattr(module, "__file__", None)),
+        cls.__qualname__,
+        # Python 3.13+ records where a class statement starts
+        getattr(cls, "__firstlineno__", None),
     )
-    if filename:
-        filename = os.path.normcase(os.path.realpath(filename))
-    return (filename, getattr(fn, "__qualname__", None))
+
+
+def _unwrap(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """inspect.unwrap, or fn itself when its __wrapped__ chain loops."""
+    try:
+        unwrapped: Callable[..., Any] = inspect.unwrap(fn)
+    except ValueError:
+        return fn
+    return unwrapped
+
+
+def _normalize(filename: str | None) -> str | None:
+    """Return the real, normalized form of a path, or None."""
+    return os.path.normcase(os.path.realpath(filename)) if filename else None
 
 
 def _describe_factory(fn: Callable[..., Any]) -> str:
-    """Return a readable 'file:qualname' description of a factory for messages."""
-    filename, qualname = _factory_origin(fn)
-    return f"{filename or '<unknown>'}:{qualname or repr(fn)}"
+    """Return a readable 'file:line:qualname' description of a factory for messages."""
+    filename, qualname, line = _factory_origin(fn)
+    where = filename or "<unknown>"
+    if line is not None:
+        where = f"{where}:{line}"
+    return f"{where}:{qualname or repr(fn)}"
 
 
 class Strategy:

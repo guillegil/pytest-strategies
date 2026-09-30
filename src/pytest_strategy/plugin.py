@@ -5,23 +5,110 @@ Pytest plugin for pytest-strategies with auto-discovery of strategy definitions.
 import argparse
 import fnmatch
 import glob
+import importlib.abc
+import importlib.machinery
 import importlib.util
 import itertools
 import os
 import sys
 from collections.abc import Sequence
-from pathlib import Path
+from pathlib import Path, PurePath
+from types import ModuleType
 
 import pytest
 from pytest import Config, Session
 
 from ._runtime import runtime
+from ._warnings import PytestStrategiesWarning
 
 # Monotonic counter so every load gets a unique module name. Without this, two
 # strategy files sharing a relative path (e.g. re-running pytest in-process with
 # a rewritten strategies.py) would collide in sys.modules and the second file's
 # registrations would be silently dropped by the import cache.
 _load_counter = itertools.count()
+
+
+def _file_key(path: "str | os.PathLike[str]") -> str:
+    """Identify a file by its real, normalized path."""
+    return os.path.normcase(os.path.realpath(path))
+
+
+def _matches_norecursedirs(pattern: str, path: Path) -> bool:
+    """
+    Match a norecursedirs pattern against a directory as pytest does.
+
+    A pattern without a path separator is matched against the directory name,
+    one with a separator (e.g. ``tests/data``) against the end of the path
+    (pytest's ``_pytest.pathlib.fnmatch_ex``).
+    """
+    if os.sep != "/" and os.sep not in pattern and "/" in pattern:
+        pattern = pattern.replace("/", os.sep)
+    if os.sep not in pattern:
+        return fnmatch.fnmatch(path.name, pattern)
+    if PurePath(path).is_absolute() and not os.path.isabs(pattern):
+        pattern = f"*{os.sep}{pattern}"
+    return fnmatch.fnmatch(str(path), pattern)
+
+
+class _LoadedModuleLoader(importlib.abc.Loader):
+    """Loader that hands out a module the plugin already loaded, without running it."""
+
+    def __init__(self, module: ModuleType) -> None:
+        self.module = module
+        self.module_spec = module.__spec__
+
+    def create_module(self, spec: importlib.machinery.ModuleSpec) -> ModuleType:
+        return self.module
+
+    def exec_module(self, module: ModuleType) -> None:
+        # module_from_spec replaced __spec__: keep the module as it was loaded
+        module.__spec__ = self.module_spec
+
+
+class _StrategyFileFinder(importlib.abc.MetaPathFinder):
+    """
+    Make ``import my_strategies`` reuse the module the plugin loaded from that file.
+
+    Running a strategy file a second time (e.g. a test module imports it for an
+    Enum) would redraw the values it draws at import time, from a random state
+    that depends on the tests collected before, and would silently replace its
+    registrations; the test would also get a second copy of its classes. The
+    file is matched by its real path, so another file with the same name is
+    imported as usual. pytest's assertion rewriting hook comes first, so a test
+    module that is also a strategy file is still rewritten and collected.
+    """
+
+    def find_spec(self, fullname, path, target=None):
+        state = runtime.current
+        if state is None or not state.strategy_modules:
+            return None
+        # Cheap check first: only a name ending like a loaded file can match
+        filename = os.path.normcase(fullname.rpartition(".")[2] + ".py")
+        if not any(os.path.basename(key) == filename for key in state.strategy_modules):
+            return None
+        spec = importlib.machinery.PathFinder.find_spec(fullname, path)
+        if spec is None or not spec.origin:
+            return None
+        module = state.strategy_modules.get(_file_key(spec.origin))
+        if module is None:
+            return None
+        return importlib.util.spec_from_loader(
+            fullname, _LoadedModuleLoader(module), origin=spec.origin
+        )
+
+
+_strategy_file_finder = _StrategyFileFinder()
+
+
+def _install_strategy_file_finder() -> None:
+    """Put the finder before the path finder (after pytest's rewriting hook)."""
+    if _strategy_file_finder in sys.meta_path:
+        return
+    try:
+        index = sys.meta_path.index(importlib.machinery.PathFinder)
+    except ValueError:
+        index = len(sys.meta_path)
+    sys.meta_path.insert(index, _strategy_file_finder)
 
 
 class PytestStrategyPlugin:
@@ -169,7 +256,7 @@ class PytestStrategyPlugin:
             return None
 
         vector_name = config.getoption("vector_name")
-        if vector_name:
+        if vector_name is not None:
             option = f"--vector-name={vector_name}"
         else:
             option = f"--vector-index={config.getoption('vector_index')}"
@@ -241,7 +328,7 @@ class PytestStrategyPlugin:
 
         Args:
             config: Pytest config object
-            norecursedirs: Directory name patterns the search does not descend into
+            norecursedirs: Directory patterns the search does not descend into
 
         Returns:
             List of directories to search
@@ -281,7 +368,7 @@ class PytestStrategyPlugin:
         Args:
             search_path: A directory that is searched
             directory: An absolute, normalized directory
-            norecursedirs: Directory name patterns the search does not descend into
+            norecursedirs: Directory patterns the search does not descend into
 
         Returns:
             True if directory is search_path or a directory the search enters
@@ -302,14 +389,15 @@ class PytestStrategyPlugin:
         Check whether discovery skips a directory below a search path.
 
         Skipped, as in pytest's own collection: hidden and __pycache__ directories,
-        names matching the norecursedirs ini patterns (e.g. venv, build,
-        node_modules) and virtual environments (a directory containing pyvenv.cfg,
+        directories matching the norecursedirs ini patterns (e.g. venv, build,
+        node_modules, or a path pattern such as tests/data) and virtual
+        environments (a directory containing pyvenv.cfg or conda-meta/history,
         whatever its name). An installed pytest-strategies has files matching the
         patterns in a virtual environment.
 
         Args:
             path: The directory
-            norecursedirs: Directory name patterns to skip
+            norecursedirs: Directory patterns to skip
 
         Returns:
             True if the directory is skipped
@@ -318,8 +406,18 @@ class PytestStrategyPlugin:
         return (
             name.startswith(".")
             or name == "__pycache__"
-            or any(fnmatch.fnmatch(name, pattern) for pattern in norecursedirs)
-            or (path / "pyvenv.cfg").is_file()
+            or any(_matches_norecursedirs(pattern, path) for pattern in norecursedirs)
+            or self._is_environment(path)
+        )
+
+    @staticmethod
+    def _is_environment(path: Path) -> bool:
+        """Detect a virtual or conda environment, as pytest's collection does."""
+        # os.path.isfile is False on any OSError. Path.is_file raises
+        # PermissionError for a directory that cannot be entered before Python
+        # 3.14, which would abort the whole run.
+        return os.path.isfile(path / "pyvenv.cfg") or os.path.isfile(
+            path / "conda-meta" / "history"
         )
 
     def _discover_strategy_files(
@@ -341,11 +439,14 @@ class PytestStrategyPlugin:
         Only files that contain @Strategy.register are returned, so that
         unrelated modules that happen to have such a name are not imported.
         Directories below a search path are skipped as described in
-        _skip_directory. Files are returned in a deterministic order.
+        _skip_directory; symlinked directories are followed, as pytest's
+        collection does. Files are returned in a deterministic order: one search
+        path after the other, sorted by path within each, and a file reached
+        through two paths only once.
 
         Args:
             search_paths: List of paths to search
-            norecursedirs: Directory name patterns not to descend into
+            norecursedirs: Directory patterns not to descend into
             unimported: If given, the files matching a pattern that are not
                 returned because they contain no @Strategy.register, but do
                 mention register (an alias or a plain call), are appended to
@@ -356,6 +457,7 @@ class PytestStrategyPlugin:
         """
         strategy_files: list[Path] = []
         without_registration: list[Path] = []
+        seen_files: set[str] = set()
 
         patterns = [
             "strategies.py",
@@ -369,14 +471,21 @@ class PytestStrategyPlugin:
                 continue
 
             found: list[Path] = []
-            for dirpath, dirnames, filenames in os.walk(search_path):
+            # Each real directory is walked once, so a symlink loop ends
+            visited: set[tuple[int, int]] = set()
+            self._first_visit(search_path, visited)
+            for dirpath, dirnames, filenames in os.walk(search_path, followlinks=True):
                 directory = Path(dirpath)
                 # Prune in place so the walk never enters a skipped directory. Only
                 # the directories below the search path are filtered: a project that
                 # lives under a dot directory (~/.cache/proj, testpaths = ../shared)
-                # or a path given explicitly is searched.
+                # or a path given explicitly is searched. Sorted, so the same path
+                # reaches a directory linked twice on every filesystem.
                 dirnames[:] = [
-                    d for d in dirnames if not self._skip_directory(directory / d, norecursedirs)
+                    d
+                    for d in sorted(dirnames)
+                    if not self._skip_directory(directory / d, norecursedirs)
+                    and self._first_visit(directory / d, visited)
                 ]
                 found.extend(
                     directory / name
@@ -388,9 +497,11 @@ class PytestStrategyPlugin:
             # Load in a fixed order, not the filesystem's: import-time draws and
             # which of two registrations of a name wins depend on the order.
             for file_path in sorted(found, key=lambda p: p.relative_to(search_path).as_posix()):
-                # Skip if already found
-                if file_path in strategy_files or file_path in without_registration:
+                # Skip if already found (another search path, or a symlink)
+                key = _file_key(file_path)
+                if key in seen_files:
                     continue
+                seen_files.add(key)
 
                 # Check if file contains strategy registrations
                 if self._contains_strategy_registration(file_path):
@@ -404,6 +515,19 @@ class PytestStrategyPlugin:
             unimported.extend(without_registration)
         return strategy_files
 
+    @staticmethod
+    def _first_visit(directory: Path, visited: set[tuple[int, int]]) -> bool:
+        """Record a directory by its device and inode; False if already visited."""
+        try:
+            stat = os.stat(directory)
+        except OSError:
+            return False
+        key = (stat.st_dev, stat.st_ino)
+        if key in visited:
+            return False
+        visited.add(key)
+        return True
+
     def _contains_strategy_registration(self, file_path: Path) -> bool:
         """
         Check if a file contains @Strategy.register decorators.
@@ -415,8 +539,7 @@ class PytestStrategyPlugin:
             True if file contains strategy registrations
         """
         # Bytes, so a file in another source encoding (a PEP 263 coding line) is found
-        content = self._read_bytes(file_path)
-        return b"@Strategy.register" in content or b"@strategy.register" in content
+        return b"@Strategy.register" in self._read_bytes(file_path)
 
     @staticmethod
     def _read_bytes(file_path: Path) -> bytes:
@@ -435,7 +558,17 @@ class PytestStrategyPlugin:
             config: Pytest config object
         """
 
+        _install_strategy_file_finder()
         for file_path in strategy_files:
+            imported = self._imported_module(file_path)
+            if imported is not None:
+                # Already imported under its own name, with its strategies
+                # registered (e.g. conftest.py ran "from my_strategies import Mode"):
+                # running it again would make a second copy of its classes, and the
+                # tests would get values of the other copy.
+                self._record_loaded(file_path, imported, config)
+                continue
+
             # Create a module name from the file path
             module_name = self._create_module_name(file_path, config)
 
@@ -447,6 +580,16 @@ class PytestStrategyPlugin:
                 module = importlib.util.module_from_spec(spec)
                 sys.modules[module_name] = module
                 spec.loader.exec_module(module)
+
+            except PytestStrategiesWarning as e:
+                # Only raised when filterwarnings turns the warning into an error
+                # (a strategy name registered twice): fail the run, as a test
+                # module does, rather than report the file as not loaded while
+                # its replacing registration stays in effect.
+                sys.modules.pop(module_name, None)
+                raise pytest.UsageError(
+                    f"pytest-strategies: {file_path}: {type(e).__name__}: {e}"
+                ) from e
 
             except pytest.skip.Exception as e:
                 # pytest.skip() / pytest.importorskip() at module level: the file
@@ -473,16 +616,49 @@ class PytestStrategyPlugin:
             else:
                 # Outside the try: a problem reporting a successful load must not
                 # turn it into a load error.
-                runtime.record_discovered_file(file_path)
+                self._record_loaded(file_path, module, config)
 
-                # Optionally log in verbose mode
-                if self._verbosity(config) >= 2:
-                    try:
-                        shown = file_path.relative_to(config.rootpath)
-                    except ValueError:
-                        # Outside rootdir, e.g. an absolute testpaths entry
-                        shown = file_path
-                    print(f"pytest-strategies: Loaded {shown}")
+    def _record_loaded(self, file_path: Path, module: ModuleType, config: Config) -> None:
+        """Record a loaded strategy file, so an import of it reuses the module."""
+        state = runtime.current
+        if state is not None:
+            state.strategy_modules[_file_key(file_path)] = module
+        runtime.record_discovered_file(file_path)
+
+        # Optionally log in verbose mode
+        if self._verbosity(config) >= 2:
+            try:
+                shown = file_path.relative_to(config.rootpath)
+            except ValueError:
+                # Outside rootdir, e.g. an absolute testpaths entry
+                shown = file_path
+            print(f"pytest-strategies: Loaded {shown}")
+
+    @staticmethod
+    def _imported_module(file_path: Path) -> ModuleType | None:
+        """
+        Return a module already imported from this file whose strategies are registered.
+
+        A module left in sys.modules by an earlier in-process session, whose
+        registrations that session removed when it ended, does not count.
+        """
+        from .strategy import Strategy, _unwrap
+
+        key = None
+        for factory in Strategy._registry.values():
+            namespace = getattr(_unwrap(factory), "__globals__", None)
+            if not namespace:
+                continue
+            filename = namespace.get("__file__")
+            if not filename or os.path.basename(filename) != file_path.name:
+                continue
+            module = sys.modules.get(namespace.get("__name__", ""))
+            if module is None or module.__dict__ is not namespace:
+                continue
+            key = key or _file_key(file_path)
+            if _file_key(filename) == key:
+                return module
+        return None
 
     @staticmethod
     def _verbosity(config: Config) -> int:
@@ -654,6 +830,8 @@ def pytest_unconfigure(config):
         config.pluginmanager.unregister(_plugin_instance, "pytest-strategies")
         delattr(config, "_strategy_plugin_instance")
         runtime.pop()
+        if runtime.current is None and _strategy_file_finder in sys.meta_path:
+            sys.meta_path.remove(_strategy_file_finder)
 
 
 @pytest.hookimpl(trylast=True)

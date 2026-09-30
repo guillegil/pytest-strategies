@@ -164,9 +164,11 @@ python_type = int_type.python_type  # Returns: int
 - Configurable retry logic
 - Type-safe generation
 - Arguments checked at construction: the RNG type classes raise `RNGValueError`
-  for `min > max`, empty, negative, non-finite or all-zero weights, a non-Enum
-  class or an unsatisfiable `RNGEnum` predicate, an empty `RNGString` charset,
-  and a `set`/`frozenset` passed to `Series` or `RNGSequence`
+  for `min > max` (also in an `RNGWeighted*` range), infinite or NaN float
+  bounds, empty, negative, non-finite or all-zero weights (or a total that
+  overflows), a non-Enum class or an unsatisfiable `RNGEnum` predicate, an
+  empty `RNGString` charset, and a `set`/`frozenset` passed to `Series` or
+  `RNGSequence`
 - `Series`/`RNGSequence` raise on an empty sequence (also after the predicate)
   unless created with `skip_if_empty="<reason>"`. With the reason, the empty
   sequence is kept, its `skip_reason` is the reason, and `generate()` raises
@@ -235,9 +237,10 @@ samples = arg3.generate_samples(10)        # 10 samples (+ directed if configure
 - `has_directed_values` - Whether it has directed values
 
 **Inside a `Parameter`:** a strategy uses each argument's `rng_type` (or static
-`value`) and its `validator`. The argument-level `directed_values` and
-`test_values` are only used by `TestArg.generate_samples()`. A `Parameter` does
-not turn them into vectors, so define edge cases as the `Parameter`'s
+`value`) and its `validator`. The argument-level `directed_values` are only
+used by `TestArg.generate_samples()`, and `test_values` are not used to generate
+values at all (they only show as `has_test_values` in
+`Strategy.export_strategies()`). A `Parameter` does not turn them into vectors, so define edge cases as the `Parameter`'s
 `directed_vectors` and `test_vectors`. The validator runs on random draws,
 static values and `Series`/`RNGSequence` values, but not on directed or test
 vectors. A value that fails it stops collection with a `ValueError` and is not
@@ -389,7 +392,10 @@ def test_coordinates(x, y):
 1. `@Strategy.register()` stores factory functions in a global registry. If a
    different function registers a name that is already taken, it emits a
    `PytestStrategiesWarning` (from `pytest_strategy.strategy`), and the last
-   registration wins.
+   registration wins. A function is identified by its file, qualified name and
+   first line, looking through `functools.wraps` decorators. When the warning
+   is turned into an error, a duplicate in a strategy file stops the session at
+   start with a usage error.
 2. `@Strategy.strategy()` runs when the test module is imported. It reseeds the
    random state for this strategy and test (see [Reproducibility](#reproducibility)),
    then calls the factory once. It passes `nsamples` by keyword, positionally, or
@@ -408,8 +414,9 @@ see "Dataclass Parameters" in the README.
 - A random stream of its own for each strategy and test
 - CLI option integration
 - Readable test IDs. A value whose repr contains a memory address is shown by
-  its type name, and set elements are sorted, so IDs are the same on every run
-  and on every xdist worker.
+  its type name, and set elements are sorted (also inside tuples, lists,
+  dicts, and dataclass and namedtuple values that keep their generated repr),
+  so IDs are the same on every run and on every xdist worker.
 
 ---
 
@@ -457,9 +464,16 @@ named `strategies.py`, `strategy.py`, `*_strategies.py` or `*_strategy.py` that
 contains `@Strategy.register`. It searches the `testpaths` directories (glob
 patterns expanded), or the rootdir without `testpaths`, plus the directory of
 each path given on the command line. Below those directories it skips hidden
-directories, `__pycache__`, `norecursedirs` matches and virtual environments
-(directories containing `pyvenv.cfg`). Files are loaded in sorted path order,
-each as a standalone module (no relative imports). A file that raises while
+directories, `__pycache__`, `norecursedirs` matches (matched as pytest does, so
+`tests/data` works) and virtual environments (directories containing
+`pyvenv.cfg` or `conda-meta/history`), and it follows symlinked directories.
+Files are loaded one search directory at a time, in sorted path order within
+each, each as a standalone module (no relative imports). The plugin keeps the
+module of each loaded file, and a meta path finder (`_StrategyFileFinder`,
+placed after pytest's assertion rewriting hook) hands it out when a test module
+or `conftest.py` imports the file, so the file is not executed again. A file
+that a `conftest.py` imported before the session started, with its strategies
+registered, is used as it is. A file that raises while
 loading is reported with a `pytest-strategies: Warning - Failed to load ...`
 line. A file that calls `pytest.skip()`/`pytest.importorskip()` at module level
 is skipped (reported with `-v`). Both kinds are listed in any
@@ -468,8 +482,10 @@ that mention `register` but lack `@Strategy.register` (so were not imported).
 The marker is searched in the file's bytes, so any source encoding works.
 
 **`pytest_strategies_context(config)`:** a `firstresult` hook the plugin adds.
-A factory with a `ctx` parameter gets its result as `ctx=` (`None` when no
-implementation returns a value); other factories are called as before.
+A factory with a `ctx` parameter gets its result as `ctx=` (when no
+implementation returns a value, `ctx` keeps its default, or a value bound with
+`functools.partial`, and is `None` without one); other factories are called as
+before.
 `call_factory` calls it through `runtime.strategy_context()` the first time a
 factory needs it, and the session keeps the result, or the exception it raised,
 for every later factory. Each (nested) session and each pytest-xdist worker
@@ -657,14 +673,21 @@ get different vectors. For the same seed, the values differ from those of
 **Global random state:** with `--rng-seed`, the global `random` state is seeded
 when pytest is configured. Without it, the plugin does not touch the state at
 startup. Right before it loads strategy files, it starts the state from the
-seed, so values drawn while the files are imported are reproducible too. After
+seed, so values drawn while the plugin imports the files are reproducible too.
+Two cases are not covered: a strategy file that a `conftest.py` imported
+before the session started, and, without `--rng-seed` and without any strategy
+file, draws at module level in a test module that come before the first
+strategy is applied. After
 that, the state is reseeded for each strategy and test as described above. When
 a session ends (including an in-process `pytester` run), the seed, the global
 random state and the strategy registry are restored to what they were when it
 began.
 
 **pytest-xdist:** the controller sends its seed to the workers, so `-n` works
-with or without `--rng-seed` and every worker generates the same tests.
+with or without `--rng-seed` and every worker generates the same tests. The
+uncovered module-level draws in test modules above differ between workers
+without `--rng-seed`, and xdist then stops with "Different tests were
+collected".
 
 **Test bodies:** the seed reproduces the parameters, not random values drawn
 inside a test body. Those come from the global random state as the earlier

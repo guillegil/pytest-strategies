@@ -91,9 +91,9 @@ def math_strategy(nsamples: int):
 
 The factory is called once for each test that uses the strategy, when pytest collects that test. It receives the run's sample count as `nsamples`: an integer (the `--nsamples` value, or 10 when the option is not given), or the string `"auto"` under `--nsamples=auto`. The factory may take it as a keyword or positional parameter, or take no parameters at all; the plugin reads the signature to decide how to call it. A factory that returns a `Parameter` does not need to use `nsamples`, because the plugin generates the vectors itself.
 
-Strategy names share one registry. If a different function registers a name that is already taken, the plugin emits a `PytestStrategiesWarning` naming both functions, and the last registration wins. Running the same function's registration again (for example, the same file imported twice) is silent.
+Strategy names share one registry. If a different function registers a name that is already taken, the plugin emits a `PytestStrategiesWarning` naming both functions, and the last registration wins. Running the same function's registration again (for example, the same file executed twice) is silent. Decorated factories count as the function they decorate. Factories built by one shared function or class (closures, `functools.partial` objects, instances) count as that function or class, so a clash between two of them is not reported.
 
-`PytestStrategiesWarning` is a `UserWarning` subclass that you can import from `pytest_strategy.strategy`. To turn it into an error, add `error::pytest_strategy.strategy.PytestStrategiesWarning` to your `filterwarnings` setting.
+`PytestStrategiesWarning` is a `UserWarning` subclass that you can import from `pytest_strategy.strategy`. To turn it into an error, add `error::pytest_strategy.strategy.PytestStrategiesWarning` to your `filterwarnings` setting. A name registered twice in [strategy files](#10-strategy-files) then stops the run when it starts, with a usage error naming the file.
 
 ### 2. RNG Types
 `pytest-strategies` provides rich, type-safe generators:
@@ -112,7 +112,9 @@ Strategy names share one registry. If a different function registers a name that
 
 RNG types check their arguments when they are constructed. A misconfigured strategy fails at collection with an `RNGValueError` (from `pytest_strategy.rng`) instead of drawing wrong values later. These cases are rejected:
 - `RNGInteger` or `RNGFloat` with `min > max`. This includes a single bound that crosses the other bound's default: `RNGFloat(min=5.0)` fails because `max` defaults to 1.0.
-- Weights of `RNGWeightedInteger`, `RNGWeightedFloat` or `RNGEnum` that are empty, negative, not finite or all zero. Some zero weights are allowed.
+- `RNGFloat` or `RNGWeightedFloat` bounds that are infinite or NaN.
+- Weights of `RNGWeightedInteger`, `RNGWeightedFloat` or `RNGEnum` that are empty, negative, not finite or all zero, or whose total overflows. Some zero weights are allowed.
+- A range of `RNGWeightedInteger` or `RNGWeightedFloat` that is not a `(min, max)` tuple with `min <= max`.
 - `RNGEnum` given something that is not an `Enum` class, an `Enum` with no members, or a predicate that no member satisfies.
 - `RNGString` with an empty `charset` (unless the length is 0), a negative length, or `min_length > max_length`.
 - A `set` or `frozenset` passed to `Series` or `RNGSequence`. Their iteration order is not reproducible, so pass `sorted(...)` or a list instead.
@@ -298,6 +300,8 @@ def api_test_strategy(nsamples):
 ```
 Running with `pytest --vector-mode=test` runs only the test vectors, ignoring random and directed vectors.
 
+A directed or test vector holds one value per argument, in argument order. It can be a tuple or a list (for example read from a YAML file), so `[404]` works like `(404,)`.
+
 ### 8. Per-Strategy Sample Count (New in v2.0.0)
 
 By default the number of generated vectors is controlled globally by `--nsamples` (10 when unset). A strategy can declare its own count by passing `nsamples` to its `Parameter`:
@@ -373,9 +377,11 @@ Strategies do not have to be registered in the test module. The plugin imports s
 - its name is `strategies.py`, `strategy.py`, `*_strategies.py` or `*_strategy.py`, and
 - it contains the text `@Strategy.register`.
 
-The plugin searches the `testpaths` directories from your pytest configuration, expanding glob patterns such as `pkgs/*/tests`. When `testpaths` is not set, it searches the rootdir. It also searches the directory of each path given on the command line. Below these directories it skips what pytest's collection skips: hidden directories (names starting with `.`), `__pycache__`, directories matching `norecursedirs` (by default these include `build`, `dist`, `venv` and `node_modules`), and virtual environments (any directory containing a `pyvenv.cfg` file). A directory named on the command line is always searched. Files are loaded in sorted path order, so the same file wins a duplicate strategy name on every machine.
+The plugin searches the `testpaths` directories from your pytest configuration, expanding glob patterns such as `pkgs/*/tests`. When `testpaths` is not set, it searches the rootdir. It also searches the directory of each path given on the command line. Below these directories it skips what pytest's collection skips: hidden directories (names starting with `.`), `__pycache__`, directories matching `norecursedirs` (by default these include `build`, `dist`, `venv` and `node_modules`; a pattern with a `/`, such as `tests/data`, is matched against the path), and virtual environments (a directory containing `pyvenv.cfg`, or a conda environment containing `conda-meta/history`). Like pytest, it follows symlinked directories. A directory named on the command line is always searched. Files are loaded one search directory at a time, the `testpaths` entries in the order they are listed (or the rootdir) and then the command-line directories, in sorted path order within each. So the same file wins a duplicate strategy name on every machine.
 
 Each strategy file is imported as a standalone module, not as part of a package. Relative imports do not work in it, and a sibling module can only be imported if its directory is on `sys.path`.
+
+A test module or `conftest.py` can import a strategy file, for example to use an `Enum` it defines (`from my_strategies import Mode`). The import gets the module the plugin loaded, so the file is not executed a second time, and the tests compare against the same classes the strategy uses. A strategy file that a `conftest.py` imports while pytest starts (the rootdir's `conftest.py`, for example) is already loaded when the session starts, and the plugin uses that module instead of loading the file again. Values that such a file draws at import time are then drawn before the seed is applied, so they are not reproduced by `--rng-seed`: draw them in the factory instead.
 
 A strategy file that fails to import does not stop the run. The plugin prints `pytest-strategies: Warning - Failed to load <path>: <error>` when the session starts. A file that calls `pytest.skip(..., allow_module_level=True)` or `pytest.importorskip()` at module level is skipped, and that is reported with `-v`. Any "Strategy 'name' not found" error lists the files that failed to load or were skipped. It also lists files with a strategy file name that mention `register` but were not imported because they lack the literal `@Strategy.register` (an alias such as `@S.register`, or a plain `Strategy.register("x")(fn)` call). `pytest -vv` prints each loaded file, and `pytest --list-strategies` lists the registered strategy names and exits.
 
@@ -476,9 +482,11 @@ Each strategy and test pair draws from its own random stream. The stream is deri
 
 The seed reproduces the generated test parameters, not random draws made inside test bodies. A test body that draws from `RNG` or `random` gets whatever state the global generator is in when the test runs. That state depends on the tests collected and run before it, so it changes when you rerun a single test or run under pytest-xdist. Seed such draws in the test itself (see [docs/dev.md](docs/dev.md#reproducibility)).
 
+Values drawn at import time are reproduced when they are drawn in a strategy file. A test module is different: without `--rng-seed`, a draw at module level in a test module (for example `BASE = RNG.integer(0, 1000)` next to a strategy registered there) comes from the unseeded generator when no strategy file exists, so the printed seed does not reproduce it. Move such draws into the factory or a strategy file, or pass `--rng-seed`.
+
 For the same seed, the generated values differ from those of 1.x (1.0.0 and the 1.1.0 pre-releases), so a seed recorded with an older version does not reproduce that run. Also keep the same rootdir, because the test's path relative to the rootdir is part of the stream. pytest uses the directory of your ini file (such as `pytest.ini`) as the rootdir when there is one.
 
-**pytest-xdist:** runs with `-n` work with or without `--rng-seed`. The controller sends its seed to the workers, so they all generate the same tests.
+**pytest-xdist:** runs with `-n` work with or without `--rng-seed`. The controller sends its seed to the workers, so they all generate the same tests. The exception is the module-level draw in a test module described above: without `--rng-seed` it differs between workers, and xdist stops with "Different tests were collected".
 
 ## 📝 License
 
