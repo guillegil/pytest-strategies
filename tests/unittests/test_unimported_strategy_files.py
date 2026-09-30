@@ -70,7 +70,35 @@ class TestDiscoveryCollectsUnimportedFiles:
         found = PytestStrategyPlugin()._discover_strategy_files([tmp_path], (), unimported)
 
         assert found == [decorated]
-        assert unimported == [unrelated, aliased]
+        # A file that never mentions register is an unrelated module, not a candidate
+        assert unimported == [aliased]
+        assert unrelated not in found
+
+    def test_test_modules_that_only_use_strategies_are_not_collected(self, tmp_path):
+        _write(
+            tmp_path / "test_strategy.py",
+            "from pytest_strategy import Strategy\n\n"
+            "@Strategy.strategy('x')\ndef test_x(a):\n    pass\n",
+        )
+
+        unimported: list[Path] = []
+        PytestStrategyPlugin()._discover_strategy_files([tmp_path], (), unimported)
+
+        assert unimported == []
+
+    def test_file_in_another_source_encoding_is_imported(self, tmp_path):
+        path = tmp_path / "latin_strategies.py"
+        path.write_bytes(
+            b"# -*- coding: latin-1 -*-\n# caf\xe9\n"
+            b"from pytest_strategy import Strategy\n\n@Strategy.register('lat')\n"
+            b"def lat(nsamples):\n    return ('x', [1])\n"
+        )
+
+        unimported: list[Path] = []
+        found = PytestStrategyPlugin()._discover_strategy_files([tmp_path], (), unimported)
+
+        assert found == [path]
+        assert unimported == []
 
     def test_skipped_directories_are_not_collected(self, tmp_path):
         _write(tmp_path / ".hidden" / "strategies.py", ALIASED)

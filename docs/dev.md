@@ -461,7 +461,9 @@ each as a standalone module (no relative imports). A file that raises while
 loading is reported with a `pytest-strategies: Warning - Failed to load ...`
 line. A file that calls `pytest.skip()`/`pytest.importorskip()` at module level
 is skipped (reported with `-v`). Both kinds are listed in any
-"Strategy 'name' not found" error.
+"Strategy 'name' not found" error, together with the files matching a pattern
+that mention `register` but lack `@Strategy.register` (so were not imported).
+The marker is searched in the file's bytes, so any source encoding works.
 
 ---
 
@@ -754,7 +756,9 @@ Make sure you:
    `pytest -vv` lists the loaded files)
 
 The error message lists strategy files that failed to load or skipped
-themselves; the load failures are also printed when the session starts.
+themselves (the load failures are also printed when the session starts), and
+files named like strategy files that were not imported because they register
+without the literal `@Strategy.register`.
 
 ### Tests not reproducible
 

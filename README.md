@@ -377,7 +377,7 @@ The plugin searches the `testpaths` directories from your pytest configuration, 
 
 Each strategy file is imported as a standalone module, not as part of a package. Relative imports do not work in it, and a sibling module can only be imported if its directory is on `sys.path`.
 
-A strategy file that fails to import does not stop the run. The plugin prints `pytest-strategies: Warning - Failed to load <path>: <error>` when the session starts. A file that calls `pytest.skip(..., allow_module_level=True)` or `pytest.importorskip()` at module level is skipped, and that is reported with `-v`. Any "Strategy 'name' not found" error lists the files that failed to load or were skipped. `pytest -vv` prints each loaded file, and `pytest --list-strategies` lists the registered strategy names and exits.
+A strategy file that fails to import does not stop the run. The plugin prints `pytest-strategies: Warning - Failed to load <path>: <error>` when the session starts. A file that calls `pytest.skip(..., allow_module_level=True)` or `pytest.importorskip()` at module level is skipped, and that is reported with `-v`. Any "Strategy 'name' not found" error lists the files that failed to load or were skipped. It also lists files with a strategy file name that mention `register` but were not imported because they lack the literal `@Strategy.register` (an alias such as `@S.register`, or a plain `Strategy.register("x")(fn)` call). `pytest -vv` prints each loaded file, and `pytest --list-strategies` lists the registered strategy names and exits.
 
 ## 🔌 Fixture Integration
 

@@ -347,8 +347,9 @@ class PytestStrategyPlugin:
             search_paths: List of paths to search
             norecursedirs: Directory name patterns not to descend into
             unimported: If given, the files matching a pattern that are not
-                returned because they contain no @Strategy.register are
-                appended to it, in the same order
+                returned because they contain no @Strategy.register, but do
+                mention register (an alias or a plain call), are appended to
+                it, in the same order
 
         Returns:
             List of discovered strategy file paths
@@ -394,7 +395,9 @@ class PytestStrategyPlugin:
                 # Check if file contains strategy registrations
                 if self._contains_strategy_registration(file_path):
                     strategy_files.append(file_path)
-                else:
+                # Test modules such as test_strategy.py match the patterns too;
+                # only a file that registers some other way is worth reporting
+                elif b"register" in self._read_bytes(file_path):
                     without_registration.append(file_path)
 
         if unimported is not None:
@@ -411,12 +414,17 @@ class PytestStrategyPlugin:
         Returns:
             True if file contains strategy registrations
         """
+        # Bytes, so a file in another source encoding (a PEP 263 coding line) is found
+        content = self._read_bytes(file_path)
+        return b"@Strategy.register" in content or b"@strategy.register" in content
+
+    @staticmethod
+    def _read_bytes(file_path: Path) -> bytes:
+        """Return the file's content, or nothing when it cannot be read."""
         try:
-            content = file_path.read_text(encoding="utf-8")
-            # Look for @Strategy.register pattern
-            return "@Strategy.register" in content or "@strategy.register" in content
-        except Exception:
-            return False
+            return file_path.read_bytes()
+        except OSError:
+            return b""
 
     def _load_strategy_files(self, strategy_files: list[Path], config: Config) -> None:
         """

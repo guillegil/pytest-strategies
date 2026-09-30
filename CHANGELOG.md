@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A `TestArg` validator also checks `Series` and `RNGSequence` values.
 - `PytestStrategiesWarning`s raised while generating vectors start with the strategy and the test (`Strategy 'name' (test_fn): ...`) and point at the test function instead of the plugin's code.
 - `Series` and `RNGSequence` reject `None` and a predicate that is not callable with `RNGValueError`.
+- A "Strategy not found" error also lists files named like strategy files that mention `register` but were not imported because they lack the literal `@Strategy.register` (an alias or a plain call), and notes that strategy files are imported when the session starts.
+- With pytest 8.4 or later, the plugin makes repeated test IDs unique itself, with pytest's own suffixes, so strategies whose rows repeat (for example with `per_sequence_samples=True`) also collect under pytest 9's `strict_parametrization_ids`. IDs in normal runs are unchanged.
 - Strategy factories are called exactly once, with `nsamples` passed by keyword, positionally or not at all, depending on their signature. An exception raised inside a factory is reported as `Error calling strategy factory '<name>' (nsamples=<n>): <Type>: <message>`.
 - Strategy file discovery searches the `testpaths` entries (glob patterns expanded; the rootdir without `testpaths`) and the directories of command-line paths. Below them it skips hidden directories, `norecursedirs` matches and virtual environments, and it loads the files in sorted path order.
 - Strategy files that fail to load are always reported, and a "Strategy not found" error lists the files that failed to load or skipped themselves.
@@ -38,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Package metadata: Python 3.13 added and 3.9 removed from the classifiers; development status is Alpha.
 
 ### Fixed
+- Strategy files in a source encoding other than UTF-8 are found (the `@Strategy.register` marker is searched in the file's bytes).
 - **RNG**: weighted generators with a predicate no longer fail when only some of their ranges can satisfy it.
 - **RNG**: `RNGEnum` with a predicate no longer fails while a valid member exists.
 - **RNG**: `RNGFloat` with a single bound no longer draws outside that bound, and `RNG.string` rejects bad lengths and an empty charset up front.
