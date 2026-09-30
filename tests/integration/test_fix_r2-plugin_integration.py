@@ -203,7 +203,9 @@ class TestVerboseLoadOutsideRootdir:
         shared = pytester.path / "shared"
         pytester.makepyfile(**{"shared/strategies": STRATEGIES, "shared/test_ints": TESTS})
         project = pytester.mkdir("proj")
-        (project / "pytest.ini").write_text(f"[pytest]\ntestpaths = {shared}\n")
+        # pytest splits testpaths like a shell command line: a Windows path needs
+        # forward slashes
+        (project / "pytest.ini").write_text(f"[pytest]\ntestpaths = {shared.as_posix()}\n")
         monkeypatch.chdir(project)
 
         result = pytester.runpytest_subprocess("-vv")

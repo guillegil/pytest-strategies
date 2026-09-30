@@ -21,7 +21,7 @@ import pytest
 from ._dataclass import convert_to_dataclass
 from ._ids import generate_dataclass_ids, generate_test_ids, make_unique_ids
 from ._introspection import detect_dataclass_param, lazy_signature, validate_signature
-from ._registry import _describe_factory, _factory_origin
+from ._registry import _describe_factory, display_path, factory_source
 from ._runtime import Resolution, runtime
 from ._warnings import PytestStrategiesWarning
 from .parameters import Parameter
@@ -373,7 +373,8 @@ def _check_size(
 
 def _warn_legacy(name: str, factory: Callable[..., Any]) -> None:
     """Warn that a factory returned the deprecated (argnames, samples) tuple, at the factory."""
-    filename, _, line = _factory_origin(factory)
+    # The path as spelled, not normalized: warnings report and filter by it
+    filename, _, line = factory_source(factory)
     message = (
         f"Strategy '{name}' returns an (argnames, samples) tuple, which is deprecated and "
         "will stop working in 4.0; return a Parameter instead "
@@ -644,18 +645,11 @@ def build_parametrization(
 
 def _where(factory: Callable[..., Any], config: pytest.Config | None) -> str:
     """Return the factory's file, relative to the rootdir when inside it, for the summary."""
-    filename = _factory_origin(factory)[0]
+    filename = factory_source(factory)[0]
     if filename is None:
         return "<unknown>"
     rootpath = getattr(config, "rootpath", None) if config is not None else None
-    if rootpath is not None:
-        try:
-            return (
-                Path(filename).relative_to(os.path.normcase(os.path.realpath(rootpath))).as_posix()
-            )
-        except ValueError:
-            pass
-    return filename
+    return display_path(filename, rootpath)
 
 
 def _count_rows(

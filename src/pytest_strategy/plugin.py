@@ -32,7 +32,14 @@ import pytest
 from _pytest.pathlib import ImportPathMismatchError, import_path
 from pytest import Config, Session
 
-from ._registry import Registration, _contains, _describe_factory, registry
+from ._registry import (
+    Registration,
+    _contains,
+    _describe_factory,
+    display_path,
+    factory_source,
+    registry,
+)
 from ._runtime import runtime
 from .rng import RNG
 
@@ -203,7 +210,7 @@ class PytestStrategyPlugin:
         imported do not depend on which test modules were collected before.
         """
         if isinstance(collector, pytest.Module) and runtime.current is not None:
-            self._load_directories(collector.config, _file_key(collector.path.parent))
+            self._load_directories(collector.config, os.path.realpath(collector.path.parent))
 
     @pytest.hookimpl(tryfirst=True)
     def pytest_generate_tests(self, metafunc: pytest.Metafunc) -> None:
@@ -347,7 +354,7 @@ class PytestStrategyPlugin:
 
         directory = _file_key(test_path.parent)
         if config is not None:
-            self._load_directories(config, directory)
+            self._load_directories(config, os.path.realpath(test_path.parent))
         found = registry.nearest(ref, directory)
         if found is not None:
             return ref, found.factory
@@ -371,14 +378,21 @@ class PytestStrategyPlugin:
         raise ValueError(strategy_not_found_message(ref, directory, rootpath))
 
     def _load_directories(self, config: Config, directory: str) -> None:
-        """Load the strategy files of ``directory`` and each directory above it, closest first."""
+        """
+        Load the strategy files of ``directory`` and each directory above it, closest first.
+
+        ``directory`` is a real path as the file system spells it, not a
+        ``_file_key``: files are imported and reported under their own spelling
+        (on Windows, ``_file_key`` lowercases the path).
+        """
         state = runtime.current
         if state is None:
             return
         for current in self._directories_up(config, directory):
-            if current in state.loaded_dirs:
+            key = os.path.normcase(current)
+            if key in state.loaded_dirs:
                 continue
-            state.loaded_dirs.add(current)
+            state.loaded_dirs.add(key)
             files = self._strategy_files_in(Path(current))
             if files:
                 self._load_strategy_files(files, config)
@@ -389,7 +403,8 @@ class PytestStrategyPlugin:
         search path that contains it.
 
         A directory outside all of them (a test given by an absolute path
-        elsewhere) yields only itself.
+        elsewhere) yields only itself. The ceilings are ``_file_key``s, so each
+        directory is compared by its key and yielded as it is spelled.
         """
         state = runtime.current
         if state is not None and state.ceilings is not None:
@@ -399,13 +414,13 @@ class PytestStrategyPlugin:
             ceilings.update(_file_key(p) for p in self._search_paths(config))
             if state is not None:
                 state.ceilings = ceilings
-        if not any(_contains(ceiling, directory) for ceiling in ceilings):
+        if not any(_contains(ceiling, os.path.normcase(directory)) for ceiling in ceilings):
             yield directory
             return
         current = directory
         while True:
             yield current
-            if current in ceilings:
+            if os.path.normcase(current) in ceilings:
                 return
             parent = os.path.dirname(current)
             if parent == current:
@@ -989,13 +1004,17 @@ def _inside(registration: Registration, rootpath: str | None) -> bool:
 
 
 def _relative(file_path: Path | str, config: Config | None) -> str:
-    """Return a path relative to the rootdir in posix form, or as it is outside it."""
+    """
+    Return a path relative to the rootdir in posix form, or as it is outside it.
+
+    The file system's spelling is kept, also on Windows, so the per-file random
+    stream is the same on every OS.
+    """
     rootpath = getattr(config, "rootpath", None)
     if rootpath is not None:
-        try:
-            return Path(_file_key(file_path)).relative_to(_file_key(rootpath)).as_posix()
-        except ValueError:
-            pass
+        shown = display_path(file_path, rootpath)
+        if not os.path.isabs(shown):
+            return shown
     return str(file_path)
 
 
@@ -1263,7 +1282,8 @@ def pytest_collection_finish(session: Session) -> None:
                         continue
                     # The same name in several folders: say where each one is
                     places = sorted(
-                        _relative(r.file, config) if r.file else "<unknown>" for r in registrations
+                        _relative(source, config) if source else "<unknown>"
+                        for source in (factory_source(r.factory)[0] for r in registrations)
                     )
                     for where in places:
                         terminalreporter.write_line(f"  ✓ {name} ({where})")

@@ -16,6 +16,7 @@ import os
 import sys
 from collections.abc import Callable, Iterator, MutableMapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 # Factories are user functions called as factory(nsamples=...) that return a
@@ -39,6 +40,35 @@ def _normalize(filename: str | None) -> str | None:
     return os.path.normcase(os.path.realpath(filename)) if filename else None
 
 
+def factory_source(fn: Callable[..., Any]) -> Origin:
+    """
+    Return the file, qualified name and first line of a factory, with the file
+    path as the file system spells it.
+
+    ``functools.wraps`` decorators and ``functools.cache`` are looked through, so
+    the decorated function counts, not the decorator's wrapper. A
+    ``functools.partial`` counts as the function it wraps, and a class or any
+    other callable object as its class.
+    """
+    fn = _unwrap(fn)
+    while isinstance(fn, functools.partial):
+        fn = _unwrap(fn.func)
+    code = getattr(fn, "__code__", None)
+    if code is not None:
+        # The module's __file__ is set by the import system from the real location;
+        # co_filename can be stale (pytest's rewritten pyc after a checkout moved)
+        filename = getattr(fn, "__globals__", {}).get("__file__") or code.co_filename
+        return (filename, getattr(fn, "__qualname__", None), code.co_firstlineno)
+    cls = fn if isinstance(fn, type) else type(fn)
+    module = sys.modules.get(getattr(cls, "__module__", None) or "")
+    return (
+        getattr(module, "__file__", None),
+        cls.__qualname__,
+        # Python 3.13+ records where a class statement starts
+        getattr(cls, "__firstlineno__", None),
+    )
+
+
 def _factory_origin(fn: Callable[..., Any]) -> Origin:
     """
     Identify a factory by its source file, qualified name and first line.
@@ -49,35 +79,31 @@ def _factory_origin(fn: Callable[..., Any]) -> Origin:
     (``proj/../shared/x.py`` and ``shared/x.py``, a symlink) is the same. The
     first line tells apart two functions of the same name in one file.
 
-    ``functools.wraps`` decorators and ``functools.cache`` are looked through, so
-    the decorated function counts, not the decorator's wrapper. A
-    ``functools.partial`` counts as the function it wraps, and a class or any
-    other callable object as its class. So factories built by one function or
-    class (closures, partials, instances) cannot be told apart.
+    Factories built by one function or class (closures, partials, instances)
+    cannot be told apart (see :func:`factory_source`).
     """
-    fn = _unwrap(fn)
-    while isinstance(fn, functools.partial):
-        fn = _unwrap(fn.func)
-    code = getattr(fn, "__code__", None)
-    if code is not None:
-        # The module's __file__ is set by the import system from the real location;
-        # co_filename can be stale (pytest's rewritten pyc after a checkout moved)
-        filename = getattr(fn, "__globals__", {}).get("__file__") or code.co_filename
-        return (_normalize(filename), getattr(fn, "__qualname__", None), code.co_firstlineno)
-    cls = fn if isinstance(fn, type) else type(fn)
-    module = sys.modules.get(getattr(cls, "__module__", None) or "")
-    return (
-        _normalize(getattr(module, "__file__", None)),
-        cls.__qualname__,
-        # Python 3.13+ records where a class statement starts
-        getattr(cls, "__firstlineno__", None),
-    )
+    filename, qualname, line = factory_source(fn)
+    return (_normalize(filename), qualname, line)
+
+
+def display_path(filename: str | os.PathLike[str], rootpath: str | os.PathLike[str] | None) -> str:
+    """
+    Return a real path relative to ``rootpath`` in posix form, or the whole real
+    path outside it, keeping the file system's spelling (``_normalize``
+    lowercases it on Windows).
+    """
+    real = os.path.realpath(filename)
+    if rootpath is not None:
+        root = os.path.realpath(rootpath)
+        if _contains(os.path.normcase(root), os.path.normcase(real)):
+            return Path(os.path.relpath(real, root)).as_posix()
+    return real
 
 
 def _describe_factory(fn: Callable[..., Any]) -> str:
     """Return a readable 'file:line:qualname' description of a factory for messages."""
-    filename, qualname, line = _factory_origin(fn)
-    where = filename or "<unknown>"
+    filename, qualname, line = factory_source(fn)
+    where = os.path.realpath(filename) if filename else "<unknown>"
     if line is not None:
         where = f"{where}:{line}"
     return f"{where}:{qualname or repr(fn)}"

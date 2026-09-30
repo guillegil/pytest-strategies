@@ -177,12 +177,13 @@ class TestScopedNames:
 
         result.stdout.fnmatch_lines(
             [
-                # Each folder's registration counts
+                # Each folder's registration counts. The check mark is left out: a
+                # Windows console without UTF-8 prints it as \u2713
                 "Found 3 registered strategies:",
                 "*",
-                "*✓ default (tests/dma/strategies.py)",
-                "*✓ default (tests/esm/strategies.py)",
-                "*✓ default (tests/strategies.py)",
+                "* default (tests/dma/strategies.py)",
+                "* default (tests/esm/strategies.py)",
+                "* default (tests/strategies.py)",
             ]
         )
         assert (project.path / "dma_loaded").exists()
@@ -498,3 +499,43 @@ class TestReporting:
                 "nsamples=4 from Parameter(nsamples=)",
             ]
         )
+
+
+class TestCaseInsensitivePaths:
+    """
+    Windows compares paths through os.path.normcase, which lowercases them. The
+    plugin must compare folders that way but open, import and show files under
+    their real spelling. A sitecustomize that makes normcase lowercase on this
+    case-sensitive file system catches any place that opens a lowercased path.
+    """
+
+    def test_mixed_case_folders_load_and_resolve(self, pytester, monkeypatch):
+        pytester.mkdir("CaseProbe")
+        if pytester.path.joinpath("caseprobe").exists():
+            pytest.skip("the file system is case-insensitive")
+        site = pytester.mkdir("site")
+        site.joinpath("sitecustomize.py").write_text(
+            "import os, posixpath\nposixpath.normcase = lambda s: os.fspath(s).lower()\n"
+        )
+        monkeypatch.setenv("PYTHONPATH", str(site))
+        pytester.makeini("[pytest]\ntestpaths = Tests\n")
+        pytester.makepyfile(
+            **{
+                "Tests/strategies": _default_strategy(0),
+                "Tests/test_top": _range_test("test_top", 0),
+                "Tests/ESM/strategies": _default_strategy(100),
+                "Tests/ESM/test_esm": _range_test("test_esm", 100),
+            }
+        )
+
+        result = pytester.runpytest_subprocess("-p", "no:cacheprovider", "-vv")
+
+        result.assert_outcomes(passed=6)
+        result.stdout.fnmatch_lines(
+            [
+                "pytest-strategies: Loaded Tests/ESM/strategies.py",
+                "pytest-strategies: Loaded Tests/strategies.py",
+            ],
+            consecutive=False,
+        )
+        result.stdout.no_fnmatch_line("*Failed to load*")
