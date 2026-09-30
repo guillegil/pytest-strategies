@@ -594,7 +594,13 @@ class TestDuplicateRegistration:
             exec(code, {"__name__": "strategies_0"})
             exec(code, {"__name__": "strategies_1"})
 
-    def test_same_name_from_another_file_warns(self, restore_registry):
+    def test_same_name_from_another_file_in_the_folder_warns(self, restore_registry):
         exec(compile(STRATEGY_SOURCE, "/virtual/users/strategies.py", "exec"), {})
-        with pytest.warns(PytestStrategiesWarning, match="/virtual/users/strategies.py"):
+        with pytest.warns(PytestStrategiesWarning, match="users.strategies.py"):
+            exec(compile(STRATEGY_SOURCE, "/virtual/users/more_strategies.py", "exec"), {})
+
+    def test_same_name_from_another_folder_is_kept_silently(self, restore_registry):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            exec(compile(STRATEGY_SOURCE, "/virtual/users/strategies.py", "exec"), {})
             exec(compile(STRATEGY_SOURCE, "/virtual/billing/strategies.py", "exec"), {})

@@ -211,11 +211,11 @@ def pytest_strategies_context(config):
 
 def test_random_draws_in_the_hook_do_not_change_the_vectors(project):
     project.makeconftest("""
-import random
+from pytest_strategy import RNG
 
 def pytest_strategies_context(config):
     channels = [3, 5]
-    random.shuffle(channels)
+    RNG.generator().shuffle(channels)
     return {"peripherals": [{"type": "Esm", "channel": c} for c in channels]}
 """)
 

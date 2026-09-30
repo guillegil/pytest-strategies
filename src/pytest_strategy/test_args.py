@@ -1,5 +1,6 @@
 # test_args.py
 
+import warnings
 from collections.abc import Callable
 from typing import Any
 
@@ -27,7 +28,7 @@ class TestArg:
         validator: Callable[[Any], bool] | None = None,
         # Control
         always_include_directed: bool = True,
-        description: str = "",  # Re-added description as it was removed in the instruction but not explicitly stated
+        description: str = "",
     ):
         """
         Initialize a test argument.
@@ -37,8 +38,10 @@ class TestArg:
             rng_type: RNG type for random generation (required if value is None)
             description: Human-readable description of the argument
             value: Single static value (for directed tests)
-            directed_values: List of specific values to always test
-            test_values: List of specific values for test mode only
+            directed_values: Deprecated, removed in 4.0: Parameter does not use them.
+                Use Parameter(directed_vectors=...).
+            test_values: Deprecated, removed in 4.0: Parameter does not use them.
+                Use Parameter(test_vectors=...).
             always_include_directed: If True, directed values are always included in samples
             validator: Optional function to validate generated values
 
@@ -51,10 +54,16 @@ class TestArg:
 
             # Static value
             TestArg("count", value=0, description="Edge case")
-
-            # Mixed directed + random
-            TestArg("count", rng_type=RNGInteger(1, 100), directed_values=[0, 1])
         """
+        for option, given in (("directed_values", directed_values), ("test_values", test_values)):
+            if given is not None:
+                replacement = "directed_vectors" if option == "directed_values" else "test_vectors"
+                warnings.warn(
+                    f"TestArg({option}=...) is deprecated and will be removed in 4.0: strategies "
+                    f"do not use it. Use Parameter({replacement}=...) instead.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
         self._name = name
         self._rng_type = rng_type
         self._description = description

@@ -19,6 +19,7 @@ import pytest
 
 import pytest_strategy
 from pytest_strategy import RNG, Strategy
+from pytest_strategy._registry import registry
 
 pytest_plugins = ["pytester"]
 
@@ -114,17 +115,20 @@ def _load_example_factories(path: Path, monkeypatch) -> tuple:
     """
     Import an example file and return (module, registry of its strategy factories).
 
-    The example's ``@Strategy.strategy`` tests are not parametrized: only the
-    factories are needed, and they are registered in an empty registry so they
-    neither clash with nor leak into the session's strategies.
+    The example's ``@strategy`` tests are only marked: only the factories are
+    needed, and they are registered in an empty registry so they neither clash
+    with nor leak into the session's strategies.
     """
-    monkeypatch.setattr(Strategy, "_registry", {})
-    monkeypatch.setattr(Strategy, "strategy", staticmethod(lambda name, **kwargs: lambda fn: fn))
-    spec = importlib.util.spec_from_file_location(f"_example_{path.stem}", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module, dict(Strategy._registry)
+    saved = registry.snapshot()
+    registry.clear()
+    try:
+        spec = importlib.util.spec_from_file_location(f"_example_{path.stem}", path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module, dict(Strategy._registry)
+    finally:
+        registry.restore(saved)
 
 
 class TestExamples:

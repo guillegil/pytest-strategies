@@ -4,6 +4,7 @@ import builtins
 import math
 import random
 import time
+import warnings
 from collections.abc import Callable, Mapping, Sequence
 from enum import Enum
 from typing import TypeVar, cast
@@ -11,61 +12,86 @@ from typing import TypeVar, cast
 T = TypeVar("T")
 
 
-class RNGValueError(Exception):
+class RNGValueError(ValueError):
     """Exception raised when an invalid value is provided to RNG operations."""
-
-    pass
 
 
 class RNG:
-    """Core RNG singleton managing seed and random state"""
+    """
+    Core RNG singleton managing the seed and the random state.
+
+    Every value the RNG types draw comes from one generator the plugin owns
+    (:meth:`generator`), not from the global ``random`` state, so ``--rng-seed``
+    reproduces them without seeding or disturbing the ``random`` calls of the
+    code under test.
+    """
 
     _seed = time.time_ns()
     _max_retries = 100
+    _generator = random.Random(_seed)
 
     # ====
     # Seed Management
     # ====
 
     @staticmethod
-    def seed(seed: int | None = None):
-        """Set the random seed and refresh the random state.
+    def seed(seed: int | None = None) -> None:
+        """Set the seed and restart the generator from it.
 
-        With ``None`` the current seed is kept and the global random state is
-        left alone. The plugin calls this on every run, including runs that never
-        use a strategy, so it must not replace a state the project seeded itself
-        (e.g. ``random.seed(0)`` in a conftest). Use :meth:`refresh_seed` to
-        start the random state from the current seed.
+        With ``None`` the current seed is kept, and the generator restarts from it.
         """
         if seed is not None:
             RNG._seed = seed
-            random.seed(RNG._seed)
+        RNG._generator.seed(RNG._seed)
 
     @staticmethod
-    def get_seed():
+    def get_seed() -> int:
         """Get the current seed value"""
         return RNG._seed
 
     @staticmethod
-    def refresh_seed(key: str | None = None):
-        """Refresh the random state with the current seed.
+    def generator() -> random.Random:
+        """
+        Return the generator the RNG types draw from.
+
+        A factory that needs other random operations (``shuffle``, ``gauss``) can
+        draw from it, and gets values that ``--rng-seed`` reproduces. The plugin
+        restarts it for each strategy and test.
+        """
+        return RNG._generator
+
+    @staticmethod
+    def refresh_seed(key: str | None = None) -> None:
+        """Restart the generator from the current seed.
 
         Args:
-            key: Optional stream name. With a key, the state is seeded from the
+            key: Optional stream name. With a key, the generator is seeded from the
                 seed and the key together, so each key gets its own stream that
                 is the same on every run with this seed and does not depend on
                 the order in which keys are used.
         """
         if key is None:
-            random.seed(RNG._seed)
+            RNG._generator.seed(RNG._seed)
         else:
             # A str seed is hashed with SHA-512, so it is stable across processes
             # (unlike hash(), which is salted per process).
-            random.seed(f"{RNG._seed}:{key}")
+            RNG._generator.seed(f"{RNG._seed}:{key}")
 
     @staticmethod
-    def set_max_retries(retries: int):
-        """Set the maximum number of retries for constrained generation"""
+    def set_max_retries(retries: int) -> None:
+        """
+        Deprecated: set the number of draws the ``predicate=`` of an RNG type gets.
+
+        Use ``Parameter(max_retries=...)``, which bounds the draws for the
+        strategy's vector constraints, or a predicate that accepts more values.
+        Removed in 4.0.
+        """
+        warnings.warn(
+            "RNG.set_max_retries() is deprecated and will be removed in 4.0; "
+            "use Parameter(max_retries=...)",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         RNG._max_retries = retries
 
     # ====
@@ -156,7 +182,9 @@ class RNG:
             RNG.integer(1, 100)
             RNG.integer(1, 100, predicate=lambda x: x % 2 == 0)  # Even numbers only
         """
-        return cast(int, RNG._generate_with_constraint(lambda: random.randint(min, max), predicate))
+        return cast(
+            int, RNG._generate_with_constraint(lambda: RNG._generator.randint(min, max), predicate)
+        )
 
     @staticmethod
     def float(min: float = 0.0, max: float = 1.0, predicate: Callable | None = None) -> float:
@@ -195,7 +223,7 @@ class RNG:
             RNG.boolean()  # 50/50
             RNG.boolean(0.8)  # 80% True, 20% False
         """
-        return random.random() < true_probability
+        return RNG._generator.random() < true_probability
 
     @staticmethod
     def choice(items: list):
@@ -216,7 +244,7 @@ class RNG:
         """
         if not items:
             raise RNGValueError("The choices list cannot be empty.")
-        return random.choice(items)
+        return RNG._generator.choice(items)
 
     @staticmethod
     def string(
@@ -252,8 +280,8 @@ class RNG:
             raise ValueError(f"String {error}")
 
         if length is None:
-            length = random.randint(min_length, max_length)
-        return "".join(random.choice(charset) for _ in range(length))
+            length = RNG._generator.randint(min_length, max_length)
+        return "".join(RNG._generator.choice(charset) for _ in range(length))
 
     # ====
     # Weighted Generators
@@ -286,7 +314,7 @@ class RNG:
             # Choose range using random.choices (handles normalization). The range
             # is re-chosen on every predicate retry so that a range with no valid
             # value cannot exhaust all retries while other ranges could succeed.
-            min_val, max_val = random.choices(range_list, weights=weights, k=1)[0]
+            min_val, max_val = RNG._generator.choices(range_list, weights=weights, k=1)[0]
             return RNG.integer(min_val, max_val)
 
         return cast(int, RNG._generate_with_constraint(generator, predicate))
@@ -317,7 +345,7 @@ class RNG:
 
         def generator() -> builtins.float:
             # Re-choose the range on every predicate retry (see winteger)
-            min_val, max_val = random.choices(range_list, weights=weights, k=1)[0]
+            min_val, max_val = RNG._generator.choices(range_list, weights=weights, k=1)[0]
             return RNG.float(min_val, max_val)
 
         return cast(builtins.float, RNG._generate_with_constraint(generator, predicate))
@@ -330,13 +358,14 @@ class RNG:
 
 def _uniform(a: float, b: float) -> float:
     """
-    Return random.uniform(a, b), without overflowing when b - a exceeds the largest float.
+    Return uniform(a, b) from the RNG generator, without overflowing when b - a exceeds the
+    largest float.
 
     The same draw and formula as the standard library, so a seed gives the same
     values. b - a only overflows when a and b have opposite signs, and the second
     form cannot overflow then, and stays within [a, b].
     """
-    r = random.random()
+    r = RNG._generator.random()
     x = a + (b - a) * r
     return x if math.isfinite(x) else a * (1.0 - r) + b * r
 
@@ -637,20 +666,20 @@ class RNGEnum(RNGType):
             if self.predicate:
                 # With predicate: choose among the weighted members it accepts
                 members, weights = self._filter_by_predicate(self.predicate)
-                return random.choices(members, weights=weights, k=1)[0]
+                return RNG._generator.choices(members, weights=weights, k=1)[0]
 
             # Without predicate: direct selection
             members = list(self.weights.keys())
             weights = list(self.weights.values())
-            return random.choices(members, weights=weights, k=1)[0]
+            return RNG._generator.choices(members, weights=weights, k=1)[0]
         else:
             # Uniform selection from all members
             if self.predicate:
                 # With predicate: choose among the members it accepts
-                return random.choice(self._filter_by_predicate(self.predicate)[0])
+                return RNG._generator.choice(self._filter_by_predicate(self.predicate)[0])
 
             # Without predicate: direct selection
-            return random.choice(list(self.enum_class))
+            return RNG._generator.choice(list(self.enum_class))
 
     @property
     def python_type(self):
@@ -756,7 +785,7 @@ class RNGSequence(SequenceLike):
 
     def _get_auto_sequence(self) -> list:
         """Return a random permutation of the sequence for exhaustive mode."""
-        return random.sample(self.sequence, len(self.sequence))
+        return RNG._generator.sample(self.sequence, len(self.sequence))
 
 
 class Series(SequenceLike):

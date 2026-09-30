@@ -3,11 +3,12 @@
 import itertools
 import math
 import warnings
+from collections import Counter
 from collections.abc import Callable
 from typing import Any
 
 from ._warnings import PytestStrategiesWarning
-from .rng import SequenceLike, Series
+from .rng import RNGValueError, SequenceLike, Series
 from .test_args import TestArg
 
 
@@ -43,6 +44,7 @@ class Parameter:
         max_retries: int = 100,
         nsamples: int | str | None = None,
         per_sequence_samples: bool = False,
+        max_exhaustive: int | None = None,
     ):
         """
         Initialize a Parameter container.
@@ -65,11 +67,16 @@ class Parameter:
                 combination of the Series/RNGSequence args (in declaration order) instead
                 of n in total. Two devices with the default n=10 give 20 rows. A value
                 listed twice counts twice.
+            max_exhaustive: The most rows --nsamples=auto (or per_sequence_samples=True)
+                may generate for this strategy; the plugin fails the test's collection
+                above it, before generating. None uses the strategies_max_exhaustive ini
+                option (100,000 by default).
 
         Raises:
             ValueError: If directed vectors don't match the number of test args
-            ValueError: If nsamples or max_retries is not a valid count, or
-                per_sequence_samples is not a bool
+            ValueError: If nsamples, max_retries or max_exhaustive is not a valid count,
+                or per_sequence_samples is not a bool
+            RNGValueError: If two test args have the same name
 
         Examples:
             # Simple parameter with 2 args
@@ -100,6 +107,17 @@ class Parameter:
             raise ValueError(f"max_retries must be an int >= 1, got {max_retries!r}")
         if not isinstance(per_sequence_samples, bool):
             raise ValueError(f"per_sequence_samples must be a bool, got {per_sequence_samples!r}")
+        if max_exhaustive is not None and (
+            not isinstance(max_exhaustive, int)
+            or isinstance(max_exhaustive, bool)
+            or max_exhaustive < 1
+        ):
+            raise ValueError(f"max_exhaustive must be None or an int >= 1, got {max_exhaustive!r}")
+        seen: set[str] = set()
+        for arg in test_args:
+            if arg.name in seen:
+                raise RNGValueError(f"Parameter has two test args named {arg.name!r}")
+            seen.add(arg.name)
 
         # Copy the caller's containers so add_*/remove_* never mutate shared objects
         self.test_args = list(test_args)
@@ -110,6 +128,7 @@ class Parameter:
         self.max_retries = max_retries
         self.nsamples = nsamples
         self.per_sequence_samples = per_sequence_samples
+        self.max_exhaustive = max_exhaustive
 
         # Validate directed vectors on initialization
         self._validate_directed_vectors()
@@ -144,17 +163,40 @@ class Parameter:
                     f"Test vector '{name}' has {len(vector)} values, " f"expected {expected_len}"
                 )
 
-    def _validate_vector(self, vector: tuple) -> bool:
+    def _validate_vector(self, vector: tuple, rejections: Counter[int] | None = None) -> bool:
         """
         Validate a vector against all constraints.
 
         Args:
             vector: Parameter vector to validate
+            rejections: If given, the index of the first constraint that rejects the
+                vector is counted in it
 
         Returns:
             True if all constraints pass, False otherwise
         """
-        return all(constraint(vector) for constraint in self.vector_constraints)
+        for index, constraint in enumerate(self.vector_constraints):
+            if not constraint(vector):
+                if rejections is not None:
+                    rejections[index] += 1
+                return False
+        return True
+
+    def _describe_rejections(self, rejections: Counter[int]) -> str:
+        """Name the constraints that rejected vectors, with their counts, for an error."""
+        if not rejections:
+            return ""
+        parts = []
+        for index, count in sorted(rejections.items()):
+            constraint = self.vector_constraints[index]
+            name = getattr(constraint, "__name__", None)
+            if name is None or name == "<lambda>":
+                kind = "lambda" if name == "<lambda>" else type(constraint).__name__
+                label = f"constraint #{index} ({kind})"
+            else:
+                label = f"{name} (constraint #{index})"
+            parts.append(f"{label} rejected {count}")
+        return " Rejected by: " + ", ".join(parts) + "."
 
     # ====
     # Vector Management
@@ -289,16 +331,17 @@ class Parameter:
         Example:
             vector = param.generate_vector()  # e.g., (5, 3.14, "fast")
         """
+        rejections: Counter[int] = Counter()
         for _ in range(self.max_retries):
             vector = tuple(arg.generate() for arg in self.test_args)
 
             # Check constraints
-            if self._validate_vector(vector):
+            if self._validate_vector(vector, rejections):
                 return vector
 
         raise ValueError(
             f"Could not generate valid vector after {self.max_retries} attempts. "
-            "Check your constraints."
+            "Check your constraints." + self._describe_rejections(rejections)
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -437,6 +480,7 @@ class Parameter:
                 # Combinations skipped after redrawing their random args, keyed by their
                 # index in the product (Series values need not be hashable)
                 skipped: dict[int, tuple] = {}
+                rejections: Counter[int] = Counter()
                 for k, combo in enumerate(itertools.cycle(itertools.product(*series_seqs))):
                     if series_rows >= n:
                         break
@@ -449,7 +493,7 @@ class Parameter:
                         for i in random_indices:
                             vec[i] = self.test_args[i].generate()
                         candidate = tuple(vec)
-                        if self._validate_vector(candidate):
+                        if self._validate_vector(candidate, rejections):
                             samples.append(candidate)
                             series_rows += 1
                             misses = 0
@@ -463,7 +507,7 @@ class Parameter:
                                 "Could not generate valid vector: none of the "
                                 f"{num_combos} Series combinations satisfied the vector "
                                 f"constraints ({attempts} attempt(s) each). "
-                                "Check your constraints."
+                                "Check your constraints." + self._describe_rejections(rejections)
                             )
                         # With random args the rejection may just be unlucky draws of a
                         # valid combination, so the skip must not go unnoticed
@@ -532,6 +576,7 @@ class Parameter:
         samples: list[tuple] = []
         # Combinations cut short after redrawing their random args, with their row count
         short: list[tuple[tuple, int]] = []
+        rejections: Counter[int] = Counter()
         for combo in itertools.product(*sequences):
             vec: list = [None] * len(self.test_args)
             # Sequence values skip arg.generate(), so apply the arg's validator here
@@ -544,7 +589,7 @@ class Parameter:
                     for i in random_indices:
                         vec[i] = self.test_args[i].generate()
                     candidate = tuple(vec)
-                    if self._validate_vector(candidate):
+                    if self._validate_vector(candidate, rejections):
                         samples.append(candidate)
                         rows += 1
                         break
@@ -560,7 +605,7 @@ class Parameter:
                 "Could not generate valid vector: none of the "
                 f"{num_combos} sequence combinations satisfied the vector "
                 f"constraints ({attempts} attempt(s) each). "
-                "Check your constraints."
+                "Check your constraints." + self._describe_rejections(rejections)
             )
 
         for combo, rows in short:
@@ -621,6 +666,7 @@ class Parameter:
 
         # Generate Cartesian product
         samples = []
+        rejections: Counter[int] = Counter()
         for combination in itertools.product(*sequences):
             # Create a mutable vector (list) to fill in
             vector = [None] * len(self.test_args)
@@ -638,7 +684,7 @@ class Parameter:
 
                 # Convert to tuple and validate
                 vector_tuple = tuple(vector)
-                if self._validate_vector(vector_tuple):
+                if self._validate_vector(vector_tuple, rejections):
                     samples.append(vector_tuple)
                     break
 
@@ -651,7 +697,7 @@ class Parameter:
                 "Could not generate valid vector: none of the "
                 f"{num_combos} sequence combinations satisfied the vector "
                 f"constraints ({attempts} attempt(s) each). "
-                "Check your constraints."
+                "Check your constraints." + self._describe_rejections(rejections)
             )
 
         return samples

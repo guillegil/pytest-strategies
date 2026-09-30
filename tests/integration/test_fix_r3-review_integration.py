@@ -138,14 +138,19 @@ class TestImportedStrategyFile:
 
 
 class TestDuplicateNameAsError:
-    """error::PytestStrategiesWarning stops the run for a duplicate in strategy files."""
+    """A name registered twice in one folder stops the run with a usage error."""
 
-    def test_usage_error_names_the_file(self, pytester):
-        pytester.makeini(
-            "[pytest]\n"
-            "filterwarnings =\n"
-            "    error::pytest_strategy.strategy.PytestStrategiesWarning\n"
-        )
+    @pytest.mark.parametrize(
+        "filterwarnings",
+        [
+            None,
+            "error::pytest_strategy.strategy.PytestStrategiesWarning",
+            "error::pytest_strategy.PytestStrategiesWarning",
+        ],
+    )
+    def test_usage_error_names_both_files(self, pytester, filterwarnings):
+        if filterwarnings is not None:
+            pytester.makeini(f"[pytest]\nfilterwarnings =\n    {filterwarnings}\n")
         for name, low in (("a_strategies", 0), ("b_strategies", 200)):
             pytester.makepyfile(**{name: f"""
                 from pytest_strategy import Parameter, RNGInteger, Strategy, TestArg
@@ -166,7 +171,10 @@ class TestDuplicateNameAsError:
 
         assert result.ret == pytest.ExitCode.USAGE_ERROR
         result.stderr.fnmatch_lines(
-            ["*b_strategies.py: PytestStrategiesWarning: Strategy 'r3_dup' is registered more*"]
+            [
+                "ERROR: Strategy 'r3_dup' is registered twice in the same folder: "
+                "*b_strategies.py:*factory_200 replaces *a_strategies.py:*factory_0"
+            ]
         )
 
 

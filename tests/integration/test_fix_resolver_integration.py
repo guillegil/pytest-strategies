@@ -250,7 +250,7 @@ class TestLegacyTupleStrategiesIntegration:
 class TestDuplicateRegistrationIntegration:
     """A strategy name taken over by a different function is reported."""
 
-    def test_name_clash_warns(self, pytester):
+    def test_name_clash_in_one_folder_is_a_usage_error(self, pytester):
         pytester.makepyfile(fix_dup_strategies="""
             from pytest_strategy import Strategy
 
@@ -270,8 +270,46 @@ class TestDuplicateRegistrationIntegration:
                 assert x == 2
             """)
         result = pytester.runpytest()
-        result.assert_outcomes(passed=1, warnings=1)
-        result.stdout.fnmatch_lines(["*PytestStrategiesWarning: Strategy 'fix_dup_clash'*"])
+        assert result.ret == pytest.ExitCode.USAGE_ERROR
+        result.stderr.fnmatch_lines(
+            [
+                "ERROR: Strategy 'fix_dup_clash' is registered twice in the same folder: "
+                "*test_fix_dup_clash.py:*from_test_module replaces "
+                "*fix_dup_strategies.py:*from_strategies_file"
+            ]
+        )
+
+    def test_same_name_in_another_folder_is_used_there(self, pytester):
+        pytester.makepyfile(fix_dup_strategies="""
+            from pytest_strategy import register
+
+            @register("fix_dup_scoped")
+            def outer(nsamples):
+                return ("x",), [(1,)]
+            """)
+        pytester.makepyfile(**{"sub/fix_dup_strategies": """
+            from pytest_strategy import register
+
+            @register("fix_dup_scoped")
+            def inner(nsamples):
+                return ("x",), [(2,)]
+            """})
+        pytester.makepyfile(test_outer="""
+            from pytest_strategy import strategy
+
+            @strategy("fix_dup_scoped")
+            def test_outer(x):
+                assert x == 1
+            """)
+        pytester.makepyfile(**{"sub/test_inner": """
+            from pytest_strategy import strategy
+
+            @strategy("fix_dup_scoped")
+            def test_inner(x):
+                assert x == 2
+            """})
+        result = pytester.runpytest()
+        result.assert_outcomes(passed=2, warnings=2)
 
     def test_reloaded_strategies_file_is_silent(self, pytester):
         pytester.makepyfile(fix_reload_strategies="""

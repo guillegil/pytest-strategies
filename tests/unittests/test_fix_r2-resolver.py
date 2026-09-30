@@ -387,9 +387,15 @@ class TestDuplicateRegistrationPaths:
             _exec_strategy("/old/checkout/strategies.py", __file__="/new/checkout/strategies.py")
             _exec_strategy("/new/checkout/strategies.py", __file__="/new/checkout/strategies.py")
 
-    def test_another_file_still_warns(self):
+    def test_another_file_in_the_same_folder_still_warns(self):
         _exec_strategy("/virtual/users/strategies.py")
-        with pytest.warns(PytestStrategiesWarning, match="/virtual/billing/strategies.py"):
+        with pytest.warns(PytestStrategiesWarning, match="more_strategies.py"):
+            _exec_strategy("/virtual/users/more_strategies.py")
+
+    def test_another_folder_registers_its_own_strategy_silently(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _exec_strategy("/virtual/users/strategies.py")
             _exec_strategy("/virtual/billing/strategies.py")
 
     def test_warning_as_error_still_registers_the_new_factory(self):
