@@ -711,8 +711,9 @@ pytest --rng-seed 42
 
 The seed of every run is shown in the pytest report header
 (`pytest-strategies: RNG seed = ...`), which pytest hides under `-q` or
-`--no-header`. A failed run also ends with
-`pytest-strategies: reproduce with --rng-seed=...`, also under `-q`. A run
+`--no-header`. A failed run also prints
+`pytest-strategies: reproduce with --rng-seed=...` after the failure tracebacks,
+also under `-q`. A run
 without `--rng-seed` picks a seed from the clock, and passing that printed seed
 reproduces the run.
 
@@ -753,6 +754,8 @@ make a body's own draws reproducible, reseed in the body. A stream keyed by the
 node ID still follows `--rng-seed`:
 
 ```python
+import random
+
 from pytest_strategy import RNG
 
 def test_something(request):
@@ -760,9 +763,12 @@ def test_something(request):
     value = RNG.integer(0, 100)  # Same value for the same --rng-seed
 
 def test_fixed():
-    RNG.seed(42)  # Also changes the run's seed (RNG.get_seed()) from here on
-    value = RNG.integer(0, 100)  # Same value on every run
+    value = random.Random(42).randint(0, 100)  # Same value on every run
 ```
+
+Do not call `RNG.seed()` in a test body: it restarts the plugin's generator from
+another seed, so the tests after it that reseed from `RNG.get_seed()` no longer
+follow `--rng-seed`.
 
 For plain `random` calls, seed the global state per test from the run's seed,
 for example in an autouse fixture:
@@ -870,7 +876,7 @@ the size guard allows. Use fewer sequence values, or raise the limit with
 ### Tests not reproducible
 
 - Pass the same `--rng-seed` value (a run's seed is shown in the report header, and after a failed run); calling `RNG.seed()` inside a test body does not change its parametrized values
-- Use the same rootdir and a pytest-strategies version that generates the same values (2.0.0 and 3.0.0 do; 1.x does not)
+- Use the same rootdir and a pytest-strategies version that generates the same values (2.0.0 and 3.0.0 do, except values strategy files draw when they are imported; 1.x does not)
 - Draw from the RNG types or `RNG.generator()` in factories: plain `random` calls are not seeded by the plugin
 - Random values drawn inside a test body are not covered by the seed; reseed in the body (see [Reproducibility](#reproducibility))
 

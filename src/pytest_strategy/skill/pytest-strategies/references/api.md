@@ -151,6 +151,8 @@ class TestArg:
   RNG type instead, and use `validator` only as an assertion.
 - `directed_values=` and `test_values=` are deprecated: they never produced rows. Use
   the `Parameter`'s `directed_vectors` and `test_vectors`.
+- Pass `validator` and `description` by keyword: the 4th and 5th positional
+  parameters are the deprecated `directed_values` and `test_values`.
 
 ## 6. RNG types
 
@@ -327,14 +329,16 @@ import time through the plugin's generators do not depend on which folders load 
 **Lookup:**
 
 - `register()` records the folder of the file that defines the factory.
-- Lookup starts at the test module's folder and walks up to the rootdir; the first
-  folder that has the name wins.
+- Lookup starts at the test module's folder and walks up to the `testpaths` entry
+  (or command-line folder) that contains it, or to the rootdir without `testpaths`;
+  the first folder that has the name wins. Strategies files above that point are not
+  loaded (register shared strategies in the rootdir `conftest.py` instead).
 - A name that no folder on that path has, but that is registered only once elsewhere,
   is found too. When several folders off the path register it, a registration from
   outside the rootdir (an installed package, a shared plugin) wins; otherwise the
   lookup fails with an error that names them.
 - Two different factories with the same name in one folder are a usage error (exit
-  code 4) naming both files. The same function registered again is silent.
+  code 4, or 2 under pytest-xdist) naming both files. The same function registered again is silent.
 - `@strategy(factory)` skips the lookup entirely.
 
 **Load failures:** a strategies file that raises while importing is reported and does

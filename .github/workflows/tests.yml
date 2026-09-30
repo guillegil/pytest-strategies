@@ -58,9 +58,14 @@ jobs:
         if: ${{ !matrix.coverage }}
         run: python -m pytest -n auto
 
+      # coverage run, not pytest-cov: the plugin is imported through its entry
+      # point before pytest-cov starts, which would count every module-level
+      # line (imports, def and class lines) as missed. One process, no xdist.
       - name: Run the suite with coverage
         if: ${{ matrix.coverage }}
-        run: python -m pytest -n auto --cov=pytest_strategy --cov-report=term-missing --cov-fail-under=77
+        run: |
+          python -m coverage run -m pytest
+          python -m coverage report --fail-under=90
 
       - name: Run the sequence tests with --nsamples=auto
         run: python -m pytest tests/integration/test_sequence_integration.py --nsamples=auto

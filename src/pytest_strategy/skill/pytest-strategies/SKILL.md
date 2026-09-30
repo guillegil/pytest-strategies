@@ -102,16 +102,24 @@ registers with a plain call (`register("x")(fn)`) or a name held in a variable
 Names are scoped by folder, like fixtures:
 
 - A name is visible in the folder that registers it and in every folder below.
-- The plugin walks from the test's folder up to the rootdir, and the nearest
-  folder that registers the name wins. `tests/esm/strategies.py` and
-  `tests/dma/strategies.py` can both define `"default"`, and a
-  `tests/strategies.py` `"default"` serves folders that have none. Files with the
-  same name in several folders are fine, with or without `__init__.py`.
+- The plugin walks from the test's folder up to the `testpaths` entry (or
+  command-line folder) that contains it, or to the rootdir when `testpaths` is not
+  set, and the nearest folder that registers the name wins. `tests/esm/strategies.py`
+  and `tests/dma/strategies.py` can both define `"default"`, and a
+  `tests/strategies.py` `"default"` serves folders that have none. A strategies
+  file above that point (at the project root with `testpaths = ["tests"]`) is never
+  loaded: put shared strategies in `tests/strategies.py`, or register them in the
+  rootdir `conftest.py`.
+- Files with the same name in several folders are fine for registration. To import
+  from them in tests, the folders need `__init__.py` (`from .strategies import X`)
+  or the files need distinct names (`esm_strategies.py`): a plain
+  `from strategies import X` gets whichever folder's file was imported first.
 - A name that no folder on that path defines, but that is registered only once
   elsewhere (a sibling folder, an installed package), is found too. When several
   such folders register it, the lookup fails and names them.
 - Two different factories with the same name in the same folder (two files, or a
-  file and `conftest.py`) stop the run with a usage error (exit code 4) that names
+  file and `conftest.py`) stop the run with a usage error (exit code 4, or 2 under
+  pytest-xdist) that names
   both files. Registering the same function again is fine.
 - "Strategy 'x' not found" lists the names visible from that test, a "did you
   mean" suggestion and the files that failed to load.

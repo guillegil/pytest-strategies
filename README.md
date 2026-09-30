@@ -421,7 +421,7 @@ When no folder on the test's path registers the name, the plugin imports every s
 
 **Where files are searched.** The search for all strategy files covers the `testpaths` directories from your pytest configuration, expanding glob patterns such as `pkgs/*/tests`, or the rootdir when `testpaths` is not set, and the directory of each path given on the command line. Below these directories it skips what pytest's collection skips: hidden directories (names starting with `.`), `__pycache__`, directories matching `norecursedirs` (by default these include `build`, `dist`, `venv` and `node_modules`; a pattern with a `/`, such as `tests/data`, is matched against the path), and virtual environments (a directory containing `pyvenv.cfg`, or a conda environment containing `conda-meta/history`). Like pytest, it follows symlinked directories.
 
-**Imports.** A strategy file is imported the way pytest imports a test module in its folder, following `--import-mode`. In the default `prepend` mode its folder (or the root of its package) is put on `sys.path`, so it can import modules next to it. A test module or `conftest.py` that imports a strategy file (`from strategies import Mode`, for example to use an `Enum` it defines) gets the module the plugin loaded, so the file is not executed a second time and the tests compare against the same classes the strategy uses. When two folders without `__init__.py` both have a `strategies.py`, the second one is imported under a unique module name instead.
+**Imports.** A strategy file is imported the way pytest imports a test module in its folder, following `--import-mode`. In the default `prepend` mode its folder (or the root of its package) is put on `sys.path`, so it can import modules next to it. A test module or `conftest.py` that imports a strategy file (`from strategies import Mode`, for example to use an `Enum` it defines) gets the module the plugin loaded, so the file is not executed a second time and the tests compare against the same classes the strategy uses. When two folders without `__init__.py` both have a `strategies.py`, the second one is imported under a unique module name instead. A plain `from strategies import Mode` in that second folder still returns the first folder's module (Python caches modules by name), so its tests cannot import from it: give such files distinct names (`esm_strategies.py`), or add `__init__.py` files and use `from .strategies import Mode`.
 
 Values that a strategy file draws when it is imported come from a random stream of their own, derived from the seed and the file's path, so `--rng-seed` reproduces them whatever else was collected first.
 
@@ -512,7 +512,7 @@ The RNG seed of each run is printed in the pytest report header:
 ```text
 pytest-strategies: RNG seed = 1763926297314361000
 ```
-When tests fail, the plugin also prints how to rerun them with the same vectors at the end of the report, even with `-q`:
+When tests fail, the plugin also prints how to rerun them with the same vectors, after the failure tracebacks and before the short test summary, even with `-q`:
 ```text
 pytest-strategies: reproduce with --rng-seed=1763926297314361000
 ```
@@ -524,7 +524,7 @@ Each strategy and test pair draws from its own random stream. The stream is deri
 - Two tests that use the same strategy get different random vectors.
 - Values that a strategy factory draws itself are reproduced too. A factory that needs other random operations (`shuffle`, `gauss`) can draw from `RNG.generator()`, the generator the RNG types use.
 
-The plugin draws from a `random.Random` instance of its own and never seeds Python's global `random` module. So your own use of `random` does not change the generated vectors, and `--rng-seed` does not reproduce what `random.random()` returns in your code, including in a factory: draw from `RNG.generator()` there. For the same seed, 3.0.0 generates the same values as 2.0.0 for strategies that draw through the RNG types; values differ from those of 1.x, so a seed recorded with 1.x does not reproduce that run.
+The plugin draws from a `random.Random` instance of its own and never seeds Python's global `random` module. So your own use of `random` does not change the generated vectors, and `--rng-seed` does not reproduce what `random.random()` returns in your code, including in a factory: draw from `RNG.generator()` there. For the same seed, 3.0.0 generates the same values as 2.0.0 for strategies that draw through the RNG types, except values a strategy file draws when it is imported (3.0.0 gives each file a stream of its own); values differ from those of 1.x, so a seed recorded with 1.x does not reproduce that run.
 
 The seed reproduces the generated test parameters, not random draws made inside test bodies. A test body that draws from `RNG` gets whatever state the generator is in when the test runs, which depends on the tests collected and run before it. To make plain `random` draws in test bodies follow the seed, seed it for each test in your `conftest.py`:
 
