@@ -70,6 +70,14 @@ class TestSequenceType:
         with pytest.raises(RNGValueError, match="ordered sequence"):
             seq_type(set(), skip_if_empty=REASON)
 
+    def test_reason_passed_positionally_is_caught(self, seq_type):
+        with pytest.raises(RNGValueError, match="did you mean skip_if_empty"):
+            seq_type([3, 7], REASON)
+
+    def test_none_is_rejected_even_with_a_reason(self, seq_type):
+        with pytest.raises(RNGValueError, match="requires a sequence, got None"):
+            seq_type(None, skip_if_empty=REASON)
+
 
 class TestParameter:
     @pytest.mark.parametrize("seq_type", [Series, RNGSequence])
@@ -101,6 +109,11 @@ class TestParameter:
         )
 
         assert param.generate_vectors(10, mode=mode) == []
+
+    @pytest.mark.parametrize("n", [-1, "x", True])
+    def test_invalid_n_still_raises(self, n):
+        with pytest.raises(ValueError, match="n must be"):
+            channel_param([]).generate_vectors(n)
 
     def test_exhaustive_generates_nothing(self):
         assert channel_param([], Series).generate_exhaustive() == []
@@ -148,3 +161,8 @@ def test_export_strategies_handles_a_skipped_strategy():
 
     assert data["skip_reason"] == REASON
     assert data["arguments"][0]["rng_details"]["skip_if_empty"] == REASON
+
+
+def test_index_filter_without_directed_vectors_says_so():
+    with pytest.raises(IndexError, match="there are no directed vectors"):
+        channel_param([3]).generate_vectors(0, filter_by_index=0)

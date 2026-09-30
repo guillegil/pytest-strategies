@@ -609,8 +609,10 @@ class SequenceLike(RNGType):
     Abstract base class for sequence-based RNG types.
 
     Subclasses differ in how they produce an ordered sequence for exhaustive
-    (auto) mode via ``_get_auto_sequence()``.  In finite / normal mode both
-    subclasses fall back to a random element draw via ``generate()``.
+    (auto) mode via ``_get_auto_sequence()``. In finite mode, Parameter cycles
+    through Series values in order, and RNGSequence draws random elements via
+    ``generate()``. With ``Parameter(per_sequence_samples=True)``, both are walked
+    in declaration order with n rows for each value.
 
     An empty sequence (or one the predicate empties) raises, unless
     ``skip_if_empty`` gives a reason: the tests of a strategy with such an arg are
@@ -622,8 +624,12 @@ class SequenceLike(RNGType):
         self,
         sequence: Sequence,
         predicate: Callable | None = None,
+        *,
         skip_if_empty: str | None = None,
     ):
+        # A config lookup with no entry often yields None rather than an empty list
+        if sequence is None:
+            raise RNGValueError(f"{type(self).__name__} requires a sequence, got None")
         # Sets iterate in hash order, which for str/bytes changes with PYTHONHASHSEED,
         # so the same --rng-seed would give different values in each process
         if isinstance(sequence, (set, frozenset)):
@@ -631,6 +637,11 @@ class SequenceLike(RNGType):
                 f"{type(self).__name__} requires an ordered sequence, got a "
                 f"{type(sequence).__name__} whose iteration order is not reproducible "
                 "across runs; use sorted(...) or a list"
+            )
+        if predicate is not None and not callable(predicate):
+            raise RNGValueError(
+                f"{type(self).__name__} predicate must be callable, got {predicate!r}"
+                + (" (did you mean skip_if_empty=...?)" if isinstance(predicate, str) else "")
             )
         if skip_if_empty is not None and (
             not isinstance(skip_if_empty, str) or not skip_if_empty.strip()
@@ -682,7 +693,9 @@ class RNGSequence(SequenceLike):
     """
     RNG type for sequences of values.
 
-    In normal mode, acts like RNGChoice (picks random values).
+    In normal mode, acts like RNGChoice (picks random values), unless the
+    Parameter sets per_sequence_samples=True, which walks the values in
+    declaration order with n rows each.
     In exhaustive mode (nsamples="auto"), produces a permutation of the
     sequence (each value exactly once, random order).
     """
@@ -697,7 +710,8 @@ class Series(SequenceLike):
     Deterministic ordered sequence type.
 
     In auto mode, produces values in their original declaration order.
-    In finite mode, cycles (K >= len) or truncates to the first K (K < len).
+    In finite mode, cycles (K >= len) or truncates to the first K (K < len), or
+    gives K rows for each value when the Parameter sets per_sequence_samples=True.
     Multiple Series args produce the full Cartesian product in
     itertools.product order (leftmost arg is the slowest counter).
     """

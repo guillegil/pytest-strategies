@@ -97,7 +97,10 @@ class TestSeriesSkipWarningShown:
         result = pytester.runpytest_inprocess("--nsamples=4", "--rng-seed=1")
         result.assert_outcomes(passed=4, warnings=1)
         result.stdout.fnmatch_lines(
-            ["*PytestStrategiesWarning: Series combination (mode='a') skipped*max_retries=5*"]
+            [
+                "*/test_fixr2skip.py:3: PytestStrategiesWarning: Strategy 'fixr2skip_modes' "
+                "(test_modes): Series combination (mode='a') skipped*max_retries=5*"
+            ]
         )
 
 

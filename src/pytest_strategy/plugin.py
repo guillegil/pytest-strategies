@@ -555,8 +555,10 @@ def pytest_addoption(parser) -> None:
         type=_nsamples_type,
         default=None,
         help=(
-            "Number of random samples to generate per strategy, or 'auto' to enumerate "
-            "Series/RNGSequence combinations (strategies without them use their own count)"
+            "Number of random samples to generate per strategy (per Series/RNGSequence "
+            "combination for a strategy with per_sequence_samples=True), or 'auto' to "
+            "enumerate Series/RNGSequence combinations (strategies without them use their "
+            "own count)"
         ),
     )
 

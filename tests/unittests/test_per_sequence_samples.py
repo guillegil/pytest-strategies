@@ -70,6 +70,15 @@ class TestRowsPerCombination:
     def test_zero_samples_gives_no_rows(self):
         assert device_width(Series, per_sequence_samples=True).generate_vectors(0) == []
 
+    def test_zero_samples_does_not_validate_the_sequence(self):
+        param = Parameter(
+            TestArg("device", rng_type=Series(["devA", "bad"]), validator=lambda d: d != "bad"),
+            TestArg("width", rng_type=RNGInteger(1, 64)),
+            per_sequence_samples=True,
+        )
+
+        assert param.generate_vectors(0) == []
+
     def test_without_sequence_args_the_flag_has_no_effect(self):
         param = Parameter(TestArg("width", rng_type=RNGInteger(1, 64)), per_sequence_samples=True)
 

@@ -89,3 +89,38 @@ def test_each_device_gets_the_requested_rows(project):
     ids = [line for line in result.outlines if "::test_width[" in line]
     assert sum("devA" in i for i in ids) == 1 + 4
     assert sum("devB" in i for i in ids) == 4
+
+
+def test_short_combination_warning_names_strategy_and_test(pytester):
+    pytester.makepyfile(
+        starved_strategies="""
+from pytest_strategy import Parameter, RNGInteger, Series, Strategy, TestArg
+
+@Strategy.register("starved")
+def starved(nsamples):
+    return Parameter(
+        TestArg("device", rng_type=Series(["devA", "devB"])),
+        TestArg("width", rng_type=RNGInteger(1, 64)),
+        vector_constraints=[lambda v: v[0] == "devA" or v[1] > 100],
+        max_retries=3,
+        per_sequence_samples=True,
+    )
+""",
+        test_starved="""
+from pytest_strategy import Strategy
+
+@Strategy.strategy("starved")
+def test_width(device, width):
+    pass
+""",
+    )
+
+    result = pytester.runpytest("-p", "no:cacheprovider", "--rng-seed=1", "--nsamples=2")
+
+    result.assert_outcomes(passed=2, warnings=1)
+    result.stdout.fnmatch_lines(
+        [
+            "*/test_starved.py:3: PytestStrategiesWarning: Strategy 'starved' (test_width): "
+            "Sequence combination (device='devB') produced 0 of 2 rows*"
+        ]
+    )

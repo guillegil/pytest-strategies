@@ -180,3 +180,30 @@ def test_list_strategies_shows_the_skipped_strategy(project):
 
     assert result.ret == 0
     result.stdout.fnmatch_lines(["*no_esm*"])
+
+
+def test_dataclass_mismatch_is_reported_even_when_skipped(pytester):
+    pytester.makepyfile(
+        esm_strategies=STRATEGIES,
+        test_mismatch="""
+from dataclasses import dataclass
+
+from pytest_strategy import Strategy
+
+
+@dataclass
+class Access:
+    channel: int
+    data: int
+
+
+@Strategy.strategy("no_esm")
+def test_rw(access: Access):
+    pass
+""",
+    )
+
+    result = pytester.runpytest("-p", "no:cacheprovider")
+
+    assert result.ret == pytest.ExitCode.INTERRUPTED
+    result.stdout.fnmatch_lines(["*Error converting samples to dataclass for strategy 'no_esm'*"])

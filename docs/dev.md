@@ -316,16 +316,23 @@ in declaration order (for `RNGSequence` too) and draws `n` rows of fresh random
 args for each one. A combination whose random args are rejected `max_retries`
 times in a row stops short with a `PytestStrategiesWarning`; the call raises when
 no combination yields a row. `generate_exhaustive()` ignores the flag, and a
-`Parameter` without sequence args behaves as if it were `False`.
+`Parameter` without sequence args behaves as if it were `False`, and `n=0`
+returns `[]` without walking the combinations.
+
+The resolver re-emits the `PytestStrategiesWarning`s raised while generating
+vectors at the test function, prefixed with `Strategy '<name>' (<test>): `, so
+the warnings summary says which strategy and test they concern.
 
 `Parameter.skip_reason` is the reason of the first `Series`/`RNGSequence` arg
 created with `skip_if_empty` that has no values, or `None`. When it is set,
 `generate_vectors` and `generate_exhaustive` return `[]` in every mode, without
-drawing random values. `filter_by_name`/`filter_by_index` still raise
+drawing random values (an invalid `n` still raises). `filter_by_name`/`filter_by_index` still raise
 `KeyError`/`IndexError` for a missing vector, so the CLI can tell whether a
 filter matched. The resolver then parametrizes the test with a single
 `pytest.param(None, ..., marks=pytest.mark.skip(reason=...), id="skipped")` row,
-also in dataclass mode, where no instance is built.
+also in dataclass mode, where no instance is built but the dataclass fields are
+still checked against the strategy's arguments. `skip_if_empty` is keyword-only,
+and a non-callable `predicate` (such as a reason passed positionally) raises.
 
 The `Parameter` copies the `directed_vectors`, `test_vectors` and
 `vector_constraints` it is given, so `add_*`/`remove_*` never change the

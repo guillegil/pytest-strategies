@@ -118,7 +118,7 @@ RNG types check their arguments when they are constructed. A misconfigured strat
 - A `set` or `frozenset` passed to `Series` or `RNGSequence`. Their iteration order is not reproducible, so pass `sorted(...)` or a list instead.
 - An empty `Series` or `RNGSequence`, or one whose predicate rejects every value, unless it has `skip_if_empty` (see [Skipping when a sequence is empty](#skipping-when-a-sequence-is-empty)).
 
-`Parameter` raises `ValueError` when `nsamples` is not `None`, `"auto"` or an integer >= 0, or when `max_retries` is not an integer >= 1.
+`Parameter` raises `ValueError` when `nsamples` is not `None`, `"auto"` or an integer >= 0, when `max_retries` is not an integer >= 1, or when `per_sequence_samples` is not a bool.
 
 ### 3. Enums & Weighted Generation
 The `RNGEnum` class supports standard Python Enums, including weighted selection and predicates.
@@ -227,7 +227,7 @@ TestArg("evens", rng_type=Series(range(10), predicate=lambda x: x % 2 == 0))
 **Constraints on `Series` in finite mode:**
 With a finite `--nsamples`, a `Series` combination that the constraints reject is skipped, and the cycle continues with the next combination. If the strategy also has random arguments, they are redrawn up to `max_retries` times before the combination is skipped. Each such skip emits a `PytestStrategiesWarning`: raise `max_retries`, or relax the constraint if that combination should be tested. If a whole cycle of combinations yields no valid vector, collecting the test fails.
 
-**`n` samples per sequence value (`per_sequence_samples`):**
+**`n` samples per sequence combination (`per_sequence_samples`):**
 By default a finite `--nsamples=K` gives `K` rows in total, shared among the sequence values. Pass `per_sequence_samples=True` to get `K` random rows for *each* combination of the `Series`/`RNGSequence` arguments instead:
 
 ```python
@@ -239,22 +239,31 @@ def per_device(nsamples):
         per_sequence_samples=True,
     )
 ```
-With the default of 10 samples this runs 20 tests: 10 for `devA`, then 10 for `devB`, each with a fresh random `width`. Several sequence arguments multiply (2 devices × 3 modes × `K`). Combinations follow declaration order for `RNGSequence` too, and directed vectors are still placed first. Under `--nsamples=auto` the flag has no effect: every combination runs once. A combination whose random arguments the constraints reject `max_retries` times in a row gets fewer rows and a `PytestStrategiesWarning`; collecting the test fails only if no combination yields a row.
+With the default of 10 samples this runs 20 tests: 10 for `devA`, then 10 for `devB`, each with a fresh random `width`. Several sequence arguments multiply (2 devices × 3 modes × `K`), and a value listed twice counts twice. Combinations follow declaration order for `RNGSequence` too, and directed vectors are still placed first. Under `--nsamples=auto` the flag has no effect: every combination runs once. A combination whose random arguments the constraints reject `max_retries` times in a row gets fewer rows and a `PytestStrategiesWarning`; collecting the test fails only if no combination yields a row. The warning names the strategy and the test.
 
 #### Skipping when a sequence is empty
-When the values come from configuration, there may be none: a testbench without any Esm peripheral, for example. An empty `Series` or `RNGSequence` normally fails collection. Give it a `skip_if_empty` reason instead, and every test that uses the strategy is reported as one skipped test with that reason:
+When the values come from configuration, there may be none: a testbench without any Esm peripheral, for example. An empty `Series` or `RNGSequence` normally fails collection. Give it a `skip_if_empty` reason instead (a keyword argument), and the strategy contributes a single skipped row with that reason, so each test that uses it is skipped:
 
 ```python
+from pytest_strategy import Parameter, RNGInteger, RNGSequence, Strategy, TestArg
+
+# From your testbench configuration, e.g.
+# [p.channel for p in config.peripherals.values() if p.type == "Esm"]
+ESM_CHANNELS = []
+
 @Strategy.register("esm_rw")
 def esm_rw(nsamples):
-    channels = [p.channel for p in CONFIG.peripherals.values() if p.type == "Esm"]
     return Parameter(
-        TestArg("channel", rng_type=RNGSequence(channels, skip_if_empty="no Esm peripheral in this testbench config")),
+        TestArg("channel", rng_type=RNGSequence(ESM_CHANNELS, skip_if_empty="no Esm peripheral in this testbench config")),
         TestArg("wdata", rng_type=RNGInteger(min=0, max=255)),
         per_sequence_samples=True,
     )
+
+@Strategy.strategy("esm_rw")
+def test_rw(channel, wdata):
+    ...
 ```
-With channels, the option changes nothing. Without any, `pytest -rs` shows `SKIPPED [1] test_esm.py:12: no Esm peripheral in this testbench config`, and the test's ID is `test_rw[skipped]`. The skip applies in every `--vector-mode` and with `--nsamples=auto`, and directed and test vectors are skipped too. A `--vector-name` or `--vector-index` that names one of the strategy's vectors also gives the skipped test. The reason must be a non-empty string. It also applies when the predicate rejects every value.
+With channels, the option changes nothing. Without any, `pytest -rs` shows `SKIPPED [1] test_esm.py:<line>: no Esm peripheral in this testbench config`, and the test's ID is `test_rw[skipped]`. A test with other parametrization (a stacked `@pytest.mark.parametrize`, a parametrized fixture) is skipped once per combination of it. The skip applies in every `--vector-mode` and with `--nsamples=auto`, and directed and test vectors are skipped too. A `--vector-name` or `--vector-index` that names one of the strategy's directed vectors also gives the skipped test. The reason must be a non-empty string. It also applies when the predicate rejects every value. The test's signature (or dataclass) is still checked against the strategy, so a mismatch fails collection even on a configuration without values. `skip_if_empty` works for strategies that return a `Parameter`.
 
 ### 6. Metadata Export (New in v1.0.0)
 
@@ -312,7 +321,7 @@ This is a **soft default**: an explicit integer `--nsamples` on the command line
 | `--nsamples=auto`  | any                       | Every `Series`/`RNGSequence` combination. A strategy without such arguments uses its own value (here 25), or 10 when unset |
 | not passed         | `"auto"`                  | Same as `--nsamples=auto` |
 
-Directed vectors are added on top of these, according to `--vector-mode`.
+Directed vectors are added on top of these, according to `--vector-mode`. With `Parameter(per_sequence_samples=True)`, a finite count applies to each `Series`/`RNGSequence` combination instead of the whole strategy (see [`per_sequence_samples`](#5-sequence-testing--exhaustive-generation-new-in-v110)).
 
 ### 9. Dataclass Parameters
 
@@ -392,7 +401,7 @@ Control test generation directly from the command line:
 
 | Option              | Description                                                             | Example                                     |
 | ------------------- | ----------------------------------------------------------------------- | ------------------------------------------- |
-| `--nsamples`        | Number of random samples per strategy (default 10). An integer overrides a strategy's own `nsamples`. `auto` enumerates the `Series`/`RNGSequence` arguments (see [What `--nsamples=auto` does](#5-sequence-testing--exhaustive-generation-new-in-v110)). Any other value is a usage error. | `pytest --nsamples=50` or `--nsamples=auto` |
+| `--nsamples`        | Number of random samples per strategy (default 10), or per `Series`/`RNGSequence` combination for a strategy with `per_sequence_samples=True`. An integer overrides a strategy's own `nsamples`. `auto` enumerates the `Series`/`RNGSequence` arguments (see [What `--nsamples=auto` does](#5-sequence-testing--exhaustive-generation-new-in-v110)). Any other value is a usage error. | `pytest --nsamples=50` or `--nsamples=auto` |
 | `--vector-mode`     | Generation mode: `all`, `random_only`, `directed_only`, `mixed`, `test` | `pytest --vector-mode=test`                 |
 | `--vector-name`     | Run only the directed vector with this name                             | `pytest --vector-name=edge_case_1`          |
 | `--vector-index`    | Run only the directed vector at this index (0-based, in definition order) | `pytest --vector-index=0`                 |

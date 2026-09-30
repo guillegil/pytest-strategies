@@ -7,9 +7,11 @@ read CLI options, call the factory, generate vectors, and apply
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import os
-from collections.abc import Callable
+import warnings
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -19,6 +21,7 @@ from ._dataclass import convert_to_dataclass
 from ._ids import generate_dataclass_ids, generate_test_ids
 from ._introspection import detect_dataclass_param, validate_signature
 from ._runtime import runtime
+from ._warnings import PytestStrategiesWarning
 from .parameters import Parameter
 from .rng import RNG, SequenceLike
 
@@ -42,6 +45,31 @@ def _id_row(sample: Any, single: bool) -> Any:
 def _skipped_param(reason: str, width: int) -> Any:
     """Return the single skipped row that stands in for a strategy without values."""
     return pytest.param(*([None] * width), marks=pytest.mark.skip(reason=reason), id="skipped")
+
+
+@contextlib.contextmanager
+def _attributed_warnings(name: str, test_fn: Callable) -> Iterator[None]:
+    """
+    Re-emit the PytestStrategiesWarnings raised in the block at the test function,
+    prefixed with the strategy and the test.
+
+    Raised during vector generation, they would otherwise point into this module and
+    not say which strategy or test they are about. Other warnings pass unchanged.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", PytestStrategiesWarning)
+        yield
+    code = getattr(inspect.unwrap(test_fn), "__code__", None)
+    for w in caught:
+        if issubclass(w.category, PytestStrategiesWarning) and code is not None:
+            warnings.warn_explicit(
+                f"Strategy '{name}' ({test_fn.__qualname__}): {w.message}",
+                w.category,
+                code.co_filename,
+                code.co_firstlineno,
+            )
+        else:
+            warnings.warn_explicit(w.message, w.category, w.filename, w.lineno, source=w.source)
 
 
 def _test_location(test_fn: Callable, config: pytest.Config | None) -> str:
@@ -239,29 +267,31 @@ def resolve_and_parametrize(
 
         # Generate samples using Parameter's generate_vectors with CLI options
         try:
-            if effective_nsamples == "auto":
-                # "auto" replaces only the random samples: CLI filters, vector modes
-                # and directed vectors apply exactly as they do for a finite count.
-                samples = param.generate_vectors(
-                    n=0,
-                    mode=vector_mode,
-                    filter_by_name=vector_name,
-                    filter_by_index=vector_index,
-                )
-                if (
-                    not vector_name
-                    and vector_index is None
-                    and vector_mode not in ("test", "directed_only")
-                ):
-                    samples.extend(param.generate_exhaustive())
-            else:
-                assert isinstance(effective_nsamples, int)
-                samples = param.generate_vectors(
-                    n=effective_nsamples,
-                    mode=vector_mode,
-                    filter_by_name=vector_name,
-                    filter_by_index=vector_index,
-                )
+            # Warnings raised while generating name the strategy and the test
+            with _attributed_warnings(name, test_fn):
+                if effective_nsamples == "auto":
+                    # "auto" replaces only the random samples: CLI filters, vector modes
+                    # and directed vectors apply exactly as they do for a finite count.
+                    samples = param.generate_vectors(
+                        n=0,
+                        mode=vector_mode,
+                        filter_by_name=vector_name,
+                        filter_by_index=vector_index,
+                    )
+                    if (
+                        not vector_name
+                        and vector_index is None
+                        and vector_mode not in ("test", "directed_only")
+                    ):
+                        samples.extend(param.generate_exhaustive())
+                else:
+                    assert isinstance(effective_nsamples, int)
+                    samples = param.generate_vectors(
+                        n=effective_nsamples,
+                        mode=vector_mode,
+                        filter_by_name=vector_name,
+                        filter_by_index=vector_index,
+                    )
         except (KeyError, IndexError) as e:
             # If filtering by name (KeyError) or index (IndexError) and the vector
             # doesn't exist, return empty samples
@@ -313,7 +343,14 @@ def resolve_and_parametrize(
         # DATACLASS MODE: Convert samples to dataclass instances
         assert dc_type is not None and dc_param is not None  # guaranteed when is_dc_mode is True
         if skip_reason is not None:
-            # No values to build an instance from
+            # No values to build an instance from, but the dataclass must still match
+            # the strategy, as the signature check does in named mode
+            try:
+                convert_to_dataclass([], argnames, dc_type)
+            except Exception as e:
+                raise ValueError(
+                    f"Error converting samples to dataclass for strategy '{name}': {e}"
+                ) from e
             return cast(
                 Callable,
                 pytest.mark.parametrize(dc_param, [_skipped_param(skip_reason, 1)])(test_fn),

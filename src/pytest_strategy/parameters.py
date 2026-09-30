@@ -45,12 +45,15 @@ class Parameter:
             max_retries: Maximum attempts to satisfy vector_constraints before raising (>= 1).
                 In finite mode with Series args, a Series combination whose random args
                 exhaust max_retries is skipped with a PytestStrategiesWarning; the call
-                raises only when a whole cycle of combinations yields no vector.
+                raises only when a whole cycle of combinations yields no vector. With
+                per_sequence_samples=True, such a combination gets fewer than n rows (with
+                a warning), and the call raises only when no combination yields a row.
             nsamples: Default number of random samples for this strategy (None, "auto"
                 for exhaustive generation, or an int >= 0)
             per_sequence_samples: If True, generate the n random samples once for every
                 combination of the Series/RNGSequence args (in declaration order) instead
-                of n in total. Two devices with the default n=10 give 20 rows.
+                of n in total. Two devices with the default n=10 give 20 rows. A value
+                listed twice counts twice.
 
         Raises:
             ValueError: If directed vectors don't match the number of test args
@@ -339,8 +342,9 @@ class Parameter:
             ValueError: If the vector constraints reject every generated vector
 
         Warns:
-            PytestStrategiesWarning: If a Series combination is skipped because its
-                random args did not satisfy the constraints within max_retries draws
+            PytestStrategiesWarning: If a Series combination is skipped, or with
+                per_sequence_samples=True a combination gets fewer than n rows, because
+                its random args did not satisfy the constraints within max_retries draws
 
         Examples:
             # All directed + 10 random
@@ -375,17 +379,13 @@ class Parameter:
         if mode not in valid_modes:
             raise ValueError(f"Invalid mode '{mode}'. Must be one of {valid_modes}")
 
-        # An empty skip_if_empty sequence: nothing to generate, in any mode
-        if self.skip_reason is not None:
-            return []
-
         # Mode: test - only test vectors
         if mode == "test":
-            return list(self.test_vectors.values())
+            return [] if self.skip_reason is not None else list(self.test_vectors.values())
 
         # Mode: directed_only
         if mode == "directed_only":
-            return list(self.directed_vectors.values())
+            return [] if self.skip_reason is not None else list(self.directed_vectors.values())
 
         # The remaining modes generate n random samples. A non-int n would never equal
         # the Series row count below (bool is an int subclass, so reject it explicitly).
@@ -393,6 +393,10 @@ class Parameter:
             raise ValueError(f"n must be an int, got {n!r}")
         if n < 0:
             raise ValueError(f"n must be >= 0, got {n}")
+
+        # An empty skip_if_empty sequence: nothing to generate, in any mode
+        if self.skip_reason is not None:
+            return []
 
         # Mode: all - always include all directed vectors
         if mode == "all" or mode == "mixed" and self.always_include_directed:
@@ -504,6 +508,10 @@ class Parameter:
             PytestStrategiesWarning: If a combination produced fewer than n rows because
                 its random args did not satisfy the constraints within max_retries draws
         """
+        # No rows asked for: don't walk (and validate) the whole product
+        if n == 0:
+            return []
+
         sequence_indices = self._sequence_indices()
         sequences = [self.test_args[i].rng_type.sequence for i in sequence_indices]
         random_indices = [i for i in range(len(self.test_args)) if i not in sequence_indices]
@@ -673,6 +681,8 @@ class Parameter:
             IndexError: If index is out of range
         """
         names = list(self.directed_vectors.keys())
+        if not names:
+            raise IndexError(f"Vector index {index} out of range: there are no directed vectors")
         if index < 0 or index >= len(names):
             raise IndexError(
                 f"Vector index {index} out of range. " f"Valid range: 0-{len(names)-1}"

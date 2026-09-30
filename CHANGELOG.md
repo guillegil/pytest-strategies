@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `PytestStrategiesWarning` (a `UserWarning` subclass, importable from `pytest_strategy.strategy`). It is emitted when two different functions register the same strategy name, and when finite mode skips a `Series` combination.
 - `py.typed` marker: type checkers now use the package's annotations, which can surface new type errors in code that uses it.
 - pytest-xdist support without `--rng-seed`: the controller sends its seed to the workers, so they generate the same tests.
-- `Strategy.export_strategies()` reports `enum_class` and `has_predicate` in each argument's `rng_details`.
-- `Series(..., skip_if_empty="<reason>")` and `RNGSequence(..., skip_if_empty="<reason>")`: an empty sequence, for example from a configuration without such devices, skips the strategy's tests with that reason instead of failing collection. `Parameter.skip_reason` and `to_dict()["skip_reason"]` report it.
+- `Strategy.export_strategies()` reports `enum_class`, and `has_predicate` for the RNG types that store a predicate (`RNGInteger`, `RNGFloat`, `RNGEnum`, `RNGWeighted*`), in each argument's `rng_details`.
+- `Series(..., skip_if_empty="<reason>")` and `RNGSequence(..., skip_if_empty="<reason>")` (keyword-only): an empty sequence, for example from a configuration without such devices, skips the strategy's tests with that reason instead of failing collection. `Parameter.skip_reason`, `to_dict()["skip_reason"]` and the argument's `rng_details["skip_if_empty"]` report it.
 - `Parameter(per_sequence_samples=True)`: a finite `nsamples` gives that many random rows for each combination of the `Series`/`RNGSequence` args instead of in total, so two devices with the default 10 samples run 20 tests. `--nsamples=auto` is unaffected.
 
 ### Changed
@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Series` in finite mode skips combinations that `vector_constraints` reject, with a `PytestStrategiesWarning` when their random args were redrawn `max_retries` times. Collection fails only when a whole cycle yields no vector.
 - Invalid arguments raise at construction: `RNGValueError` for `RNGInteger`/`RNGFloat` with `min > max`, empty, negative, non-finite or all-zero weights, a non-Enum, member-less or unsatisfiable `RNGEnum`, bad `RNGString` lengths or an empty charset, and a set passed to `Series`/`RNGSequence`. `ValueError` for `Parameter(nsamples=...)`, `Parameter(max_retries=...)` and a bad `n` for `generate_vectors`.
 - A `TestArg` validator also checks `Series` and `RNGSequence` values.
+- `PytestStrategiesWarning`s raised while generating vectors start with the strategy and the test (`Strategy 'name' (test_fn): ...`) and point at the test function instead of the plugin's code.
+- `Series` and `RNGSequence` reject `None` and a predicate that is not callable with `RNGValueError`.
 - Strategy factories are called exactly once, with `nsamples` passed by keyword, positionally or not at all, depending on their signature. An exception raised inside a factory is reported as `Error calling strategy factory '<name>' (nsamples=<n>): <Type>: <message>`.
 - Strategy file discovery searches the `testpaths` entries (glob patterns expanded; the rootdir without `testpaths`) and the directories of command-line paths. Below them it skips hidden directories, `norecursedirs` matches and virtual environments, and it loads the files in sorted path order.
 - Strategy files that fail to load are always reported, and a "Strategy not found" error lists the files that failed to load or skipped themselves.
