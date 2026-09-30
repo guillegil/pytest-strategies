@@ -1,11 +1,12 @@
 # rng.py
 
 import builtins
+import math
 import random
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from enum import Enum
-from typing import Callable, TypeVar, cast
+from typing import TypeVar, cast
 
 T = TypeVar("T")
 
@@ -28,7 +29,14 @@ class RNG:
 
     @staticmethod
     def seed(seed: int | None = None):
-        """Set the random seed and refresh the random state"""
+        """Set the random seed and refresh the random state.
+
+        With ``None`` the current seed is kept and the global random state is
+        left alone. The plugin calls this on every run, including runs that never
+        use a strategy, so it must not replace a state the project seeded itself
+        (e.g. ``random.seed(0)`` in a conftest). Use :meth:`refresh_seed` to
+        start the random state from the current seed.
+        """
         if seed is not None:
             RNG._seed = seed
             random.seed(RNG._seed)
@@ -39,9 +47,21 @@ class RNG:
         return RNG._seed
 
     @staticmethod
-    def refresh_seed():
-        """Refresh the random state with the current seed"""
-        random.seed(RNG._seed)
+    def refresh_seed(key: str | None = None):
+        """Refresh the random state with the current seed.
+
+        Args:
+            key: Optional stream name. With a key, the state is seeded from the
+                seed and the key together, so each key gets its own stream that
+                is the same on every run with this seed and does not depend on
+                the order in which keys are used.
+        """
+        if key is None:
+            random.seed(RNG._seed)
+        else:
+            # A str seed is hashed with SHA-512, so it is stable across processes
+            # (unlike hash(), which is salted per process).
+            random.seed(f"{RNG._seed}:{key}")
 
     @staticmethod
     def set_max_retries(retries: int):
@@ -78,6 +98,40 @@ class RNG:
                 return value
 
         raise RNGValueError(f"No valid value found after {RNG._max_retries} attempts")
+
+    @staticmethod
+    def _string_args_error(
+        length: int | None, min_length: int, max_length: int, charset: str
+    ) -> str | None:
+        """
+        Describe what is wrong with string generation arguments, if anything.
+
+        min_length and max_length are only checked when length is None, since
+        they are ignored otherwise.
+
+        Args:
+            length: Fixed length, or None for a random length
+            min_length: Minimum length if length is None
+            max_length: Maximum length if length is None
+            charset: Characters to choose from
+
+        Returns:
+            An error message starting with the argument name, or None if the arguments are valid
+        """
+        if length is not None:
+            if length < 0:
+                return f"length cannot be negative (got length={length})"
+            longest = length
+        else:
+            if min_length < 0:
+                return f"min_length cannot be negative (got min_length={min_length})"
+            if min_length > max_length:
+                return f"min_length ({min_length}) must be <= max_length ({max_length})"
+            longest = max_length
+
+        if longest > 0 and not charset:
+            return "charset cannot be empty unless the length is 0"
+        return None
 
     # ====
     # Basic Generators
@@ -123,7 +177,7 @@ class RNG:
         """
         return cast(
             builtins.float,
-            RNG._generate_with_constraint(lambda: random.uniform(min, max), predicate),
+            RNG._generate_with_constraint(lambda: _uniform(min, max), predicate),
         )
 
     @staticmethod
@@ -184,7 +238,8 @@ class RNG:
             Random string of specified length
 
         Raises:
-            ValueError: If length is negative
+            ValueError: If length or min_length is negative, if min_length > max_length,
+                or if charset is empty while the length can be greater than 0
 
         Example:
             RNG.string(length=10)  # Fixed length of 10
@@ -192,8 +247,9 @@ class RNG:
             RNG.string(length=8, charset="0123456789")  # Numeric string
             RNG.string(length=6, charset="ABCDEF0123456789")  # Hex string
         """
-        if length is not None and length < 0:
-            raise ValueError("String length cannot be negative")
+        error = RNG._string_args_error(length, min_length, max_length, charset)
+        if error:
+            raise ValueError(f"String {error}")
 
         if length is None:
             length = random.randint(min_length, max_length)
@@ -226,11 +282,14 @@ class RNG:
         range_list = list(ranges.keys())
         weights = list(ranges.values())
 
-        # Choose range using random.choices (handles normalization)
-        chosen_range = random.choices(range_list, weights=weights, k=1)[0]
-        min_val, max_val = chosen_range
+        def generator() -> int:
+            # Choose range using random.choices (handles normalization). The range
+            # is re-chosen on every predicate retry so that a range with no valid
+            # value cannot exhaust all retries while other ranges could succeed.
+            min_val, max_val = random.choices(range_list, weights=weights, k=1)[0]
+            return RNG.integer(min_val, max_val)
 
-        return RNG.integer(min_val, max_val, predicate)
+        return cast(int, RNG._generate_with_constraint(generator, predicate))
 
     @staticmethod
     def wfloat(
@@ -256,15 +315,126 @@ class RNG:
         range_list = list(ranges.keys())
         weights = list(ranges.values())
 
-        chosen_range = random.choices(range_list, weights=weights, k=1)[0]
-        min_val, max_val = chosen_range
+        def generator() -> builtins.float:
+            # Re-choose the range on every predicate retry (see winteger)
+            min_val, max_val = random.choices(range_list, weights=weights, k=1)[0]
+            return RNG.float(min_val, max_val)
 
-        return RNG.float(min_val, max_val, predicate)
+        return cast(builtins.float, RNG._generate_with_constraint(generator, predicate))
 
 
 # ====
 # RNG Type Classes
 # ====
+
+
+def _uniform(a: float, b: float) -> float:
+    """
+    Return random.uniform(a, b), without overflowing when b - a exceeds the largest float.
+
+    The same draw and formula as the standard library, so a seed gives the same
+    values. b - a only overflows when a and b have opposite signs, and the second
+    form cannot overflow then, and stays within [a, b].
+    """
+    r = random.random()
+    x = a + (b - a) * r
+    return x if math.isfinite(x) else a * (1.0 - r) + b * r
+
+
+def _is_finite(value: float) -> bool:
+    """math.isfinite, also False for an int too large for a float."""
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _check_finite(owner: str, *bounds: float) -> None:
+    """Raise RNGValueError if a float bound is inf or nan."""
+    for bound in bounds:
+        if not _is_finite(bound):
+            raise RNGValueError(f"{owner} bounds must be finite, got {bound!r}")
+
+
+def _check_ranges(owner: str, ranges: Mapping, finite: bool = False) -> None:
+    """
+    Raise RNGValueError unless every key of ranges is a (min, max) pair with min <= max.
+
+    Args:
+        owner: Name of the RNG type, used in the error message
+        ranges: Mapping of (min, max) tuples to their weights
+        finite: Also require finite bounds (float ranges)
+    """
+    for key in ranges:
+        if not (isinstance(key, tuple) and len(key) == 2):
+            raise RNGValueError(f"{owner} range {key!r} must be a (min, max) tuple")
+        if finite and not all(_is_finite(bound) for bound in key):
+            raise RNGValueError(f"{owner} range {key!r} must have finite bounds")
+        if not key[0] <= key[1]:  # also rejects NaN, like _check_bounds
+            raise RNGValueError(f"{owner} range {key!r} must have min <= max")
+
+
+def _check_bounds(
+    owner: str, min_val: float, max_val: float, min_given: bool, max_given: bool
+) -> None:
+    """
+    Raise RNGValueError if min_val > max_val, naming the bound that fell back to its default.
+
+    Args:
+        owner: Name of the RNG type, used in the error message
+        min_val: Minimum value after filling defaults
+        max_val: Maximum value after filling defaults
+        min_given: Whether the caller passed min explicitly
+        max_given: Whether the caller passed max explicitly
+
+    Raises:
+        RNGValueError: If min_val > max_val
+    """
+    if min_val <= max_val:
+        return
+
+    note = ""
+    if not max_given:
+        note = f" (max was not given and defaults to {max_val})"
+    elif not min_given:
+        note = f" (min was not given and defaults to {min_val})"
+    raise RNGValueError(f"{owner} min ({min_val}) must be <= max ({max_val}){note}")
+
+
+def _check_weights(owner: str, weights: Mapping) -> None:
+    """
+    Raise RNGValueError unless weights can be used for weighted selection.
+
+    Individual zero weights are allowed (they exclude an entry), but random.choices
+    silently skews the distribution for negative weights and only rejects an
+    all-zero total when a value is generated.
+
+    Args:
+        owner: Name of the RNG type, used in the error message
+        weights: Mapping of choices to their weights
+
+    Raises:
+        RNGValueError: If weights is empty, contains a negative or non-finite
+            weight, all weights are zero, or their total is not finite
+    """
+    if not weights:
+        raise RNGValueError(f"{owner} weights cannot be empty")
+
+    for key, weight in weights.items():
+        if not _is_finite(weight) or weight < 0:
+            raise RNGValueError(
+                f"{owner} weight for {key!r} must be a finite number >= 0, got {weight!r}"
+            )
+
+    # random.choices rejects a total that overflows, on every draw
+    try:
+        total = float(sum(weights.values()))
+    except OverflowError:
+        total = math.inf
+    if not math.isfinite(total):
+        raise RNGValueError(f"{owner} weights must have a finite total")
+    if total <= 0:
+        raise RNGValueError(f"{owner} weights cannot all be zero")
 
 
 class RNGType:
@@ -289,6 +459,7 @@ class RNGInteger(RNGType):
         self.min = min if min is not None else -(2**31)
         self.max = max if max is not None else 2**31 - 1
         self.predicate = predicate
+        _check_bounds("RNGInteger", self.min, self.max, min is not None, max is not None)
 
     def generate(self):
         return RNG.integer(self.min, self.max, self.predicate)
@@ -307,6 +478,8 @@ class RNGFloat(RNGType):
         self.min = min if min is not None else 0.0
         self.max = max if max is not None else 1.0
         self.predicate = predicate
+        _check_finite("RNGFloat", self.min, self.max)
+        _check_bounds("RNGFloat", self.min, self.max, min is not None, max is not None)
 
     def generate(self):
         return RNG.float(self.min, self.max, self.predicate)
@@ -383,25 +556,74 @@ class RNGEnum(RNGType):
             weights: Optional dictionary mapping enum members to their weights.
                     If provided, only weighted members will be selected.
                     Weights don't need to sum to 1.0 (they'll be normalized).
-            predicate: Optional function to filter valid enum values
+            predicate: Optional function to filter valid enum values. Each draw picks
+                    only among the candidate members it accepts, using the current
+                    predicate and weights. It is also checked here against every
+                    candidate member, so an unsatisfiable predicate fails at once.
 
         Raises:
-            RNGValueError: If enum_class is not an Enum, or if weights reference non-existent members
+            RNGValueError: If enum_class is not an Enum class, if it has no members to
+                draw from and no weights are given, if weights reference non-existent
+                members, if weights are empty, negative, non-finite or all zero, or if
+                no member (with a positive weight) satisfies the predicate
         """
-        if not issubclass(enum_class, Enum):
-            raise RNGValueError(f"{enum_class} is not an Enum class")
+        # isinstance guard first: issubclass raises TypeError for non-classes (e.g. a member)
+        if not (isinstance(enum_class, type) and issubclass(enum_class, Enum)):
+            raise RNGValueError(f"{enum_class!r} is not an Enum class")
+        # Uniform selection draws from iteration, which for a Flag skips zero-valued and
+        # multi-bit members. Weighted selection draws from the weights keys instead.
+        if weights is None and len(enum_class) == 0:
+            raise RNGValueError(f"{enum_class.__name__} has no members to choose from")
 
         self.enum_class = enum_class
         self.weights = weights
         self.predicate = predicate
 
         # Validate weights if provided
-        if weights:
+        if weights is not None:
             for member in weights:
                 if not isinstance(member, enum_class):
                     raise RNGValueError(
                         f"Weight key {member} is not a member of {enum_class.__name__}"
                     )
+            _check_weights("RNGEnum", weights)
+
+        # Fail now, not at the first draw, when no member satisfies the predicate
+        if predicate:
+            self._filter_by_predicate(predicate)
+
+    def _filter_by_predicate(
+        self, predicate: Callable[[Enum], bool]
+    ) -> tuple[list[Enum], list[float]]:
+        """
+        Return the candidate members the predicate accepts, with their weights.
+
+        Filtering the finite set of candidates (instead of retrying draws) means a draw
+        never fails while a valid member exists. The candidates come from the current
+        weights on every call, so reassigning predicate or weights takes effect.
+
+        Args:
+            predicate: The predicate to filter the candidate members with
+
+        Raises:
+            RNGValueError: If no candidate member with a positive weight is accepted
+        """
+        # Same candidates generate() draws from: the weighted members, else all members
+        candidates = self.weights if self.weights else dict.fromkeys(self.enum_class, 1.0)
+        members: list[Enum] = []
+        weights: list[float] = []
+        for member, weight in candidates.items():
+            if predicate(member):
+                members.append(member)
+                weights.append(weight)
+
+        if sum(weights) <= 0:
+            which = "weighted member with a positive weight" if self.weights else "member"
+            raise RNGValueError(
+                f"No valid value found: no {which} of {self.enum_class.__name__} "
+                "satisfies the predicate"
+            )
+        return members, weights
 
     def generate(self) -> Enum:
         """
@@ -409,37 +631,26 @@ class RNGEnum(RNGType):
 
         Returns:
             Random enum member satisfying constraints
-
-        Raises:
-            RNGValueError: If no valid value found after max_retries attempts
         """
         if self.weights:
             # Weighted selection
+            if self.predicate:
+                # With predicate: choose among the weighted members it accepts
+                members, weights = self._filter_by_predicate(self.predicate)
+                return random.choices(members, weights=weights, k=1)[0]
+
+            # Without predicate: direct selection
             members = list(self.weights.keys())
             weights = list(self.weights.values())
-
-            if self.predicate:
-                # With predicate: use retry logic
-                def generator():
-                    return random.choices(members, weights=weights, k=1)[0]
-
-                return cast(Enum, RNG._generate_with_constraint(generator, self.predicate))
-            else:
-                # Without predicate: direct selection
-                return random.choices(members, weights=weights, k=1)[0]
+            return random.choices(members, weights=weights, k=1)[0]
         else:
             # Uniform selection from all members
-            members = list(self.enum_class)
-
             if self.predicate:
-                # With predicate: use retry logic
-                def generator():
-                    return random.choice(members)
+                # With predicate: choose among the members it accepts
+                return random.choice(self._filter_by_predicate(self.predicate)[0])
 
-                return cast(Enum, RNG._generate_with_constraint(generator, self.predicate))
-            else:
-                # Without predicate: direct selection
-                return random.choice(members)
+            # Without predicate: direct selection
+            return random.choice(list(self.enum_class))
 
     @property
     def python_type(self):
@@ -452,20 +663,59 @@ class SequenceLike(RNGType):
     Abstract base class for sequence-based RNG types.
 
     Subclasses differ in how they produce an ordered sequence for exhaustive
-    (auto) mode via ``_get_auto_sequence()``.  In finite / normal mode both
-    subclasses fall back to a random element draw via ``generate()``.
+    (auto) mode via ``_get_auto_sequence()``. In finite mode, Parameter cycles
+    through Series values in order, and RNGSequence draws random elements via
+    ``generate()``. With ``Parameter(per_sequence_samples=True)``, both are walked
+    in declaration order with n rows for each value.
+
+    An empty sequence (or one the predicate empties) raises, unless
+    ``skip_if_empty`` gives a reason: the tests of a strategy with such an arg are
+    then reported as skipped with that reason. Use it when the values come from
+    configuration that may legitimately have none.
     """
 
-    def __init__(self, sequence: Sequence, predicate: Callable | None = None):
+    def __init__(
+        self,
+        sequence: Sequence,
+        predicate: Callable | None = None,
+        *,
+        skip_if_empty: str | None = None,
+    ):
+        # A config lookup with no entry often yields None rather than an empty list
+        if sequence is None:
+            raise RNGValueError(f"{type(self).__name__} requires a sequence, got None")
+        # Sets iterate in hash order, which for str/bytes changes with PYTHONHASHSEED,
+        # so the same --rng-seed would give different values in each process
+        if isinstance(sequence, (set, frozenset)):
+            raise RNGValueError(
+                f"{type(self).__name__} requires an ordered sequence, got a "
+                f"{type(sequence).__name__} whose iteration order is not reproducible "
+                "across runs; use sorted(...) or a list"
+            )
+        if predicate is not None and not callable(predicate):
+            raise RNGValueError(
+                f"{type(self).__name__} predicate must be callable, got {predicate!r}"
+                + (" (did you mean skip_if_empty=...?)" if isinstance(predicate, str) else "")
+            )
+        if skip_if_empty is not None and (
+            not isinstance(skip_if_empty, str) or not skip_if_empty.strip()
+        ):
+            raise RNGValueError(
+                f"{type(self).__name__} skip_if_empty must be a non-empty reason string, "
+                f"got {skip_if_empty!r}"
+            )
+
         self.sequence = list(sequence)
+        self.skip_if_empty = skip_if_empty
 
         # Apply predicate if provided
         if predicate:
             self.sequence = [x for x in self.sequence if predicate(x)]
 
-        if not self.sequence:
+        if not self.sequence and skip_if_empty is None:
             raise RNGValueError(
-                "Sequence cannot be empty (or all items were filtered by predicate)"
+                "Sequence cannot be empty (or all items were filtered by predicate). "
+                "Pass skip_if_empty='<reason>' to skip the strategy's tests instead."
             )
 
     def _get_auto_sequence(self) -> list:
@@ -475,8 +725,17 @@ class SequenceLike(RNGType):
         """
         raise NotImplementedError
 
+    @property
+    def skip_reason(self) -> str | None:
+        """The skip_if_empty reason when the sequence is empty, otherwise None."""
+        return None if self.sequence else self.skip_if_empty
+
     def generate(self):
         """Generate a random value from the sequence (normal / finite mode)."""
+        if not self.sequence:
+            raise RNGValueError(
+                f"{type(self).__name__} has no values to draw from ({self.skip_if_empty})"
+            )
         return RNG.choice(self.sequence)
 
     @property
@@ -488,7 +747,9 @@ class RNGSequence(SequenceLike):
     """
     RNG type for sequences of values.
 
-    In normal mode, acts like RNGChoice (picks random values).
+    In normal mode, acts like RNGChoice (picks random values), unless the
+    Parameter sets per_sequence_samples=True, which walks the values in
+    declaration order with n rows each.
     In exhaustive mode (nsamples="auto"), produces a permutation of the
     sequence (each value exactly once, random order).
     """
@@ -503,7 +764,8 @@ class Series(SequenceLike):
     Deterministic ordered sequence type.
 
     In auto mode, produces values in their original declaration order.
-    In finite mode, cycles (K >= len) or truncates to the first K (K < len).
+    In finite mode, cycles (K >= len) or truncates to the first K (K < len), or
+    gives K rows for each value when the Parameter sets per_sequence_samples=True.
     Multiple Series args produce the full Cartesian product in
     itertools.product order (leftmost arg is the slowest counter).
     """
@@ -523,6 +785,11 @@ class RNGString(RNGType):
         max_length: int = 20,
         charset: str = "abcdefghijklmnopqrstuvwxyz",
     ):
+        # Fail when the strategy is defined, not only for the seeds that hit the bad case
+        error = RNG._string_args_error(length, min_length, max_length, charset)
+        if error:
+            raise RNGValueError(f"RNGString {error}")
+
         self.length = length
         self.min_length = min_length
         self.max_length = max_length
@@ -540,6 +807,8 @@ class RNGWeightedInteger(RNGType):
     """RNG type for generating weighted integers from multiple ranges"""
 
     def __init__(self, ranges: dict[tuple[int, int], float], predicate: Callable | None = None):
+        _check_weights("RNGWeightedInteger", ranges)
+        _check_ranges("RNGWeightedInteger", ranges)
         self.ranges = ranges
         self.predicate = predicate
 
@@ -555,6 +824,8 @@ class RNGWeightedFloat(RNGType):
     """RNG type for generating weighted floats from multiple ranges"""
 
     def __init__(self, ranges: dict[tuple[float, float], float], predicate: Callable | None = None):
+        _check_weights("RNGWeightedFloat", ranges)
+        _check_ranges("RNGWeightedFloat", ranges, finite=True)
         self.ranges = ranges
         self.predicate = predicate
 

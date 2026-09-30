@@ -165,12 +165,9 @@ class TestRNGEnumPredicate:
         assert unique_values.issubset({Priority.MEDIUM, Priority.HIGH})
 
     def test_predicate_impossible_raises_error(self):
-        """Test that impossible predicate raises error after retries"""
-        RNG.seed(42)
-        rng_enum = RNGEnum(Status, predicate=lambda s: False)  # Impossible condition
-
+        """Test that impossible predicate raises error when the RNGEnum is created"""
         with pytest.raises(RNGValueError, match="No valid value found"):
-            rng_enum.generate()
+            RNGEnum(Status, predicate=lambda s: False)  # Impossible condition
 
 
 class TestRNGEnumWeightedWithPredicate:

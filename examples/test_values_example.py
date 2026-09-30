@@ -36,7 +36,8 @@ def test_api_responses(endpoint, status_code):
     Test API responses.
     
     With --vector-mode=test, this will run 4 tests (the test vectors).
-    With default mode, this will run test vectors + directed + random samples.
+    With default mode (--vector-mode=all), this runs only random samples (this
+    strategy has no directed vectors); test vectors are not included.
     """
     print(f"Testing {endpoint} with status {status_code}")
     assert endpoint.startswith("/")
@@ -70,7 +71,8 @@ def test_user_permissions(age, role):
     
     With --vector-mode=test, runs only test vectors (3 tests).
     With --vector-mode=directed_only, runs only directed vectors (2 tests).
-    With --vector-mode=all, runs directed + test + random samples.
+    With --vector-mode=all (default), runs directed + random samples (test vectors
+    are not included).
     """
     print(f"Testing user: age={age}, role={role}")
     assert 0 <= age <= 120
@@ -78,14 +80,16 @@ def test_user_permissions(age, role):
 
 
 # 3. Test Values in TestArg
-# You can also define test values at the TestArg level.
+# TestArg also accepts test_values. A Parameter does not generate vectors from
+# them (only its test_vectors run in test mode); they are recorded as
+# "has_test_values" in Strategy.export_strategies().
 @Strategy.register("payment_test")
 def payment_test_strategy(nsamples):
     return Parameter(
-        # Test values: specific amounts to test
+        # Test values: documentation of the amounts worth testing
         TestArg("amount", rng_type=RNGInteger(1, 10000), test_values=[0, 1, 100, 9999]),
         TestArg("currency", rng_type=RNGChoice(["USD", "EUR", "GBP"]), test_values=["USD"]),
-        # Test vectors combine the test values
+        # Test vectors: the scenarios that actually run with --vector-mode=test
         test_vectors={
             "zero_amount": (0, "USD"),
             "large_amount": (9999, "EUR")

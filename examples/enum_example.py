@@ -158,6 +158,10 @@ def create_role_based_strategy(nsamples: int) -> Parameter:
                 RequestMethod.PUT: 0.2,
             }
         )),
+        vector_constraints=[
+            # Guests can only read
+            lambda v: v[0] != UserRole.GUEST or v[1] == RequestMethod.GET,
+        ],
         directed_vectors={
             "guest_read": (UserRole.GUEST, RequestMethod.GET),
             "user_write": (UserRole.USER, RequestMethod.POST),

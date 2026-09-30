@@ -88,8 +88,8 @@ class TestSequenceIntegration:
         # Should have 3 tests (length of sequence)
         result.assert_outcomes(passed=3)
 
-    def test_auto_mode_no_sequence_fails(self, pytester):
-        """Verify that auto mode fails if no sequence is present."""
+    def test_auto_mode_no_sequence_falls_back(self, pytester):
+        """Verify that auto mode falls back to finite generation if no sequence is present."""
         pytester.makepyfile("""
             from pytest_strategy import Strategy, Parameter, TestArg, RNGInteger
 
@@ -107,8 +107,8 @@ class TestSequenceIntegration:
         # Run with nsamples="auto"
         result = pytester.runpytest("--nsamples=auto")
 
-        # Should fail collection or execution
-        result.stdout.fnmatch_lines(["*ValueError: No sequence arguments found*"])
+        # Nothing to enumerate: falls back to the default of 10 random samples
+        result.assert_outcomes(passed=10)
 
     def test_auto_mode_filtered_count(self, pytester):
         """Verify the number of tests generated with filtered sequences."""

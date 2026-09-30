@@ -1,6 +1,7 @@
 # test_args.py
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 
 class TestArg:
@@ -96,6 +97,8 @@ class TestArg:
         """
         Serialize the test argument metadata to a dictionary.
         """
+        from enum import Enum
+
         data = {
             "name": self._name,
             "description": self._description,
@@ -112,12 +115,19 @@ class TestArg:
             data["rng_type"] = self._rng_type.__class__.__name__
             # Add RNG specific details if available
             if hasattr(self._rng_type, "__dict__"):
-                # Filter out private attributes and callables
-                rng_details = {
-                    k: str(v)
-                    for k, v in self._rng_type.__dict__.items()
-                    if not k.startswith("_") and not callable(v)
-                }
+                # Filter out private attributes and callables, except Enum classes (the
+                # enum_class of an RNGEnum), which are configuration and exported by name
+                rng_details: dict[str, Any] = {}
+                for k, v in self._rng_type.__dict__.items():
+                    if k.startswith("_"):
+                        continue
+                    if isinstance(v, type) and issubclass(v, Enum):
+                        rng_details[k] = v.__name__
+                    elif not callable(v):
+                        rng_details[k] = str(v)
+                # A set predicate is a callable and left out above, so say whether one is set
+                if "predicate" in self._rng_type.__dict__:
+                    rng_details["has_predicate"] = self._rng_type.predicate is not None
                 if rng_details:
                     data["rng_details"] = rng_details
 

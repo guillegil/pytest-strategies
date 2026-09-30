@@ -14,13 +14,18 @@ Main Components:
 - RNG: Random number generation with seed management
 - RNGType classes: Type-safe random generators (RNGInteger, RNGFloat, etc.)
 
+Strategies can be registered in the test module, as in the example below, or
+in files named strategies.py, strategy.py, *_strategies.py or *_strategy.py
+that contain @Strategy.register; the plugin imports those when the session
+starts.
+
 Example Usage:
     from pytest_strategy import Strategy, Parameter, TestArg
     from pytest_strategy.rng import RNGInteger
 
     @Strategy.register("addition_strategy")
     def create_samples(nsamples):
-        param = Parameter(
+        return Parameter(
             TestArg("a", rng_type=RNGInteger(0, 100)),
             TestArg("b", rng_type=RNGInteger(0, 100)),
             directed_vectors={
@@ -28,7 +33,6 @@ Example Usage:
                 "max": (100, 100),
             }
         )
-        return param.arg_names, param.generate_samples(nsamples)
 
     @Strategy.strategy("addition_strategy")
     def test_addition(a, b):
@@ -48,16 +52,19 @@ Dataclass Support:
 
 CLI Options:
     pytest --nsamples 50              # Generate 50 random samples
-    pytest --seed 42                  # Set random seed for reproducibility
+    pytest --nsamples auto            # Enumerate Series/RNGSequence args
+    pytest --rng-seed 42              # Set random seed for reproducibility
     pytest --vector-mode directed_only # Run only directed test vectors
     pytest --vector-name "zeros"      # Run specific directed vector
+    pytest --vector-index 0           # Run the directed vector at index 0
 """
 
-__version__ = "1.1.0a2"
+__version__ = "2.0.0"
 __author__ = "Guillermo Gil"
 __email__ = "guillegil@proton.me"
 
 # Core components
+from ._warnings import PytestStrategiesWarning
 from .parameters import Parameter
 
 # RNG components
@@ -106,6 +113,9 @@ __all__ = [
     "RNGSequence",
     "SequenceLike",
     "Series",
+    # Errors and warnings
+    "RNGValueError",
+    "PytestStrategiesWarning",
 ]
 
 
