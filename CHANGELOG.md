@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-30
+
+2.0.0 is the first release after 1.0.0. 1.1.0a1 and 1.1.0a2 were pre-releases that were never tagged; their changes are part of it.
+
+### Breaking changes and how to upgrade from 1.0.0
+- **Python 3.11 or later and pytest 8.4.2 or later** are required. Python 3.10 and pytest 7 are no longer supported.
+- **Generated values and test IDs change.** The same `--rng-seed` gives different vectors than 1.x, and test IDs are built differently, so node IDs saved for `--lf`, `--deselect` or CI filters must be recorded again.
+- **Invalid RNG arguments fail when the strategy is built**, with `RNGValueError` (for example `RNGInteger(10, 0)`, or an empty `Series`). `RNGValueError` is not a `ValueError` subclass, so `except ValueError` does not catch it. Pass `skip_if_empty=` to a sequence that can be empty.
+- **Command-line mistakes are usage errors** (exit code 4): a `--nsamples` that is not an integer >= 0 or `auto`, and a `--vector-name` or `--vector-index` that no strategy has, which used to skip every test.
+- **`RNGSequence` under `--nsamples=auto`** yields a random permutation of its values. Use `Series` where the order matters.
+- **Dataclass mode** is chosen by annotation: the parameter annotated with a dataclass whose fields are the strategy's arguments receives the vector, and every other parameter is treated as a fixture.
+- **License**: the project is MIT licensed.
+
 ### Added
 - `PytestStrategiesWarning` (a `UserWarning` subclass, importable from `pytest_strategy.strategy`). It is emitted when two different functions register the same strategy name, and when finite mode skips a `Series` combination.
 - `py.typed` marker: type checkers now use the package's annotations, which can surface new type errors in code that uses it.
@@ -65,7 +78,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Discovery**: `-vv` no longer reports a strategy file outside the rootdir as failed to load.
 - **Docs and examples**: the README, docs/dev.md and the package docstring no longer use the removed `generate_samples` API or a nonexistent `--seed` flag, and `examples/enum_example.py` no longer fails for some seeds.
 
-## [1.1.0a2] - 2026-06-17
+## [1.1.0a2] - 2026-06-17 (pre-release, not tagged)
 
 ### BREAKING CHANGE
 - `RNGSequence` under `nsamples="auto"` now produces a **permutation** (each element once, random order) instead of the previously ordered Cartesian product. Tests asserting exact order on `RNGSequence` auto results must be updated to use membership/count assertions, or migrated to `Series` for deterministic ordering. Note: when `Series` values are combined with constraint predicates, the constraint applies per row — if the constraint depends on Series position, behavior is tied to the cycling order.
@@ -76,7 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SequenceLike`: shared base class for `Series` and `RNGSequence`. Code keying on sequence arguments should use `isinstance(x, SequenceLike)`.
 - `RNGSequence` and `SequenceLike` promoted to `pytest_strategy.__all__`.
 
-## [1.1.0a1] - 2025-11-24
+## [1.1.0a1] - 2025-11-24 (pre-release, not tagged)
 
 ### Added
 - **Sequence Testing**: New `RNGSequence` class for defining deterministic sequences of values.
@@ -111,3 +124,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Fixed `AttributeError: 'Parameter' object has no attribute 'generate_samples'` by renaming method to `generate_vectors`.
 - Improved error handling in `Strategy` decorator.
+
+[Unreleased]: https://github.com/guillegil/pytest-strategies/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/guillegil/pytest-strategies/compare/v1.0.0...v2.0.0
+[1.0.0]: https://github.com/guillegil/pytest-strategies/releases/tag/v1.0.0

@@ -196,14 +196,12 @@ def test_every_xdist_worker_builds_the_same_tests(project):
 
 
 def test_hook_can_skip_the_modules_that_need_ctx(project):
-    project.makeconftest(
-        """
+    project.makeconftest("""
 import pytest
 
 def pytest_strategies_context(config):
     pytest.skip("no testbench configured", allow_module_level=True)
-"""
-    )
+""")
 
     result = project.runpytest("-p", "no:cacheprovider", "--rng-seed=1", "-rs")
 

@@ -144,6 +144,22 @@ class TestPackagingMetadata:
         assert minimum is not None
         assert min(minors) == int(minimum.group(1))
 
+    def test_package_version_matches_pyproject(self, pyproject):
+        """1.0.0 shipped with ``__version__ = "0.1.0"``."""
+        tree = ast.parse(_read("src/pytest_strategy/__init__.py"))
+        versions = [
+            node.value.value
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(getattr(t, "id", None) == "__version__" for t in node.targets)
+        ]
+        assert versions == [pyproject["project"]["version"]]
+
+    def test_final_version_has_a_changelog_section(self, pyproject):
+        version = pyproject["project"]["version"]
+        if re.fullmatch(r"\d+\.\d+\.\d+", version):
+            assert f"\n## [{version}] - " in _read("CHANGELOG.md")
+
     def test_license_is_the_same_everywhere(self, pyproject):
         """LICENSE said GPL-3.0, the metadata Apache-2.0 and the README MIT."""
         project = pyproject["project"]

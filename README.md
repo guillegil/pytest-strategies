@@ -24,10 +24,10 @@
 
 ## 📦 Installation
 
-`pytest-strategies` is not published on PyPI yet. Install it from GitHub:
+`pytest-strategies` needs Python 3.11 or later and pytest 8.4.2 or later (Python 3.10 is not supported from 2.0.0 on). It is not published on PyPI yet. Install a release from GitHub:
 
 ```bash
-pip install git+https://github.com/guillegil/pytest-strategies.git
+pip install "pytest-strategies @ git+https://github.com/guillegil/pytest-strategies.git@v2.0.0"
 ```
 
 or from a local clone with `pip install -e .`.
@@ -161,7 +161,7 @@ Parameter(
 ```
 A random vector that fails a constraint is drawn again, up to `max_retries` times (a `Parameter` argument, default 100). If no valid vector turns up, collecting the test fails with "Could not generate valid vector".
 
-### 5. Sequence Testing & Exhaustive Generation (New in v1.1.0)
+### 5. Sequence Testing & Exhaustive Generation (New in v2.0.0)
 
 There are two sequence types. Both walk a fixed set of values, but they differ in **ordering**:
 
@@ -222,7 +222,7 @@ TestArg("evens", rng_type=Series(range(10), predicate=lambda x: x % 2 == 0))
 - Combinations that `vector_constraints` reject are left out. Random arguments are redrawn up to `max_retries` times before a combination is dropped. If the constraints reject every combination, collecting the test fails.
 - Directed vectors are placed before the combinations in the default `all` mode. In `mixed` mode they are included when `always_include_directed` is set (the default). `random_only` gives only the combinations.
 - `--vector-mode=test`, `--vector-mode=directed_only`, `--vector-name` and `--vector-index` take precedence: they select only those vectors, and no combinations are generated.
-- A strategy with no `Series` or `RNGSequence` argument has nothing to enumerate. It falls back to its own `nsamples` (see [Per-Strategy Sample Count](#8-per-strategy-sample-count-new-in-v110)), or 10 random samples.
+- A strategy with no `Series` or `RNGSequence` argument has nothing to enumerate. It falls back to its own `nsamples` (see [Per-Strategy Sample Count](#8-per-strategy-sample-count-new-in-v200)), or 10 random samples.
 
 **Constraints on `Series` in finite mode:**
 With a finite `--nsamples`, a `Series` combination that the constraints reject is skipped, and the cycle continues with the next combination. If the strategy also has random arguments, they are redrawn up to `max_retries` times before the combination is skipped. Each such skip emits a `PytestStrategiesWarning`: raise `max_retries`, or relax the constraint if that combination should be tested. If a whole cycle of combinations yields no valid vector, collecting the test fails.
@@ -277,7 +277,7 @@ json_data = Strategy.export_strategies(format="json")
 print(json_data)
 ```
 
-### 7. Test Values (New in v1.1.0)
+### 7. Test Values (New in v2.0.0)
 
 You can define test-specific vectors that only run when using `--vector-mode=test`. This is useful for defining specific test scenarios that you want to verify independently from random or directed vectors.
 
@@ -298,7 +298,7 @@ def api_test_strategy(nsamples):
 ```
 Running with `pytest --vector-mode=test` runs only the test vectors, ignoring random and directed vectors.
 
-### 8. Per-Strategy Sample Count (New in v1.1.0)
+### 8. Per-Strategy Sample Count (New in v2.0.0)
 
 By default the number of generated vectors is controlled globally by `--nsamples` (10 when unset). A strategy can declare its own count by passing `nsamples` to its `Parameter`:
 
@@ -321,7 +321,7 @@ This is a **soft default**: an explicit integer `--nsamples` on the command line
 | `--nsamples=auto`  | any                       | Every `Series`/`RNGSequence` combination. A strategy without such arguments uses its own value (here 25), or 10 when unset |
 | not passed         | `"auto"`                  | Same as `--nsamples=auto` |
 
-Directed vectors are added on top of these, according to `--vector-mode`. With `Parameter(per_sequence_samples=True)`, a finite count applies to each `Series`/`RNGSequence` combination instead of the whole strategy (see [`per_sequence_samples`](#5-sequence-testing--exhaustive-generation-new-in-v110)).
+Directed vectors are added on top of these, according to `--vector-mode`. With `Parameter(per_sequence_samples=True)`, a finite count applies to each `Series`/`RNGSequence` combination instead of the whole strategy (see [`per_sequence_samples`](#5-sequence-testing--exhaustive-generation-new-in-v200)).
 
 ### 9. Dataclass Parameters
 
@@ -441,7 +441,7 @@ Control test generation directly from the command line:
 
 | Option              | Description                                                             | Example                                     |
 | ------------------- | ----------------------------------------------------------------------- | ------------------------------------------- |
-| `--nsamples`        | Number of random samples per strategy (default 10), or per `Series`/`RNGSequence` combination for a strategy with `per_sequence_samples=True`. An integer overrides a strategy's own `nsamples`. `auto` enumerates the `Series`/`RNGSequence` arguments (see [What `--nsamples=auto` does](#5-sequence-testing--exhaustive-generation-new-in-v110)). Any other value is a usage error. | `pytest --nsamples=50` or `--nsamples=auto` |
+| `--nsamples`        | Number of random samples per strategy (default 10), or per `Series`/`RNGSequence` combination for a strategy with `per_sequence_samples=True`. An integer overrides a strategy's own `nsamples`. `auto` enumerates the `Series`/`RNGSequence` arguments (see [What `--nsamples=auto` does](#5-sequence-testing--exhaustive-generation-new-in-v200)). Any other value is a usage error. | `pytest --nsamples=50` or `--nsamples=auto` |
 | `--vector-mode`     | Generation mode: `all`, `random_only`, `directed_only`, `mixed`, `test` | `pytest --vector-mode=test`                 |
 | `--vector-name`     | Run only the directed vector with this name                             | `pytest --vector-name=edge_case_1`          |
 | `--vector-index`    | Run only the directed vector at this index (0-based, in definition order) | `pytest --vector-index=0`                 |
@@ -470,7 +470,7 @@ Each strategy and test pair draws from its own random stream. The stream is deri
 
 The seed reproduces the generated test parameters, not random draws made inside test bodies. A test body that draws from `RNG` or `random` gets whatever state the global generator is in when the test runs. That state depends on the tests collected and run before it, so it changes when you rerun a single test or run under pytest-xdist. Seed such draws in the test itself (see [docs/dev.md](docs/dev.md#reproducibility)).
 
-For the same seed, the generated values differ from those of 1.1.0a2 and earlier, so a seed recorded with an older version does not reproduce that run. Also keep the same rootdir, because the test's path relative to the rootdir is part of the stream. pytest uses the directory of your ini file (such as `pytest.ini`) as the rootdir when there is one.
+For the same seed, the generated values differ from those of 1.x (1.0.0 and the 1.1.0 pre-releases), so a seed recorded with an older version does not reproduce that run. Also keep the same rootdir, because the test's path relative to the rootdir is part of the stream. pytest uses the directory of your ini file (such as `pytest.ini`) as the rootdir when there is one.
 
 **pytest-xdist:** runs with `-n` work with or without `--rng-seed`. The controller sends its seed to the workers, so they all generate the same tests.
 

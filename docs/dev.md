@@ -652,7 +652,7 @@ name, the test file's path relative to the rootdir and the test's qualified name
 stream. The vectors of a test do not depend on which other tests are collected,
 on the collection order or on `--import-mode`. Two tests that share a strategy
 get different vectors. For the same seed, the values differ from those of
-1.1.0a2 and earlier.
+1.x (1.0.0 and the 1.1.0 pre-releases).
 
 **Global random state:** with `--rng-seed`, the global `random` state is seeded
 when pytest is configured. Without it, the plugin does not touch the state at

@@ -1,0 +1,6 @@
+# Source distribution: everything needed to run the test suite from it
+include CHANGELOG.md run_tests.py .github/workflows/tests.yml
+graft docs
+graft examples
+graft tests
+global-exclude __pycache__ *.py[cod]

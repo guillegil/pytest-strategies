@@ -59,7 +59,7 @@ CLI Options:
     pytest --vector-index 0           # Run the directed vector at index 0
 """
 
-__version__ = "1.1.0a2"
+__version__ = "2.0.0"
 __author__ = "Guillermo Gil"
 __email__ = "guillegil@proton.me"
 
