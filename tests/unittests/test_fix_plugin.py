@@ -89,9 +89,23 @@ class TestSeedNone:
 
 
 class TestXdistConfigureNode:
-    """The controller hands its seed to every xdist worker."""
+    """The controller hands the seed its session started from to every xdist worker."""
 
-    def test_configure_node_sends_current_seed(self):
+    def test_configure_node_sends_the_session_seed(self):
+        state = runtime.push()
+        try:
+            state.run_seed = 98765
+            RNG.seed(4321)  # A reseed after the session started does not count
+            node = SimpleNamespace(workerinput={})
+
+            PytestStrategyPlugin().pytest_configure_node(node)
+        finally:
+            runtime.pop()
+
+        assert node.workerinput["pytest_strategies_seed"] == 98765
+
+    def test_without_a_session_the_current_seed(self, monkeypatch):
+        monkeypatch.setattr(runtime, "_stack", [])
         RNG.seed(98765)
         node = SimpleNamespace(workerinput={})
 

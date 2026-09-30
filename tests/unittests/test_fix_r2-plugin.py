@@ -138,6 +138,7 @@ class TestRuntimeRestoresGlobalState:
         def inner(nsamples):
             return ("x",), [(2,)]
 
+        rt.push("outer")
         Strategy.register("r2_outer_strat")(outer)
         rt.push("inner")
         Strategy.register("r2_inner_strat")(inner)
@@ -147,6 +148,21 @@ class TestRuntimeRestoresGlobalState:
         assert Strategy._registry is registry
         assert "r2_inner_strat" not in Strategy._registry
         assert Strategy._registry["r2_outer_strat"] is outer
+        rt.pop()
+
+    def test_the_outermost_session_keeps_its_registrations(self):
+        # A second pytest.main() in the same process finds the strategy modules in
+        # sys.modules and does not run them again: it needs their registrations
+        rt = StrategyRuntime()
+
+        def factory(nsamples):
+            return ("x",), [(1,)]
+
+        rt.push("first")
+        Strategy.register("r2_first_run_strat")(factory)
+        rt.pop()
+
+        assert Strategy._registry["r2_first_run_strat"] is factory
 
 
 class TestLoadWithoutTerminalPlugin:

@@ -18,7 +18,8 @@ Strategies can be registered in the test module, as in the example below, in a
 conftest.py, or in files named strategies.py, strategy.py, *_strategies.py or
 *_strategy.py. A name is visible to the tests in that file's directory and
 below, and the nearest registration wins. The plugin loads a directory's
-strategy files when pytest first collects a test module there or below.
+strategy files when pytest first collects a test module there or below; files
+above the testpaths entry that contains the test are not searched.
 
 Example Usage:
     from pytest_strategy import Parameter, RNGInteger, TestArg, register, strategy
@@ -141,9 +142,16 @@ def list_strategies() -> list[str]:
     """
     List all registered strategies.
 
+    During a pytest session this loads every strategy file first, like
+    ``--list-strategies``, so the names of folders pytest has not reached yet
+    are included.
+
     Returns:
         list: Names of all registered strategies
     """
+    from ._runtime import runtime
+
+    runtime.load_all_strategy_files()
     return list(Strategy._registry.keys())
 
 
@@ -160,6 +168,9 @@ def get_strategy_info(name: str) -> dict[str, object]:
     Raises:
         ValueError: If strategy doesn't exist
     """
+    from ._runtime import runtime
+
+    runtime.load_all_strategy_files()
     if name not in Strategy._registry:
         raise ValueError(f"No strategy registered under {name!r}")
 

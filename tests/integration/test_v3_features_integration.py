@@ -7,6 +7,7 @@ Subprocess runs give each test a fresh process (its own registry and sys.path).
 """
 
 import re
+import sys
 
 import pytest
 
@@ -142,6 +143,40 @@ class TestFactoryReference:
 
         assert [i for i in by_object if "test_named" in i]
         assert by_object == by_name
+
+    def test_partial_and_callable_object_ids_are_stable(self, pytester):
+        pytester.makepyfile(test_ref="""
+            import functools
+
+            from pytest_strategy import Parameter, RNGInteger, TestArg, strategy
+
+            def ranged(nsamples, hi):
+                return Parameter(TestArg("x", rng_type=RNGInteger(0, hi)), nsamples=3)
+
+            class Ranged:
+                def __init__(self, hi):
+                    self.hi = hi
+
+                def __call__(self, nsamples):
+                    return Parameter(TestArg("x", rng_type=RNGInteger(0, self.hi)), nsamples=3)
+
+            @strategy(functools.partial(ranged, hi=10**9))
+            def test_partial(x):
+                pass
+
+            @strategy(Ranged(10**9))
+            def test_instance(x):
+                pass
+            """)
+        args = ("-p", "no:cacheprovider", "--rng-seed=5")
+
+        first = _node_ids(pytester.runpytest_subprocess(*args, "--collect-only", "-q"))
+        second = _node_ids(pytester.runpytest_subprocess(*args, "--collect-only", "-q"))
+        distributed = pytester.runpytest_subprocess(*args, "-n", "2")
+
+        assert len(first) == 6
+        assert first == second
+        distributed.assert_outcomes(passed=6)
 
 
 class TestScopedNames:
@@ -356,6 +391,169 @@ class TestLoading:
 
         assert [i for i in full if "beta" in i] == beta == [i for i in reverse if "beta" in i]
 
+    @pytest.mark.parametrize("import_mode", ["prepend", "append", "importlib"])
+    def test_file_imported_from_another_folder_keeps_its_stream(self, pytester, import_mode):
+        # tests/a imports tests/b's strategies file before pytest reaches tests/b:
+        # the plugin still runs it, once, with the file's own random stream
+        runs = pytester.path / "runs.txt"
+        pytester.makepyfile(
+            **{
+                "tests/__init__": "",
+                "tests/a/__init__": "",
+                "tests/b/__init__": "",
+                "tests/b/strategies": (
+                    "from pytest_strategy import RNG, Parameter, RNGInteger, TestArg, register\n"
+                    f"open({str(runs)!r}, 'a').write('run\\n')\n"
+                    "BASE = RNG.integer(0, 10**9)\n\n"
+                    '@register("v3_cross")\n'
+                    "def cross(nsamples):\n"
+                    "    return Parameter(TestArg('x', rng_type=RNGInteger(BASE, BASE)), nsamples=1)\n"
+                ),
+                "tests/a/test_a": (
+                    "from tests.b.strategies import BASE\n\n"
+                    "def test_uses_base():\n"
+                    "    assert BASE >= 0\n"
+                ),
+                "tests/b/test_b": (
+                    "from pytest_strategy import strategy\n\n"
+                    '@strategy("v3_cross")\n'
+                    "def test_b(x):\n"
+                    "    pass\n"
+                ),
+            }
+        )
+        args = ("-p", "no:cacheprovider", f"--import-mode={import_mode}", "--rng-seed=11")
+
+        full = pytester.runpytest_subprocess(*args, "-v")
+        subset = pytester.runpytest_subprocess(*args, "-v", "tests/b")
+
+        full.assert_outcomes(passed=2)
+        subset.assert_outcomes(passed=1)
+        (test_b,) = [line.split()[0] for line in full.outlines if "::test_b[" in line]
+        assert [line.split()[0] for line in subset.outlines if "::test_b[" in line] == [test_b]
+        assert runs.read_text() == "run\nrun\n"
+
+    def test_register_with_the_name_keyword(self, pytester):
+        pytester.makepyfile(
+            **{
+                "tests/strategies": (
+                    "from pytest_strategy import Parameter, RNGInteger, TestArg, register\n\n"
+                    '@register(name="v3_keyword")\n'
+                    "def keyword(nsamples):\n"
+                    "    return Parameter(TestArg('x', rng_type=RNGInteger(0, 9)), nsamples=2)\n"
+                ),
+                "tests/test_keyword": (
+                    "from pytest_strategy import strategy\n\n"
+                    '@strategy("v3_keyword")\n'
+                    "def test_keyword(x):\n"
+                    "    assert 0 <= x <= 9\n"
+                ),
+            }
+        )
+
+        result = pytester.runpytest_subprocess("-p", "no:cacheprovider")
+
+        result.assert_outcomes(passed=2)
+
+
+class TestSessions:
+    STRATEGIES = """
+        from pytest_strategy import Parameter, RNGInteger, TestArg, register
+
+        @register("v3_session")
+        def session(nsamples):
+            return Parameter(TestArg("x", rng_type=RNGInteger(0, 9)), nsamples=2)
+        """
+
+    def test_pytest_main_twice_in_one_process(self, pytester):
+        pytester.makepyfile(
+            **{
+                "tests/strategies": self.STRATEGIES,
+                "tests/test_session": """
+                    from pytest_strategy import strategy
+
+                    @strategy("v3_session")
+                    def test_session(x):
+                        assert 0 <= x <= 9
+                    """,
+            }
+        )
+        pytester.makepyfile(run_twice="""
+            import sys
+
+            import pytest
+
+            codes = [
+                int(pytest.main(["-q", "-p", "no:cacheprovider", f"--rng-seed={seed}", "tests"]))
+                for seed in (1, 2)
+            ]
+            sys.exit(max(codes))
+            """)
+
+        result = pytester.run(sys.executable, "run_twice.py")
+
+        assert result.ret == 0, result.stdout.str()
+        assert result.stdout.str().count("2 passed") == 2
+
+    def test_list_strategies_sees_every_folder(self, pytester):
+        pytester.makepyfile(
+            **{
+                "tests/dma/strategies": self.STRATEGIES.replace("v3_session", "v3_dma"),
+                "tests/esm/strategies": self.STRATEGIES.replace("v3_session", "v3_esm"),
+                "tests/test_meta": """
+                    import pytest
+
+                    from pytest_strategy import get_strategy_info, list_strategies
+
+                    @pytest.mark.parametrize("name", sorted(list_strategies()))
+                    def test_every_strategy(name):
+                        assert get_strategy_info(name)["registered"]
+                    """,
+            }
+        )
+
+        result = pytester.runpytest_subprocess("-p", "no:cacheprovider", "-v")
+
+        result.assert_outcomes(passed=2)
+        result.stdout.fnmatch_lines(["*test_every_strategy[[]v3_dma[]]*", "*[[]v3_esm[]]*"])
+
+    FACTORY_SKIPS = """
+        import pytest
+
+        from pytest_strategy import register, strategy
+
+        @register("v3_hw")
+        def hw(nsamples):
+            pytest.skip("no hardware"{module_level})
+
+        def test_unrelated():
+            pass
+
+        @strategy("v3_hw")
+        def test_hw(x):
+            pass
+        """
+
+    def test_skip_in_a_factory_is_a_collection_error(self, pytester):
+        pytester.makepyfile(test_hw=self.FACTORY_SKIPS.format(module_level=""))
+
+        result = pytester.runpytest_subprocess("-p", "no:cacheprovider")
+
+        result.assert_outcomes(errors=1)
+        result.stdout.fnmatch_lines(
+            ["In test_hw: pytest.skip('no hardware') was called while the strategy was resolved*"]
+        )
+
+    def test_skip_with_allow_module_level_skips_the_module(self, pytester):
+        pytester.makepyfile(
+            test_hw=self.FACTORY_SKIPS.format(module_level=", allow_module_level=True")
+        )
+
+        result = pytester.runpytest_subprocess("-p", "no:cacheprovider", "-rs")
+
+        result.assert_outcomes(skipped=1)
+        result.stdout.fnmatch_lines(["SKIPPED*no hardware"])
+
 
 class TestPrivateRandom:
     SOURCE = """
@@ -479,6 +677,18 @@ class TestReporting:
 
         result.stdout.fnmatch_lines(["pytest-strategies: reproduce with --rng-seed=21"])
 
+    def test_reseeding_in_a_test_body_keeps_the_run_seed(self, pytester):
+        pytester.makepyfile(test_report=self.SOURCE.replace("{condition}", "x < 0") + """
+        def test_a_reseeds():
+            from pytest_strategy import RNG
+
+            RNG.seed(42)
+        """)
+
+        result = pytester.runpytest_subprocess("-p", "no:cacheprovider", "--rng-seed=21")
+
+        result.stdout.fnmatch_lines(["pytest-strategies: reproduce with --rng-seed=21"])
+
     def test_passing_run_does_not(self, pytester):
         pytester.makepyfile(test_report=self.SOURCE.replace("{condition}", "x >= 0"))
 
@@ -495,6 +705,21 @@ class TestReporting:
         result.stdout.fnmatch_lines(
             [
                 "*Strategy Summary*",
+                "  v3_report (test_report.py): 1 test(s), 1 directed, 4 random rows; "
+                "nsamples=4 from Parameter(nsamples=)",
+            ]
+        )
+
+    def test_verbose_summary_under_xdist(self, pytester):
+        pytester.makepyfile(test_report=self.SOURCE.replace("{condition}", "x >= 0"))
+
+        result = pytester.runpytest_subprocess("-p", "no:cacheprovider", "-v", "-n", "2")
+
+        result.assert_outcomes(passed=5)
+        result.stdout.fnmatch_lines(
+            [
+                "*Strategy Summary*",
+                "Registered strategies: 1",
                 "  v3_report (test_report.py): 1 test(s), 1 directed, 4 random rows; "
                 "nsamples=4 from Parameter(nsamples=)",
             ]

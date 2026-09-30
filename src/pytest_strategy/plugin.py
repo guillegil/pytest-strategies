@@ -50,11 +50,11 @@ _PACKAGE_DIR = os.path.normcase(os.path.realpath(os.path.dirname(__file__)))
 _STRATEGY_FILE_PATTERNS = ("strategies.py", "strategy.py", "*_strategies.py", "*_strategy.py")
 
 # A registration decorator: @Strategy.register(...), or @register("name") and
-# @<module>.register("name") with a string literal (functools.singledispatch's
-# @f.register(int) is not one)
+# @<module>.register("name") with a string literal, also as name="..."
+# (functools.singledispatch's @f.register(int) is not one)
 _REGISTRATION = re.compile(
     rb"@[ \t]*(?:(?:[A-Za-z_][\w.]*\.)?Strategy\.register[ \t]*\("
-    rb"|(?:[A-Za-z_][\w.]*\.)?register[ \t]*\(\s*[rRuU]?[\"'])"
+    rb"|(?:[A-Za-z_][\w.]*\.)?register[ \t]*\(\s*(?:name\s*=\s*)?[rRuU]?[\"'])"
 )
 
 # Monotonic counter so every load gets a unique module name. Without this, two
@@ -103,16 +103,19 @@ class _LoadedModuleLoader(importlib.abc.Loader):
 
 class _StrategyFileFinder(importlib.abc.MetaPathFinder):
     """
-    Make ``import my_strategies`` reuse the module the plugin loaded from that file.
+    Make an import of a strategy file go through the plugin.
 
-    The plugin imports a strategy file under the name a test module importing
-    it would use, so this finder is only needed when that was not possible (the
-    name was taken by another file) and the file was loaded under a name of its
-    own. Running the file a second time would redraw the values it draws at
-    import time and give the test a second copy of its classes. The file is
-    matched by its real path, so another file with the same name is imported as
-    usual. pytest's assertion rewriting hook comes first, so a test module that
-    is also a strategy file is still rewritten and collected.
+    A test module (or a strategy file) that imports a strategy file the plugin
+    has not loaded yet, such as another folder's, gets it loaded by the plugin,
+    with the file's own random stream: its import-time draws are then the same
+    whichever tests are collected. An import of a file the plugin already
+    loaded reuses that module, even when it was loaded under a name of its own
+    (its natural name was taken by another file): running the file a second
+    time would redraw its import-time values and give the test a second copy of
+    its classes. Files are matched by their real path, so another file with the
+    same name is imported as usual. pytest's assertion rewriting hook comes
+    first, so a test module that is also a strategy file is still rewritten and
+    collected.
     """
 
     def find_spec(
@@ -122,16 +125,30 @@ class _StrategyFileFinder(importlib.abc.MetaPathFinder):
         target: ModuleType | None = None,
     ) -> importlib.machinery.ModuleSpec | None:
         state = runtime.current
-        if state is None or not state.strategy_modules:
+        if state is None:
             return None
-        # Cheap check first: only a name ending like a loaded file can match
-        filename = os.path.normcase(fullname.rpartition(".")[2] + ".py")
-        if not any(os.path.basename(key) == filename for key in state.strategy_modules):
+        # Cheap check first: only a module named like a strategy file can be one
+        filename = fullname.rpartition(".")[2] + ".py"
+        if not any(fnmatch.fnmatch(filename, pattern) for pattern in _STRATEGY_FILE_PATTERNS):
             return None
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
         if spec is None or not spec.origin:
             return None
-        module = state.strategy_modules.get(_file_key(spec.origin))
+        key = _file_key(spec.origin)
+        module = state.strategy_modules.get(key)
+        if module is None and key not in state.loaded_files and state.config is not None:
+            # Not loaded, nor being loaded right now (the plugin's own import of
+            # the file comes through here too), nor failed: load it now
+            file_path = Path(spec.origin)
+            if _plugin_instance.loads_on_import(file_path, state.config):
+                _plugin_instance.load_strategy_file(file_path, state.config)
+                module = state.strategy_modules.get(key)
+                if module is not None and sys.modules.get(fullname) is module:
+                    # The plugin imported it under this very name. The import
+                    # system would then use the module's own spec and run the file
+                    # a second time; without the entry it takes the spec below,
+                    # which hands back this module and puts the entry back.
+                    del sys.modules[fullname]
         if module is None:
             return None
         return importlib.util.spec_from_loader(
@@ -181,6 +198,12 @@ class PytestStrategyPlugin:
             # modules are imported follow the printed seed. The global random
             # state is not touched.
             RNG.seed(rng_seed)
+        state = runtime.current
+        if state is not None:
+            state.run_seed = RNG.get_seed()
+        # From now on, a test module that imports a strategy file the plugin has
+        # not loaded yet gets it loaded by the plugin (see _StrategyFileFinder)
+        _install_strategy_file_finder()
 
         config.addinivalue_line(
             "markers",
@@ -195,7 +218,7 @@ class PytestStrategyPlugin:
 
         Optional hook: only called when pytest-xdist is installed.
         """
-        node.workerinput["pytest_strategies_seed"] = RNG.get_seed()
+        node.workerinput["pytest_strategies_seed"] = _run_seed()
 
     # ==== COLLECTION HOOKS ====
 
@@ -250,6 +273,18 @@ class PytestStrategyPlugin:
                 if metafunc.config.getoption("fulltrace", False):
                     raise
                 error = f"In {metafunc.function.__name__}: {e}{_user_traceback(e)}"
+            except pytest.skip.Exception as e:
+                # From the factory or the pytest_strategies_context hook. Escaping
+                # this hook would skip the whole module, tests without a strategy
+                # included, so that needs allow_module_level=True, as at import time.
+                if e.allow_module_level:
+                    raise
+                error = (
+                    f"In {metafunc.function.__name__}: pytest.skip({e.msg!r}) was called "
+                    "while the strategy was resolved, which would skip the entire module. "
+                    "If that is the intention, pass allow_module_level=True. To skip only "
+                    "some tests, use @pytest.mark.skip or @pytest.mark.skipif."
+                )
             if error is not None:
                 # Reported like pytest's own parametrize errors: the message, and the
                 # frames of a factory that raised, without the plugin's
@@ -347,9 +382,11 @@ class PytestStrategyPlugin:
         """
         if not isinstance(ref, str):
             # A factory: its registered name keeps the test's values the same as
-            # when the test names it
+            # when the test names it. Otherwise the function's (or the class's)
+            # qualified name: never a repr with a memory address, which would
+            # change the test's random stream from run to run.
             names = registry.names_of(ref)
-            name = names[0] if names else getattr(ref, "__qualname__", None) or repr(ref)
+            name = names[0] if names else factory_source(ref)[1] or type(ref).__qualname__
             return name, ref
 
         directory = _file_key(test_path.parent)
@@ -454,6 +491,34 @@ class PytestStrategyPlugin:
                 runtime.record_unimported_file(file_path)
         return files
 
+    def loads_on_import(self, file_path: Path, config: Config) -> bool:
+        """
+        Check whether an import of ``file_path`` loads it as a strategy file: it has
+        a strategy file name and a registration decorator, in a folder the search
+        for strategy files covers (not an installed package, not a virtualenv).
+        """
+        if not any(fnmatch.fnmatch(file_path.name, pattern) for pattern in _STRATEGY_FILE_PATTERNS):
+            return False
+        try:
+            norecursedirs = config.getini("norecursedirs")
+            search_paths = self._search_paths(config, norecursedirs)
+        except (AttributeError, ValueError):
+            # Not a full pytest config (a unit test's stand-in)
+            return False
+        parent = file_path.parent
+        directories = {Path(os.path.abspath(parent)), Path(os.path.realpath(parent))}
+        if not any(
+            self._covers(search_path, directory, norecursedirs)
+            for search_path in search_paths
+            for directory in directories
+        ):
+            return False
+        return self._contains_strategy_registration(file_path)
+
+    def load_strategy_file(self, file_path: Path, config: Config) -> None:
+        """Load one strategy file, as when pytest collects a test module next to it."""
+        self._load_strategy_files([file_path], config)
+
     def load_all_strategy_files(self, config: Config) -> None:
         """Load every strategy file below the search paths (``--list-strategies``, export)."""
         state = runtime.current
@@ -475,7 +540,7 @@ class PytestStrategyPlugin:
     @pytest.hookimpl
     def pytest_report_header(self, config: Config, start_path: Path) -> list[str]:
         """Add the RNG seed to the test report header."""
-        return [f"pytest-strategies: RNG seed = {RNG.get_seed()}"]
+        return [f"pytest-strategies: RNG seed = {_run_seed()}"]
 
     @pytest.hookimpl
     def pytest_terminal_summary(
@@ -487,23 +552,45 @@ class PytestStrategyPlugin:
         distributed = getattr(config.option, "dist", "no") != "no"
         if failed and state is not None and (state.resolutions or distributed):
             terminalreporter.write_line(
-                f"pytest-strategies: reproduce with --rng-seed={RNG.get_seed()}"
+                f"pytest-strategies: reproduce with --rng-seed={_run_seed()}"
             )
 
         if self._verbosity(config) < 1:
             return
         terminalreporter.section("Strategy Summary")
-        if not registry:
+        summary = state.worker_summary if state is not None else None
+        if summary is None:
+            summary = _summary(state)
+        if not summary["count"]:
             terminalreporter.write_line("No strategies registered")
             return
-        terminalreporter.write_line(f"Registered strategies: {_registration_count()}")
-        if state is not None and state.resolutions:
-            for line in _summary_lines(state.resolutions):
-                terminalreporter.write_line(f"  {line}")
+        terminalreporter.write_line(f"Registered strategies: {summary['count']}")
+        for line in summary["lines"]:
+            terminalreporter.write_line(f"  {line}")
         if self._verbosity(config) >= 2:
             # Show all strategy names in very verbose mode
-            for name in sorted(registry.names()):
+            for name in summary["names"]:
                 terminalreporter.write_line(f"  - {name}")
+
+    @pytest.hookimpl
+    def pytest_sessionfinish(self, session: Session) -> None:
+        """On a pytest-xdist worker, send the -v summary to the controller."""
+        workeroutput = getattr(session.config, "workeroutput", None)
+        if workeroutput is not None:
+            workeroutput["pytest_strategies_summary"] = _summary(runtime.current)
+
+    @pytest.hookimpl(optionalhook=True)
+    def pytest_testnodedown(self, node: Any, error: Any) -> None:
+        """
+        Keep the -v summary of the first pytest-xdist worker that finished.
+
+        The controller collects nothing, and every worker collects all the tests.
+        Optional hook: only called when pytest-xdist is installed.
+        """
+        state = runtime.current
+        summary = getattr(node, "workeroutput", {}).get("pytest_strategies_summary")
+        if state is not None and state.worker_summary is None and summary is not None:
+            state.worker_summary = summary
 
     # ==== HELPER METHODS ====
 
@@ -1094,6 +1181,23 @@ def strategy_not_found_message(name: str, directory: str, rootpath: str | None) 
         for path in runtime.unimported_files:
             message += f"\n  {path}"
     return message
+
+
+def _run_seed() -> int:
+    """The seed the current session started from, even if a test reseeded the RNG."""
+    state = runtime.current
+    if state is not None and state.run_seed is not None:
+        return state.run_seed
+    return RNG.get_seed()
+
+
+def _summary(state: Any) -> dict[str, Any]:
+    """Return what the -v Strategy Summary shows, in types pytest-xdist can send."""
+    return {
+        "count": _registration_count(),
+        "lines": _summary_lines(state.resolutions) if state is not None else [],
+        "names": sorted(registry.names()),
+    }
 
 
 def _registration_count() -> int:

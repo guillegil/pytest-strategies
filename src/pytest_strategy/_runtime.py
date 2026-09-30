@@ -52,6 +52,9 @@ class SessionState:
 
     def __init__(self, config: pytest.Config | None = None) -> None:
         self.config: pytest.Config | None = config
+        # The seed this session started from: the header, the reproduce line and
+        # xdist workers use it even if a test body reseeds the RNG later.
+        self.run_seed: int | None = None
         self.strategies_loaded: bool = False
         self.discovered_files: list[Path] = []
         # Module of each loaded strategy file, by real path: an import of the file
@@ -77,6 +80,9 @@ class SessionState:
         self.clashes: list[str] = []
         # One entry per test and strategy, for the -v summary
         self.resolutions: list[Resolution] = []
+        # On the pytest-xdist controller, which collects nothing: the -v summary
+        # of the first worker that finished (every worker collects all the tests)
+        self.worker_summary: dict[str, Any] | None = None
         # --vector-name/--vector-index bookkeeping: whether a Parameter strategy
         # was resolved with the filter, whether any of them had the vector, and
         # the directed vector names of those that did not (strategy -> names).
@@ -123,7 +129,10 @@ class StrategyRuntime:
                 RNG._seed = state.prev_seed
             if state.prev_rng_state is not None:
                 RNG.generator().setstate(state.prev_rng_state)
-            if state.prev_registry is not None:
+            # Only a nested session's registrations are removed. The modules that
+            # registered stay in sys.modules and are not run again, so a second
+            # pytest.main() in the same process needs the registrations.
+            if state.prev_registry is not None and self._stack:
                 registry.restore(state.prev_registry)
 
     @property
