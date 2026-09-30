@@ -1,12 +1,12 @@
 """
 Unit tests for _ids module.
 
-Tests generate_test_ids and generate_dataclass_ids as pure functions.
+Tests generate_test_ids, generate_dataclass_ids and make_unique_ids as pure functions.
 """
 
 from dataclasses import dataclass
 
-from pytest_strategy._ids import generate_dataclass_ids, generate_test_ids
+from pytest_strategy._ids import generate_dataclass_ids, generate_test_ids, make_unique_ids
 
 
 @dataclass
@@ -132,3 +132,40 @@ class TestGenerateDataclassIds:
         samples = [Named("alice")]
         ids = generate_dataclass_ids(samples, Named)
         assert ids[0] == "name='alice'"
+
+
+class TestMakeUniqueIds:
+    """Duplicates are suffixed exactly as pytest suffixes them itself."""
+
+    def test_unique_ids_unchanged(self):
+        assert make_unique_ids(["x=1", "x=2"]) == ["x=1", "x=2"]
+
+    def test_empty(self):
+        assert make_unique_ids([]) == []
+
+    def test_underscore_before_counter_when_id_ends_in_digit(self):
+        assert make_unique_ids(["x=1", "x=1", "x=1"]) == ["x=1_0", "x=1_1", "x=1_2"]
+
+    def test_counter_directly_after_other_ids(self):
+        assert make_unique_ids(["s='a'", "s='a'"]) == ["s='a'0", "s='a'1"]
+
+    def test_counter_per_id(self):
+        ids = ["a", "b", "a", "c", "b"]
+        assert make_unique_ids(ids) == ["a0", "b0", "a1", "c", "b1"]
+
+    def test_suffixed_id_in_use_is_skipped(self):
+        assert make_unique_ids(["x=1", "x=1", "x=1_0"]) == ["x=1_1", "x=1_2", "x=1_0"]
+
+    def test_id_whose_duplicates_were_all_suffixed_is_free(self):
+        """As in pytest, a suffixed ID is checked against the IDs replaced so far."""
+        assert make_unique_ids(["b0", "b0", "b", "b"]) == ["b0_0", "b0_1", "b0", "b1"]
+
+    def test_digit_check_applies_to_escaped_id(self):
+        # pytest escapes "é" to "\xe9", which ends in a digit
+        cafe = "café"
+        assert make_unique_ids([cafe, cafe]) == [cafe + "_0", cafe + "_1"]
+        assert make_unique_ids([cafe, cafe], escape=False) == [cafe + "0", cafe + "1"]
+
+    def test_non_string_ids_unchanged(self):
+        hidden = object()  # stands in for pytest.HIDDEN_PARAM
+        assert make_unique_ids([hidden, "a", "a"]) == [hidden, "a0", "a1"]

@@ -451,7 +451,8 @@ class TestSingleArgumentIds:
             lambda nsamples: param, ["pt"], nsamples=2, vector_mode="random_only"
         )
         assert samples == [(7, 8), (7, 8)]
-        assert ids == ["pt=(7, 8)", "pt=(7, 8)"]
+        # Repeated rows are suffixed as pytest would, so strict IDs accept them
+        assert ids == ["pt=(7, 8)0", "pt=(7, 8)1"]
 
     def test_legacy_one_tuple_rows(self):
         _, samples, ids = _resolve(lambda nsamples: (("x",), [(1,), (2,)]), ["x"])
@@ -526,6 +527,16 @@ class TestLegacyTupleStrategies:
         )
         assert samples == [pytest.param(1, 2, marks=xfail), (3, 3)]
         assert ids == ["a=1,b=2", "a=3,b=3"]
+
+    def test_pytest_param_id_repeating_another_row_is_suffixed(self):
+        xfail = pytest.mark.xfail(strict=True)
+        _, samples, ids = _resolve(
+            lambda nsamples: ("x", [1, pytest.param(2, id="x=1", marks=xfail)]),
+            ["x"],
+        )
+        # The row keeps its marks; its ids entry, which pytest ignores, is unchanged
+        assert samples == [1, pytest.param(2, id="x=1_1", marks=xfail)]
+        assert ids == ["x=1_0", "x=2"]
 
 
 # ---------------------------------------------------------------------------

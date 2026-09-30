@@ -4,6 +4,7 @@ Test ID generation for parametrized strategies.
 
 import re
 import reprlib
+from collections import Counter, defaultdict
 from collections.abc import Sequence
 from dataclasses import fields
 from typing import Any
@@ -135,3 +136,47 @@ def generate_dataclass_ids(
         ids.append(full_id)
 
     return ids
+
+
+def make_unique_ids(ids: Sequence[Any], escape: bool = True) -> list[Any]:
+    """
+    Suffix duplicate test IDs the way pytest does, so that every ID is unique.
+
+    pytest suffixes duplicate parametrize IDs itself, unless
+    ``strict_parametrization_ids`` makes them a collection error. This copies its
+    scheme (pytest 8 and later), so IDs stay the same in a run without that option:
+    each duplicate gets a counter per ID, after an ``_`` when the ID ends in a digit,
+    and a suffixed ID that is already in use is skipped.
+
+    Args:
+        ids: The test ID of each row. Entries that are not strings
+            (``pytest.HIDDEN_PARAM``) are left unchanged.
+        escape: Whether pytest escapes non-ASCII characters in IDs (its default).
+            The digit check then applies to the escaped ID, as it does in pytest.
+
+    Returns:
+        The IDs in the same order, each duplicate replaced by its suffixed form.
+    """
+    counts = Counter(ids)
+    # The IDs currently in the list: pytest checks a suffixed ID against the list as
+    # updated so far, so an ID whose every duplicate was already replaced is free
+    present = Counter(ids)
+    next_suffix: defaultdict[str, int] = defaultdict(int)
+    unique = list(ids)
+    for index, row_id in enumerate(ids):
+        if counts[row_id] < 2 or not isinstance(row_id, str):
+            continue
+        last = row_id[-1:]
+        if escape:
+            # "é" is escaped to "\xe9", which ends in a digit
+            last = last.encode("unicode_escape").decode("ascii")[-1:]
+        sep = "_" if last.isdigit() else ""
+        new_id = f"{row_id}{sep}{next_suffix[row_id]}"
+        while present[new_id]:
+            next_suffix[row_id] += 1
+            new_id = f"{row_id}{sep}{next_suffix[row_id]}"
+        next_suffix[row_id] += 1
+        present[row_id] -= 1
+        present[new_id] += 1
+        unique[index] = new_id
+    return unique

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 
 from ._dataclass import convert_to_dataclass
-from ._ids import generate_dataclass_ids, generate_test_ids
+from ._ids import generate_dataclass_ids, generate_test_ids, make_unique_ids
 from ._introspection import detect_dataclass_param, validate_signature
 from ._runtime import runtime
 from ._warnings import PytestStrategiesWarning
@@ -70,6 +70,42 @@ def _attributed_warnings(name: str, test_fn: Callable) -> Iterator[None]:
             )
         else:
             warnings.warn_explicit(w.message, w.category, w.filename, w.lineno, source=w.source)
+
+
+def _unique_ids(
+    rows: list[Any], ids: list[str], config: pytest.Config | None
+) -> tuple[list[Any], list[str]]:
+    """
+    Return the rows and ids to parametrize with, giving every row a unique test ID.
+
+    Rows can repeat, and pytest's strict_parametrization_ids makes duplicate IDs a
+    collection error instead of suffixing them. The ID of a ``pytest.param(...,
+    id=...)`` row overrides its ``ids`` entry, so duplicates are suffixed among these
+    effective IDs, and such a row is rebuilt with its new ID.
+
+    Only from pytest 8.4: earlier versions escape an explicit id when the row is
+    created (so a rebuilt row would be escaped twice), and have no strict IDs.
+    """
+    if tuple(pytest.version_tuple[:2]) < (8, 4):
+        return rows, ids
+    effective = [
+        row.id if isinstance(row, _ParameterSet) and row.id is not None else row_id
+        for row, row_id in zip(rows, ids)
+    ]
+    escape = config is None or not config.getini(
+        "disable_test_id_escaping_and_forfeit_all_rights_to_community_support"
+    )
+    unique_rows: list[Any] = []
+    unique_ids: list[str] = []
+    for row, row_id, unique_id in zip(rows, ids, make_unique_ids(effective, escape=escape)):
+        if isinstance(row, _ParameterSet) and row.id is not None:
+            if unique_id != row.id:
+                row = row._replace(id=unique_id)
+            # pytest ignores the ids entry of this row: keep the one built from its values
+            unique_id = row_id
+        unique_rows.append(row)
+        unique_ids.append(unique_id)
+    return unique_rows, unique_ids
 
 
 def _test_location(test_fn: Callable, config: pytest.Config | None) -> str:
@@ -375,6 +411,7 @@ def resolve_and_parametrize(
             pytest.param(inst, marks=s.marks, id=s.id) if isinstance(s, _ParameterSet) else inst
             for s, inst in zip(samples, dataclass_samples)
         ]
+        params, ids = _unique_ids(params, ids, config)
 
         # Apply pytest parametrize to the dataclass parameter chosen by detection
         return cast(Callable, pytest.mark.parametrize(dc_param, params, ids=ids)(test_fn))
@@ -406,6 +443,7 @@ def resolve_and_parametrize(
         # Generate test IDs for better test output readability, from the same values
         # passed to parametrize
         ids = generate_test_ids(argnames, [_id_row(s, len(argnames) == 1) for s in samples])
+        samples, ids = _unique_ids(samples, ids, config)
 
         # Apply pytest parametrize decorator to the test function
         return cast(Callable, pytest.mark.parametrize(argstr, samples, ids=ids)(test_fn))
