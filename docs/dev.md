@@ -795,6 +795,22 @@ Contributions welcome! Areas of interest:
 - Performance optimizations
 - Documentation improvements
 
+## Releasing
+
+1. Set the version in `pyproject.toml` and `__version__` in
+   `src/pytest_strategy/__init__.py` (a test checks they match), and turn
+   `## [Unreleased]` in `CHANGELOG.md` into `## [X.Y.Z] - <date>` with a new empty
+   `[Unreleased]` above it and a comparison link at the bottom.
+2. Merge into `main` once CI is green.
+3. Tag that commit and push the tag:
+   `git tag -a vX.Y.Z -m "pytest-strategies X.Y.Z" && git push origin vX.Y.Z`.
+   Alternatively, run the Release workflow by hand on `main` with the version;
+   it creates the tag itself.
+4. The Release workflow (`.github/workflows/release.yml`) checks that the tag
+   matches `pyproject.toml`, builds the sdist and wheel, runs the examples
+   against the wheel and publishes a GitHub Release with the CHANGELOG section
+   as notes and both files attached.
+
 ## License
 
 MIT License. See [LICENSE](../LICENSE) for details.
