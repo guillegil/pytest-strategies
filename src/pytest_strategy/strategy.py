@@ -227,11 +227,26 @@ class Strategy:
                     message += "\nStrategy files that failed to load:"
                     for path, error in runtime.load_errors:
                         message += f"\n  {path}: {error}"
+                    # A common cause: an import that only works once pytest has
+                    # collected a test module (e.g. added its directory to sys.path)
+                    message += (
+                        "\nStrategy files are imported when the test session starts, before "
+                        "test modules are collected, so an import that only works later fails."
+                    )
                 # So are strategy files that skipped themselves (pytest.importorskip)
                 if runtime.skipped_files:
                     message += "\nStrategy files that were skipped:"
                     for path, reason in runtime.skipped_files:
                         message += f"\n  {path}: {reason}"
+                # And files named like strategy files that register another way
+                # (an alias of Strategy, a plain call): discovery never imported them
+                if runtime.unimported_files:
+                    message += (
+                        "\nFiles matching a strategy file name that were not imported because "
+                        "they contain no '@Strategy.register' (use that decorator form):"
+                    )
+                    for path in runtime.unimported_files:
+                        message += f"\n  {path}"
                 raise ValueError(message)
 
             return resolve_and_parametrize(

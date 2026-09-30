@@ -41,6 +41,9 @@ class SessionState:
         self.load_errors: list[tuple[Path, str]] = []
         # Strategy files that called pytest.skip()/importorskip(), as (path, reason).
         self.skipped_files: list[tuple[Path, str]] = []
+        # Files named like strategy files that discovery did not import because
+        # they contain no '@Strategy.register' (e.g. they register through an alias).
+        self.unimported_files: list[Path] = []
         # --vector-name/--vector-index bookkeeping: whether a Parameter strategy
         # was resolved with the filter, whether any of them had the vector, and
         # the directed vector names of those that did not (strategy -> names).
@@ -144,6 +147,15 @@ class StrategyRuntime:
         """Record a strategy file that skipped itself (no-op if no session)."""
         if self.current is not None:
             self.current.skipped_files.append((path, reason))
+
+    @property
+    def unimported_files(self) -> list[Path]:
+        return self.current.unimported_files if self.current else []
+
+    def record_unimported_file(self, path: Path) -> None:
+        """Record a file named like a strategy file that was not imported (no-op if no session)."""
+        if self.current is not None:
+            self.current.unimported_files.append(path)
 
     def record_vector_filter(
         self, strategy: str, matched: bool, vector_names: list[str] | None = None

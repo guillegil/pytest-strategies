@@ -107,7 +107,12 @@ class PytestStrategyPlugin:
 
         # Discover and load strategy files
         search_paths = self._search_paths(config, norecursedirs)
-        strategy_files = self._discover_strategy_files(search_paths, norecursedirs)
+        unimported: list[Path] = []
+        strategy_files = self._discover_strategy_files(search_paths, norecursedirs, unimported)
+        # Not reported now: most such files are unrelated modules. Strategy.strategy
+        # lists them in any "Strategy not found" error.
+        for file_path in unimported:
+            runtime.record_unimported_file(file_path)
 
         if strategy_files:
             # Start the global random state from the seed, so draws made when a
@@ -318,7 +323,10 @@ class PytestStrategyPlugin:
         )
 
     def _discover_strategy_files(
-        self, search_paths: list[Path], norecursedirs: Sequence[str] = ()
+        self,
+        search_paths: list[Path],
+        norecursedirs: Sequence[str] = (),
+        unimported: list[Path] | None = None,
     ) -> list[Path]:
         """
         Discover strategy definition files in the test directory.
@@ -330,17 +338,23 @@ class PytestStrategyPlugin:
         - **/*_strategies.py
         - **/*_strategy.py
 
+        Only files that contain @Strategy.register are returned, so that
+        unrelated modules that happen to have such a name are not imported.
         Directories below a search path are skipped as described in
         _skip_directory. Files are returned in a deterministic order.
 
         Args:
             search_paths: List of paths to search
             norecursedirs: Directory name patterns not to descend into
+            unimported: If given, the files matching a pattern that are not
+                returned because they contain no @Strategy.register are
+                appended to it, in the same order
 
         Returns:
             List of discovered strategy file paths
         """
         strategy_files: list[Path] = []
+        without_registration: list[Path] = []
 
         patterns = [
             "strategies.py",
@@ -374,13 +388,17 @@ class PytestStrategyPlugin:
             # which of two registrations of a name wins depend on the order.
             for file_path in sorted(found, key=lambda p: p.relative_to(search_path).as_posix()):
                 # Skip if already found
-                if file_path in strategy_files:
+                if file_path in strategy_files or file_path in without_registration:
                     continue
 
                 # Check if file contains strategy registrations
                 if self._contains_strategy_registration(file_path):
                     strategy_files.append(file_path)
+                else:
+                    without_registration.append(file_path)
 
+        if unimported is not None:
+            unimported.extend(without_registration)
         return strategy_files
 
     def _contains_strategy_registration(self, file_path: Path) -> bool:
