@@ -116,6 +116,7 @@ RNG types check their arguments when they are constructed. A misconfigured strat
 - `RNGEnum` given something that is not an `Enum` class, an `Enum` with no members, or a predicate that no member satisfies.
 - `RNGString` with an empty `charset` (unless the length is 0), a negative length, or `min_length > max_length`.
 - A `set` or `frozenset` passed to `Series` or `RNGSequence`. Their iteration order is not reproducible, so pass `sorted(...)` or a list instead.
+- An empty `Series` or `RNGSequence`, or one whose predicate rejects every value, unless it has `skip_if_empty` (see [Skipping when a sequence is empty](#skipping-when-a-sequence-is-empty)).
 
 `Parameter` raises `ValueError` when `nsamples` is not `None`, `"auto"` or an integer >= 0, or when `max_retries` is not an integer >= 1.
 
@@ -239,6 +240,21 @@ def per_device(nsamples):
     )
 ```
 With the default of 10 samples this runs 20 tests: 10 for `devA`, then 10 for `devB`, each with a fresh random `width`. Several sequence arguments multiply (2 devices × 3 modes × `K`). Combinations follow declaration order for `RNGSequence` too, and directed vectors are still placed first. Under `--nsamples=auto` the flag has no effect: every combination runs once. A combination whose random arguments the constraints reject `max_retries` times in a row gets fewer rows and a `PytestStrategiesWarning`; collecting the test fails only if no combination yields a row.
+
+#### Skipping when a sequence is empty
+When the values come from configuration, there may be none: a testbench without any Esm peripheral, for example. An empty `Series` or `RNGSequence` normally fails collection. Give it a `skip_if_empty` reason instead, and every test that uses the strategy is reported as one skipped test with that reason:
+
+```python
+@Strategy.register("esm_rw")
+def esm_rw(nsamples):
+    channels = [p.channel for p in CONFIG.peripherals.values() if p.type == "Esm"]
+    return Parameter(
+        TestArg("channel", rng_type=RNGSequence(channels, skip_if_empty="no Esm peripheral in this testbench config")),
+        TestArg("wdata", rng_type=RNGInteger(min=0, max=255)),
+        per_sequence_samples=True,
+    )
+```
+With channels, the option changes nothing. Without any, `pytest -rs` shows `SKIPPED [1] test_esm.py:12: no Esm peripheral in this testbench config`, and the test's ID is `test_rw[skipped]`. The skip applies in every `--vector-mode` and with `--nsamples=auto`, and directed and test vectors are skipped too. A `--vector-name` or `--vector-index` that names one of the strategy's vectors also gives the skipped test. The reason must be a non-empty string. It also applies when the predicate rejects every value.
 
 ### 6. Metadata Export (New in v1.0.0)
 

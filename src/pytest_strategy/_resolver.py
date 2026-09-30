@@ -39,6 +39,11 @@ def _id_row(sample: Any, single: bool) -> Any:
     return (sample,) if single else sample
 
 
+def _skipped_param(reason: str, width: int) -> Any:
+    """Return the single skipped row that stands in for a strategy without values."""
+    return pytest.param(*([None] * width), marks=pytest.mark.skip(reason=reason), id="skipped")
+
+
 def _test_location(test_fn: Callable, config: pytest.Config | None) -> str:
     """
     Return the test's file path relative to the rootdir, in posix form.
@@ -200,6 +205,10 @@ def resolve_and_parametrize(
     # Call the factory function the way its signature accepts nsamples
     result = call_factory(name, factory, factory_nsamples)
 
+    # Set when a skip_if_empty sequence has no values: the test then runs as one
+    # skipped row with this reason instead of the generated vectors
+    skip_reason: str | None = None
+
     # Detect if result is a Parameter instance or tuple
     if isinstance(result, Parameter):
         # NEW MODE: Parameter-based strategy
@@ -268,6 +277,9 @@ def resolve_and_parametrize(
         else:
             if vector_name or vector_index is not None:
                 runtime.record_vector_filter(name, True)
+            # The generators return nothing for a skipped Parameter. A vector filter
+            # that names none of its vectors keeps the empty set, as for any strategy.
+            skip_reason = param.skip_reason
 
         # Get argument names from Parameter
         argnames: Sequence[str] = param.arg_names
@@ -300,6 +312,12 @@ def resolve_and_parametrize(
     if is_dc_mode:
         # DATACLASS MODE: Convert samples to dataclass instances
         assert dc_type is not None and dc_param is not None  # guaranteed when is_dc_mode is True
+        if skip_reason is not None:
+            # No values to build an instance from
+            return cast(
+                Callable,
+                pytest.mark.parametrize(dc_param, [_skipped_param(skip_reason, 1)])(test_fn),
+            )
         try:
             # A pytest.param() sample is converted from its values; its marks and id
             # are re-attached to the instance below
@@ -336,6 +354,9 @@ def resolve_and_parametrize(
 
         # Create comma-separated string of parameter names for pytest.mark.parametrize
         argstr = ",".join(argnames)
+
+        if skip_reason is not None:
+            samples = [_skipped_param(skip_reason, len(argnames))]
 
         # For single parameters, unwrap the tuples. A pytest.param() sample is a tuple
         # too (ParameterSet); it is passed through unchanged to keep its marks and id.

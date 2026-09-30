@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `py.typed` marker: type checkers now use the package's annotations, which can surface new type errors in code that uses it.
 - pytest-xdist support without `--rng-seed`: the controller sends its seed to the workers, so they generate the same tests.
 - `Strategy.export_strategies()` reports `enum_class` and `has_predicate` in each argument's `rng_details`.
+- `Series(..., skip_if_empty="<reason>")` and `RNGSequence(..., skip_if_empty="<reason>")`: an empty sequence, for example from a configuration without such devices, skips the strategy's tests with that reason instead of failing collection. `Parameter.skip_reason` and `to_dict()["skip_reason"]` report it.
 - `Parameter(per_sequence_samples=True)`: a finite `nsamples` gives that many random rows for each combination of the `Series`/`RNGSequence` args instead of in total, so two devices with the default 10 samples run 20 tests. `--nsamples=auto` is unaffected.
 
 ### Changed

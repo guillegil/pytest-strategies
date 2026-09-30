@@ -611,9 +611,19 @@ class SequenceLike(RNGType):
     Subclasses differ in how they produce an ordered sequence for exhaustive
     (auto) mode via ``_get_auto_sequence()``.  In finite / normal mode both
     subclasses fall back to a random element draw via ``generate()``.
+
+    An empty sequence (or one the predicate empties) raises, unless
+    ``skip_if_empty`` gives a reason: the tests of a strategy with such an arg are
+    then reported as skipped with that reason. Use it when the values come from
+    configuration that may legitimately have none.
     """
 
-    def __init__(self, sequence: Sequence, predicate: Callable | None = None):
+    def __init__(
+        self,
+        sequence: Sequence,
+        predicate: Callable | None = None,
+        skip_if_empty: str | None = None,
+    ):
         # Sets iterate in hash order, which for str/bytes changes with PYTHONHASHSEED,
         # so the same --rng-seed would give different values in each process
         if isinstance(sequence, (set, frozenset)):
@@ -622,16 +632,25 @@ class SequenceLike(RNGType):
                 f"{type(sequence).__name__} whose iteration order is not reproducible "
                 "across runs; use sorted(...) or a list"
             )
+        if skip_if_empty is not None and (
+            not isinstance(skip_if_empty, str) or not skip_if_empty.strip()
+        ):
+            raise RNGValueError(
+                f"{type(self).__name__} skip_if_empty must be a non-empty reason string, "
+                f"got {skip_if_empty!r}"
+            )
 
         self.sequence = list(sequence)
+        self.skip_if_empty = skip_if_empty
 
         # Apply predicate if provided
         if predicate:
             self.sequence = [x for x in self.sequence if predicate(x)]
 
-        if not self.sequence:
+        if not self.sequence and skip_if_empty is None:
             raise RNGValueError(
-                "Sequence cannot be empty (or all items were filtered by predicate)"
+                "Sequence cannot be empty (or all items were filtered by predicate). "
+                "Pass skip_if_empty='<reason>' to skip the strategy's tests instead."
             )
 
     def _get_auto_sequence(self) -> list:
@@ -641,8 +660,17 @@ class SequenceLike(RNGType):
         """
         raise NotImplementedError
 
+    @property
+    def skip_reason(self) -> str | None:
+        """The skip_if_empty reason when the sequence is empty, otherwise None."""
+        return None if self.sequence else self.skip_if_empty
+
     def generate(self):
         """Generate a random value from the sequence (normal / finite mode)."""
+        if not self.sequence:
+            raise RNGValueError(
+                f"{type(self).__name__} has no values to draw from ({self.skip_if_empty})"
+            )
         return RNG.choice(self.sequence)
 
     @property

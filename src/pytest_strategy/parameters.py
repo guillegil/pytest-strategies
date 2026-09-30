@@ -248,6 +248,20 @@ class Parameter:
     # Sample Generation
     # ====
 
+    @property
+    def skip_reason(self) -> str | None:
+        """
+        Why this Parameter's tests are skipped, or None.
+
+        Set when a Series/RNGSequence arg created with skip_if_empty has no values
+        (the first such arg, in declaration order). The vector generators then return
+        no vectors, and the strategy's tests are reported as skipped with this reason.
+        """
+        for arg in self.test_args:
+            if isinstance(arg.rng_type, SequenceLike) and arg.rng_type.skip_reason is not None:
+                return arg.rng_type.skip_reason
+        return None
+
     def generate_vector(self) -> tuple:
         """
         Generate a single random parameter vector.
@@ -289,6 +303,7 @@ class Parameter:
             "has_constraints": bool(self.vector_constraints),
             "nsamples": self.nsamples,
             "per_sequence_samples": self.per_sequence_samples,
+            "skip_reason": self.skip_reason,
         }
 
     def generate_vectors(
@@ -315,9 +330,11 @@ class Parameter:
             filter_by_index: Only return directed vector at index (for -vi CLI)
 
         Returns:
-            List of parameter vectors (tuples)
+            List of parameter vectors (tuples). Empty when skip_reason is set.
 
         Raises:
+            KeyError / IndexError: If filter_by_name / filter_by_index names no
+                directed vector (also when skip_reason is set)
             ValueError: If n is not an int >= 0 in a mode that generates samples
             ValueError: If the vector constraints reject every generated vector
 
@@ -343,17 +360,24 @@ class Parameter:
         """
         samples: list[tuple] = []
 
-        # Handle CLI filters first (override mode)
+        # Handle CLI filters first (override mode). A missing vector raises even when
+        # the Parameter is skipped, so callers can still tell whether a filter matched.
         if filter_by_name:
-            return [self.get_vector_by_name(filter_by_name)]
+            vector = self.get_vector_by_name(filter_by_name)
+            return [] if self.skip_reason is not None else [vector]
 
         if filter_by_index is not None:
-            return [self.get_vector_by_index(filter_by_index)]
+            vector = self.get_vector_by_index(filter_by_index)
+            return [] if self.skip_reason is not None else [vector]
 
         # Validate mode
         valid_modes = ["all", "random_only", "directed_only", "mixed", "test"]
         if mode not in valid_modes:
             raise ValueError(f"Invalid mode '{mode}'. Must be one of {valid_modes}")
+
+        # An empty skip_if_empty sequence: nothing to generate, in any mode
+        if self.skip_reason is not None:
+            return []
 
         # Mode: test - only test vectors
         if mode == "test":
@@ -542,13 +566,17 @@ class Parameter:
         For non-sequence arguments, generate a random value for each combination.
 
         Returns:
-            List of parameter vectors
+            List of parameter vectors. Empty when skip_reason is set.
 
         Raises:
             ValueError: If no sequence arguments are present
             ValueError: If a sequence value fails its argument's validator
             ValueError: If the vector constraints reject every combination
         """
+        # An empty skip_if_empty sequence has no combinations to enumerate
+        if self.skip_reason is not None:
+            return []
+
         # Identify sequence args and their indices
         sequence_indices = []
         sequences = []

@@ -166,6 +166,9 @@ python_type = int_type.python_type  # Returns: int
   for `min > max`, empty, negative, non-finite or all-zero weights, a non-Enum
   class or an unsatisfiable `RNGEnum` predicate, an empty `RNGString` charset,
   and a `set`/`frozenset` passed to `Series` or `RNGSequence`
+- `Series`/`RNGSequence` raise on an empty sequence (also after the predicate)
+  unless created with `skip_if_empty="<reason>"`. With the reason, the empty
+  sequence is kept, its `skip_reason` is the reason, and `generate()` raises
 
 With a predicate, `RNGWeightedInteger`/`RNGWeightedFloat` choose a new range for
 every retry, and `RNGEnum` draws only among the members the predicate accepts
@@ -314,6 +317,15 @@ args for each one. A combination whose random args are rejected `max_retries`
 times in a row stops short with a `PytestStrategiesWarning`; the call raises when
 no combination yields a row. `generate_exhaustive()` ignores the flag, and a
 `Parameter` without sequence args behaves as if it were `False`.
+
+`Parameter.skip_reason` is the reason of the first `Series`/`RNGSequence` arg
+created with `skip_if_empty` that has no values, or `None`. When it is set,
+`generate_vectors` and `generate_exhaustive` return `[]` in every mode, without
+drawing random values. `filter_by_name`/`filter_by_index` still raise
+`KeyError`/`IndexError` for a missing vector, so the CLI can tell whether a
+filter matched. The resolver then parametrizes the test with a single
+`pytest.param(None, ..., marks=pytest.mark.skip(reason=...), id="skipped")` row,
+also in dataclass mode, where no instance is built.
 
 The `Parameter` copies the `directed_vectors`, `test_vectors` and
 `vector_constraints` it is given, so `add_*`/`remove_*` never change the
