@@ -572,7 +572,7 @@ class TestExportStrategiesFactoryCalling:
 
 
 # ---------------------------------------------------------------------------
-# Single-argument strategies: IDs show the whole value passed to the test
+# Single-argument strategies: values-format IDs show the whole value passed to the test
 # ---------------------------------------------------------------------------
 
 
