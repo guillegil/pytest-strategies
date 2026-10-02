@@ -508,10 +508,33 @@ def _check_weights(owner: str, weights: Mapping[Any, float]) -> None:
 
 
 class RNGType(Generic[T]):
-    """Base class for all RNG types"""
+    """
+    Base class for all RNG types.
+
+    A subclass implements ``generate()``, which is called once per draw of an
+    argument of a random or exhaustive row, while ``RNG.generator()`` is that
+    argument's own stream for the row (streams v1). So that a row's values depend
+    only on the seed, the test, the row and the argument:
+
+    - draw inside ``generate()``, from ``RNG.generator()`` or the ``RNG.*``
+      helpers called there; never from a generator kept from earlier, such as
+      the factory's ``rng``, which draws from whatever stream runs when it is used;
+    - return a value that does not depend on state kept between calls. A counter
+      that walks a pattern (walking ones, for example) makes row k depend on the
+      rows drawn before it.
+
+    The plugin warns (``PytestStrategiesWarning``) when something draws from its
+    generator while a test's rows are generated, as a kept ``rng`` does.
+    """
 
     def generate(self) -> T:
-        """Generate a random value based on this type's configuration"""
+        """
+        Generate a random value based on this type's configuration.
+
+        Draw from ``RNG.generator()`` or the ``RNG.*`` helpers here, not from a
+        generator kept from earlier, and keep no state between calls (see the
+        class).
+        """
         raise NotImplementedError
 
     @property

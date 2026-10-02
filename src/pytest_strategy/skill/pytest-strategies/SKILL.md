@@ -165,7 +165,8 @@ def lo_below_hi(v):
   (above: `lo_below_hi`), or by the keys of a dict
   (`{"ordered": lambda v: v.lo <= v.hi}`). When retries run out, the error counts
   by name how often each constraint rejected a row, and
-  `--strategy-constraint-off=lo_below_hi` turns one off for a run.
+  `--strategy-constraint-off=lo_below_hi` turns one off for a run. A constraint
+  only reads the row: one that draws (`RNG.integer()`) gets a warning.
 - Directed and test vectors are used as written. Predicates, constraints and
   validators do not check them, so keep them valid yourself.
 - Argument names must be unique within a `Parameter`.
@@ -329,6 +330,12 @@ To reproduce a failure:
 - **Warnings as errors.** Projects with `filterwarnings = error` turn a
   `PytestStrategiesWarning` (for example a skipped `Series` combination) into a
   failure. Import it from `pytest_strategy`.
+- **Draw only inside an RNG type's `generate()`.** A custom `RNGType` draws from
+  `RNG.generator()` or the `RNG.*` helpers there, never from the factory's `rng`
+  kept on the instance, and keeps no state between calls. A test whose rows draw
+  outside the arguments' streams (that, or a constraint that draws) gets a
+  `PytestStrategiesWarning` "something drew from the plugin's generator while the
+  rows were generated".
 - Do not call a factory or `Parameter.generate_vectors()` from a test to get rows;
   decorate the test with `@strategy` so seeding, IDs and CLI options apply.
 

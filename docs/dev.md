@@ -948,6 +948,25 @@ inherit one test method. For the same seed, directed and test vectors and
 and the values that factories, strategy files and the context hook draw differ
 from 3.x's.
 
+**Guard on draws outside the row streams:** these properties hold when every
+random value of a row comes from its arguments' RNG types, drawn inside
+`generate()` from `RNG.generator()` or the `RNG.*` helpers, with no state kept
+between calls (the `RNGType` docstring says so). Constraints run with the
+ambient generator installed, and a factory's `rng` is the ambient generator
+itself, so a constraint that calls `RNG.*` or an RNG type that draws from a
+generator kept from the factory draws from `RNG._ambient`: its values depend on
+what was drawn before (other rows, other tests of the module), not only on the
+row. `build_parametrization` compares `RNG._ambient.getstate()` before and after
+`_generate_rows()` (about 20 µs per test) and, when the state changed, emits one
+`PytestStrategiesWarning` inside `_attributed_warnings`, so it is prefixed with
+`Strategy '<name>' (<test>): ` and points at the test. It is a warning, not an
+error, because the values still repeat for the same seed, tests and options;
+under `filterwarnings = error` it becomes the collection error
+`Error generating samples for strategy ...`. A stream that runs inside a
+constraint (a strategy file imported there) puts the ambient generator back and
+does not trigger it. A generator an RNG type creates for itself is not the
+plugin's, so the guard cannot see it.
+
 **Import time:** `pytest_configure` restarts the generator from the seed. A
 strategy file is imported on its file stream and a test module on its module
 stream, so their import-time draws do not depend on what was collected before,

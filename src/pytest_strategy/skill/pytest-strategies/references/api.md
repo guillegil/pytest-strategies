@@ -237,6 +237,10 @@ Each checks its arguments when built and raises `RNGValueError` (a `ValueError`)
   are drawn. With a predicate, the accepted members keep their relative weights.
 - `RNGWeighted*` choose a range by weight, then a value in it.
 - Custom types subclass `RNGType` and implement `generate()` and `python_type`.
+  `generate()` draws from `RNG.generator()` or the `RNG.*` helpers called inside
+  it, never from a generator kept from earlier (such as the factory's `rng`), and
+  keeps no state between calls (a counter makes row k depend on the rows before
+  it). Each argument of a random row then draws from a stream of its own.
 
 ## 7. Series, RNGSequence and exhaustive mode
 
@@ -487,6 +491,11 @@ defined at module level. IDs look like `x=1,y=2`.
   strategy get different random rows. A row keeps its values with more rows, when
   its node ID runs alone and when another argument is added or changed; a
   constraint redraws only the rows it rejects.
+- A constraint that draws (`RNG.integer()`) and an RNG type that draws from a
+  generator kept from the factory draw outside those streams: their values change
+  when other rows or tests change. Each test whose rows do so gets one
+  `PytestStrategiesWarning` naming the strategy and the test. Move the draw into an
+  RNG type's `generate()`, and keep constraints to reading the row.
 - Keep the same seed, the same rootdir and the same plugin version. The rootdir is
   the directory of the ini file (`pytest.ini`, or `pyproject.toml` with
   `[tool.pytest.ini_options]`); without one it depends on the folder pytest is run
@@ -506,6 +515,7 @@ defined at module level. IDs look like `x=1,y=2`.
 | `--strategy-constraint-off=x matched no constraint` | No strategy the run resolved has a constraint named x (aimed items: in that strategy). Use a name from "Constraints by strategy". |
 | `Two constraints are named 'x'` | Two functions with one name in a constraint list. Pass a dict of names to functions. |
 | `No valid value found after N attempts` | A number predicate rejected every draw. Narrow the range. |
+| `Strategy 'x' (test_y): something drew from the plugin's generator while the rows were generated` warning | A constraint calls `RNG.*`, or an RNG type draws from a generator kept from the factory (`rng`). Draw only inside an RNG type's `generate()`, from `RNG.generator()` or the `RNG.*` helpers. Under `filterwarnings = error` it fails collection as `Error generating samples for strategy 'x': ...`. |
 | `Series combination (...) skipped` warning | One combination's random arguments failed the constraints `max_retries` times. Raise `max_retries` or relax the constraint. |
 | `... would generate N rows ..., more than the limit of ...` | Too many exhaustive combinations. Reduce them or raise `max_exhaustive` / `strategies_max_exhaustive`. |
 | `Directed vector 'x' has N values, expected M` | A directed or test vector does not have one value per argument. |
