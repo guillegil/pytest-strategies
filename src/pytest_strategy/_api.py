@@ -8,6 +8,7 @@ parametrization (``pytest_generate_tests``), with the session's options at hand.
 
 from __future__ import annotations
 
+import os
 import warnings
 from collections.abc import Callable
 from typing import Any, TypeVar
@@ -15,7 +16,7 @@ from typing import Any, TypeVar
 import pytest
 
 from ._introspection import PYTEST_FIXTURES as _PYTEST_FIXTURES
-from ._registry import Factory, RegistryView, _describe_factory, registry
+from ._registry import Factory, RegistryView, _describe_factory, factory_source, registry
 from ._runtime import runtime
 from ._warnings import PytestStrategiesWarning
 
@@ -108,6 +109,8 @@ def export_strategies(*, format: str = "json") -> str:
     and gets the session's options for its strategy: its ``nsamples`` is the
     ``--nsamples`` value, ``"auto"``, or 10 without the option or outside a
     session. The context hook runs only for a factory that declares ``ctx``.
+    Each call draws from a random stream of its own, keyed by the run's seed, the
+    strategy's name and its folder relative to the rootdir.
 
     Args:
         format: Export format (currently only "json" is supported), keyword-only
@@ -119,24 +122,32 @@ def export_strategies(*, format: str = "json") -> str:
 
     from ._factory import FactoryInputs, call_factory
     from ._resolver import check_factory_result
-    from .rng import RNG
+    from ._streams import StreamKey, path_part, seed_part
+    from .rng import _Stream
 
     if format != "json":
         raise ValueError(f"Unsupported format: {format}")
 
     runtime.load_all_strategy_files()
     config = runtime.current.config if runtime.current is not None else None
+    rootpath = getattr(config, "rootpath", None)
     strategies_data = {}
     for name in registry.names():
         factory = registry.registrations(name)[-1].factory
+        # The factory's folder, as its file system spells it ("" when unknown)
+        source = factory_source(factory)[0]
+        folder = path_part(os.path.dirname(source), rootpath) if source else ""
+        stream = StreamKey.root(seed_part(runtime.run_seed()), "export", name, folder)
         try:
-            # The session's options for this strategy, the instance collection uses
-            inputs = FactoryInputs(
-                options=runtime.strategy_options(name, config),
-                rng=RNG.generator(),
-                ctx=runtime.strategy_context,
-            )
-            result = call_factory(name, factory, inputs, rootpath=getattr(config, "rootpath", None))
+            # The session's options for this strategy, the instance collection uses,
+            # and the random stream root(S, "export", name, folder) (streams v1)
+            with _Stream(stream) as rng:
+                inputs = FactoryInputs(
+                    options=runtime.strategy_options(name, config),
+                    rng=rng,
+                    ctx=runtime.strategy_context,
+                )
+                result = call_factory(name, factory, inputs, rootpath=rootpath)
             param = check_factory_result(name, factory, result)
             strategies_data[name] = param.to_dict()
         except Exception as e:

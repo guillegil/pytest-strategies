@@ -32,6 +32,8 @@ tests/unittests/test_streams.py pin it.
 from __future__ import annotations
 
 import hashlib
+import os
+from pathlib import Path
 from typing import Any
 
 # The version of the derivation: the streams version of the generated values
@@ -89,6 +91,25 @@ def seed_part(seed: object) -> int | str:
     if isinstance(seed, str) or (isinstance(seed, int) and not isinstance(seed, bool)):
         return seed
     return repr(seed)
+
+
+def path_part(path: str | os.PathLike[str], rootpath: str | os.PathLike[str] | None) -> str:
+    """
+    Return a file or folder as a key's part: its real path relative to the
+    rootdir's, in posix form, also outside the rootdir (``../shared/strategies.py``),
+    so that two checkouts in different folders key it alike; the absolute real path
+    in posix form only when there is no relative one (another drive on Windows, or
+    no rootdir). The file system's spelling is kept, so the key is the same on
+    every OS.
+    """
+    real = os.path.realpath(path)
+    if rootpath is not None:
+        try:
+            return Path(os.path.relpath(real, os.path.realpath(rootpath))).as_posix()
+        except ValueError:
+            # Another drive on Windows
+            pass
+    return Path(real).as_posix()
 
 
 class StreamKey:

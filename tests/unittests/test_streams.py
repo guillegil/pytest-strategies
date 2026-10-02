@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 import pytest_strategy
-from pytest_strategy._streams import VERSION, StreamKey, _part, encode, seed_part
+from pytest_strategy._streams import VERSION, StreamKey, _part, encode, path_part, seed_part
 from pytest_strategy.parameters import _position_keys
 
 
@@ -251,6 +251,34 @@ class TestSeedPart:
     def test_any_other_seed_is_its_repr(self, seed, part):
         assert seed_part(seed) == part
         StreamKey.root(seed_part(seed), "direct")
+
+
+class TestPathPart:
+    def test_a_file_in_the_rootdir_is_relative_in_posix_form(self, tmp_path):
+        path = tmp_path / "tests" / "a" / "strategies.py"
+
+        assert path_part(path, tmp_path) == "tests/a/strategies.py"
+        assert path_part(tmp_path, tmp_path) == "."
+
+    def test_a_file_outside_the_rootdir_is_relative_too(self, tmp_path):
+        """Two checkouts of proj/ and shared/ in different folders key it alike."""
+        for base in (tmp_path / "one", tmp_path / "deep" / "two"):
+            path = base / "proj" / ".." / "shared" / "strategies.py"
+            assert path_part(path, base / "proj") == "../shared/strategies.py"
+
+    def test_links_are_resolved(self, tmp_path):
+        (tmp_path / "real").mkdir()
+        try:
+            os.symlink(tmp_path / "real", tmp_path / "link", target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks are not available")
+
+        assert path_part(tmp_path / "link" / "s.py", tmp_path) == "real/s.py"
+
+    def test_without_a_rootdir_the_real_path(self, tmp_path):
+        path = tmp_path / "s.py"
+
+        assert path_part(path, None) == Path(os.path.realpath(path)).as_posix()
 
 
 # ---------------------------------------------------------------------------

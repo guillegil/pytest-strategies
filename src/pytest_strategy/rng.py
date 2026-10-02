@@ -8,6 +8,8 @@ from collections.abc import Callable, Mapping, Sequence
 from enum import Enum
 from typing import Any, Generic, TypeVar, cast
 
+from ._streams import StreamKey, seed_part
+
 T = TypeVar("T")
 E = TypeVar("E", bound=Enum)
 
@@ -24,7 +26,7 @@ class RNG:
     """
     Core RNG singleton managing the seed and the random state.
 
-    Every value the RNG types draw comes from one generator the plugin owns
+    Every value the RNG types draw comes from a generator the plugin owns
     (:meth:`generator`), not from the global ``random`` state, so ``--rng-seed``
     reproduces them without seeding or disturbing the ``random`` calls of the
     code under test.
@@ -33,7 +35,13 @@ class RNG:
     _seed = time.time_ns()
     # The draws an RNG type's predicate= gets before RNGValueError (fixed)
     _max_retries = 100
-    _generator = random.Random(_seed)
+    # The plugin's generator. Each of the plugin's random streams (a factory call, a
+    # strategy file's import, a test phase; see _Stream) reseeds this object in
+    # place and restores its state afterwards.
+    _ambient = random.Random(_seed)
+    # The generator the RNG types and helpers draw from: the ambient generator,
+    # except while an argument of a random row is drawn, which has its own
+    _generator = _ambient
 
     # ====
     # Seed Management
@@ -60,8 +68,13 @@ class RNG:
         Return the generator the RNG types draw from.
 
         A factory that needs other random operations (``shuffle``, ``gauss``) can
-        draw from it, and gets values that ``--rng-seed`` reproduces. The plugin
-        restarts it for each strategy and test.
+        draw from it, and gets values that ``--rng-seed`` reproduces. In a pytest
+        run the plugin positions it on a stream of its own for each factory call,
+        strategy file, test module, fixture and test phase (streams v1), so what
+        one of them draws does not depend on what the others drew. Call it when
+        you draw instead of keeping its result: while an argument of a random row
+        is drawn it returns that argument's own generator, and a generator kept
+        from a factory draws from whatever stream runs when it is used.
         """
         return RNG._generator
 
@@ -70,17 +83,22 @@ class RNG:
         """Restart the generator from the current seed.
 
         Args:
-            key: Optional stream name. With a key, the generator is seeded from the
-                seed and the key together, so each key gets its own stream that
-                is the same on every run with this seed and does not depend on
-                the order in which keys are used.
+            key: Optional stream name, a str (or an int). With a key, the generator
+                is seeded from the stream key ``(seed, "user", key)`` of streams v1,
+                so each key gets its own stream that is the same on every run with
+                this seed, in every process, and does not depend on the order in
+                which keys are used.
+
+        Raises:
+            TypeError: If the key is neither a str nor an int
         """
         if key is None:
             RNG._generator.seed(RNG._seed)
         else:
-            # A str seed is hashed with SHA-512, so it is stable across processes
-            # (unlike hash(), which is salted per process).
-            RNG._generator.seed(f"{RNG._seed}:{key}")
+            # Hashed with BLAKE2b (see _streams), so stable across processes, unlike
+            # hash(), which is salted per process
+            key_int = StreamKey.root(seed_part(RNG._seed), "user", key).seed_int()
+            RNG._generator.seed(key_int)
 
     # ====
     # Internal Helper
@@ -335,6 +353,43 @@ class RNG:
             return RNG.float(min_val, max_val)
 
         return RNG._generate_with_constraint(generator, predicate)
+
+
+class _Stream:
+    """
+    Run a block on one of the plugin's random streams (streams v1, D5): ``with
+    _Stream(key) as rng:``.
+
+    On entry the ambient generator (``RNG._ambient``) is reseeded in place from
+    ``key`` and installed as ``RNG._generator``, so ``rng is RNG.generator()`` in
+    the block, and a generator kept from it is the one the next stream reseeds. On
+    exit its state, the seed (``RNG._seed``) and the generator installed before are
+    put back, also when the block raises. Streams nest: an inner stream leaves the
+    outer one where it was. So what the block draws, and an ``RNG.seed()`` call in
+    it, change only the rest of the block.
+
+    A class rather than a ``contextlib.contextmanager``: that one assigns the
+    exception's ``__traceback__`` on the way out, which a frozen dataclass exception
+    rejects.
+    """
+
+    __slots__ = ("_key", "_saved")
+
+    def __init__(self, key: StreamKey) -> None:
+        self._key = key
+
+    def __enter__(self) -> random.Random:
+        ambient = RNG._ambient
+        self._saved = (ambient, ambient.getstate(), RNG._generator, RNG._seed)
+        ambient.seed(self._key.seed_int())
+        RNG._generator = ambient
+        return ambient
+
+    def __exit__(self, *exc_info: object) -> None:
+        ambient, state, generator, seed = self._saved
+        ambient.setstate(state)
+        RNG._generator = generator
+        RNG._seed = seed
 
 
 # ====

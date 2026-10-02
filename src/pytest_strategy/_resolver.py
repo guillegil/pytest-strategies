@@ -53,7 +53,7 @@ from .parameters import (
     _ParameterSet,
     _Row,
 )
-from .rng import RNG, SequenceLike
+from .rng import RNG, SequenceLike, _Stream
 
 # Default for the strategies_max_exhaustive ini option
 DEFAULT_MAX_EXHAUSTIVE = 100_000
@@ -456,15 +456,24 @@ def build_parametrization(
     vector_name = options.vector_name
     vector_index = options.vector_index
 
-    # Restart the RNG generator on this strategy and test's own stream
-    RNG.refresh_seed(key=f"{name}:{_test_location(test_fn, config)}::{test_fn.__qualname__}")
+    # The key T of this strategy and test (streams v1, D5). The factory draws from
+    # T/"factory", and every random and exhaustive row draws each argument from a
+    # stream below T/"row", so the factory's draws, the other rows and the other
+    # arguments do not move a row's values.
+    stream_key = StreamKey.root(
+        seed_part(runtime.run_seed()),
+        "test",
+        name,
+        test_key if test_key is not None else _fallback_test_key(test_fn, config),
+    )
 
-    # Call the factory with the inputs it declares by name. Its nsamples is the
-    # --nsamples value, "auto", or 10 without the option, never None (FR-8). The
-    # count the rows use is resolved below, once the Parameter's own nsamples is
-    # known.
-    inputs = FactoryInputs(options=options, rng=RNG.generator(), ctx=runtime.strategy_context)
-    result = call_factory(name, factory, inputs, rootpath=_rootpath(config))
+    # Call the factory with the inputs it declares by name, on its own stream: rng
+    # is RNG.generator() during the call. Its nsamples is the --nsamples value,
+    # "auto", or 10 without the option, never None (FR-8). The count the rows use is
+    # resolved below, once the Parameter's own nsamples is known.
+    with _Stream(stream_key.child("factory")) as rng:
+        inputs = FactoryInputs(options=options, rng=rng, ctx=runtime.strategy_context)
+        result = call_factory(name, factory, inputs, rootpath=_rootpath(config))
     param = check_factory_result(name, factory, result)
 
     # --strategy-constraint-off: the names this strategy turns off are the ones its
@@ -541,15 +550,9 @@ def build_parametrization(
     stats = _GenerationStats()
     auto = effective_nsamples == "auto"
     exhaustive = auto and not filtered and vector_mode not in ("test", "directed_only")
-    # The key T of this strategy and test (streams v1, D5): every random and
-    # exhaustive row draws each argument from a stream below it, so the factory's
-    # draws, the other rows and the other arguments do not move a row's values
-    stream_key = StreamKey.root(
-        seed_part(runtime.run_seed()),
-        "test",
-        name,
-        test_key if test_key is not None else _fallback_test_key(test_fn, config),
-    )
+    # An RNG.seed() call while the rows are drawn changes the seed for nothing after
+    # them, as in the plugin's other streams
+    seed = RNG._seed
     try:
         # Warnings raised while generating name the strategy and the test
         with _attributed_warnings(name, test_fn):
@@ -594,6 +597,8 @@ def build_parametrization(
         # below. A vector filter that names none of its vectors keeps the empty set,
         # as for any strategy.
         skip_reason = param.skip_reason
+    finally:
+        RNG._seed = seed
 
     _count_rows(resolution, rows)
     resolution.constraints = constraint_names

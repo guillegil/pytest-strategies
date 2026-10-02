@@ -509,12 +509,12 @@ def test_coordinates(x, y):
    loads every strategy file and uses the only registration elsewhere,
    preferring one outside the rootdir; several candidates are an error. A
    factory passed directly is used as it is.
-4. `build_parametrization()` restarts the generator on the strategy and test's
-   own stream (see [Reproducibility](#reproducibility)), then calls the factory
-   once through `_factory.call_factory()`. The rows draw from streams keyed by
-   the run seed, the strategy name and the test's node ID. The factory gets, by name, the inputs
-   it declares: `nsamples`, `ctx`, `rng` and `options` (see "Factory inputs"
-   below).
+4. `build_parametrization()` calls the factory once through
+   `_factory.call_factory()`, on the factory's own stream (see
+   [Reproducibility](#reproducibility)). The rows draw from streams keyed by
+   the run seed, the strategy name and the test's node ID. The factory gets, by
+   name, the inputs it declares: `nsamples`, `ctx`, `rng` and `options` (see
+   "Factory inputs" below).
 5. It generates the vectors from the returned `Parameter` according to the CLI
    options, with readable test IDs. The plugin inserts a
    `pytest.mark.parametrize` marker right after the `strategy` marker, so
@@ -690,8 +690,8 @@ taken by another file (`ImportPathMismatchError`, or a module with another
 that module out when a test module or `conftest.py` imports the file, so the
 file is not executed again. A file that a `conftest.py` or test module imported
 before the plugin reached it, with its strategies registered, is used as it is.
-The generator is restarted on a stream keyed by the file's path relative to the
-rootdir while a file is imported, and restored afterwards.
+A file is imported on a stream of its own, keyed by its path relative to the
+rootdir (see [Reproducibility](#reproducibility)).
 
 A file that raises while loading is reported with a
 `pytest-strategies: Warning - Failed to load ...` line. A file that calls
@@ -888,10 +888,42 @@ never seeds or draws from Python's global `random` state, so code that uses
 generated vectors. A factory that needs `shuffle` or `gauss` should call them
 on `RNG.generator()`.
 
-**Per-test streams:** before calling a strategy's factory for a test, the plugin
-restarts the generator from the run seed and a key made of the strategy name,
-the test file's path relative to the rootdir and the test's qualified name
-(`RNG.refresh_seed(key=...)`).
+**Plugin streams (streams v1, `_streams.py`):** every random stream is keyed by
+a `StreamKey` under the run seed S (`runtime.run_seed()`, never the mutable
+`RNG._seed`), except the user and direct streams, keyed under
+`RNG.get_seed()`:
+
+| Key | What draws from it |
+|---|---|
+| `T = root(S, "test", strategy, nodeid)` | everything for one strategy on one test |
+| `T/"factory"` | the factory call: `rng`, `RNG.*`, `RNG.generator()` |
+| `T/"row"/pos/j/name`, `T/"order"/name` | the rows (below) |
+| `root(S, "file", path)` | a strategy file's import |
+| `root(S, "module", path)` | a test module's import (a `pytest_make_collect_report` wrapper for a `Module`) |
+| `root(S, "ctx")` | the `pytest_strategies_context` call |
+| `root(S, "fixture", scope, name, param_index)` | a fixture's setup (a `pytest_fixture_setup` wrapper); `scope` is the node ID of the node it is set up for, `""` for the session |
+| `root(S, "body", nodeid, phase)` | one phase of a test, `setup`, `call` or `teardown` (wrappers around `pytest_runtest_setup`, `_call` and `_teardown`) |
+| `root(RNG.get_seed(), "user", key)` | `RNG.refresh_seed(key=...)` |
+| `root(S, "export", name, folder)` | a factory call from `export_strategies()`; `folder` is the factory file's folder (`""` when it has none) |
+| `root(RNG.get_seed(), "direct", n)` | `generate_vectors()` and the other generators called directly |
+
+`path` and `folder` are relative to the rootdir in posix form, also outside it
+(`../shared/strategies.py`, `_streams.path_part()`), and absolute only on
+another Windows drive. Each non-row stream runs in an `rng._Stream` block: it
+saves the state of `RNG._ambient` (the plugin's generator), `RNG._generator`
+and `RNG._seed`, reseeds `RNG._ambient` in place from the key, installs it as
+`RNG._generator`, and puts all three back when the block ends, also on an
+exception. Streams nest. Reseeding in place keeps a generator taken earlier
+from `RNG.generator()` on the current stream, and installing the ambient
+generator lets a strategy file imported from inside a constraint (when
+`RNG._generator` is an argument's) draw from its file stream. An `RNG.seed()`
+call inside a stream changes only the rest of that stream, and
+`RNG.get_seed()` is S everywhere else. `_Stream` is a class with `__enter__`
+and `__exit__`, not a `contextlib.contextmanager`, so that a frozen dataclass
+exception passes through unchanged. Each stream costs about 27 µs (saving the
+state, seeding and restoring it): a run of 20,000 trivial tests takes about 20%
+longer than without these streams, and one of 10,000 tests with two fixtures
+about 35%.
 
 **Row streams (streams v1, `_streams.py`):** the rows draw from streams keyed
 under `T = StreamKey.root(seed, "test", strategy, nodeid)`, where `nodeid` is the
@@ -912,44 +944,40 @@ arguments draw nothing. Direct calls (`generate_vectors()`, `generate_vector()`,
 other tests are collected, on the collection order or on `--import-mode`. Two
 tests that share a strategy get different vectors, and so do two classes that
 inherit one test method. For the same seed, directed and test vectors and
-`Series` values are those of 3.x; random rows differ from 3.x's.
+`Series` values are those of 3.x, unless the factory draws them; random rows
+and the values that factories, strategy files and the context hook draw differ
+from 3.x's.
 
 **Import time:** `pytest_configure` restarts the generator from the seed. A
-strategy file is imported on a stream of its own (keyed by its path), and the
-generator's state is restored afterwards, so its import-time draws do not
-depend on what was collected before. Draws at module level in a test module
-come from the generator as the tests collected before it left it: they follow
-the seed but change when the module is collected alone. When a session ends
-(including an in-process `pytester` run), the seed, the generator's state and
-the strategy registry are restored to what they were when it began.
+strategy file is imported on its file stream and a test module on its module
+stream, so their import-time draws do not depend on what was collected before,
+and a module collected alone gets the values of the full run. Draws when a
+`conftest.py` is imported are not keyed: pytest imports the initial conftests
+(the rootdir's and those of the folders on the command line) before
+`pytest_configure` seeds, and a node-ID rerun makes another conftest an initial
+one, so a key would give the full run and the rerun different values. The
+others are imported during collection, outside any stream. A strategy file
+that a `conftest.py` imports at its top is reused as it is, so its import-time
+draws do not follow the seed either; the README says to import it inside a
+fixture or hook. When a session ends (including an in-process `pytester` run),
+the seed, the ambient generator's state, the installed generator and the
+strategy registry are restored to what they were when it began.
 
 **pytest-xdist:** the controller sends its seed to the workers, so `-n` works
 with or without `--rng-seed` and every worker generates the same tests.
 
-**Test bodies:** the seed reproduces the parameters, not random values drawn
-inside a test body. `RNG` draws there come from the generator as the earlier
-collection and tests left it, so they change when a single test is rerun or
-tests are scheduled differently under xdist. Calling `RNG.seed()` inside a test
-body does not change the test's parameters, which are already fixed by then. To
-make a body's own draws reproducible, reseed in the body. A stream keyed by the
-node ID still follows `--rng-seed`:
-
-```python
-import random
-
-from pytest_strategy import RNG
-
-def test_something(request):
-    RNG.refresh_seed(key=request.node.nodeid)
-    value = RNG.integer(0, 100)  # Same value for the same --rng-seed
-
-def test_fixed():
-    value = random.Random(42).randint(0, 100)  # Same value on every run
-```
-
-Do not call `RNG.seed()` in a test body: it restarts the plugin's generator from
-another seed, so the tests after it that reseed from `RNG.get_seed()` no longer
-follow `--rng-seed`.
+**Test bodies and fixtures:** each phase of a test (setup, call and teardown)
+runs on its body stream and each fixture's setup on its fixture stream, so a
+test body's `RNG` draws and a fixture's are the same whether the test runs
+alone, in the suite, in another order or under xdist. A module- or
+session-scoped fixture is set up during the setup of whichever test needs it
+first; with a stream of its own, neither its draws nor that test's depend on
+which test that is. A fixture's teardown and a finalizer run in the teardown of
+the test that ends the fixture's scope, and draw from that test's teardown
+stream. The pseudo-fixtures of direct parametrization draw nothing and get no
+stream. `RNG.refresh_seed(key=request.node.nodeid)` is no longer needed in a
+test body; it still gives the stream of the seed and the key, whatever ran
+before it.
 
 For plain `random` calls, seed the global state per test from the run's seed,
 for example in an autouse fixture:
@@ -1058,9 +1086,9 @@ the size guard allows. Use fewer sequence values, or raise the limit with
 ### Tests not reproducible
 
 - Pass the same `--rng-seed` value (a run's seed is shown in the report header, and after a failed run); calling `RNG.seed()` inside a test body does not change its parametrized values
-- Use the same rootdir and a pytest-strategies version that generates the same values (2.0.0 and 3.0.0 do, except values strategy files draw when they are imported; 1.x does not)
+- Use the same rootdir and a pytest-strategies version that generates the same values (2.0.0 and 3.0.0 do, except values strategy files draw when they are imported; 1.x and 4.0.0 do not)
 - Draw from the RNG types or `RNG.generator()` in factories: plain `random` calls are not seeded by the plugin
-- Random values drawn inside a test body are not covered by the seed; reseed in the body (see [Reproducibility](#reproducibility))
+- Draws made when a `conftest.py` is imported are not covered by the seed; move them into the context hook, a fixture or a strategy file (see [Reproducibility](#reproducibility))
 
 ## Future Enhancements
 

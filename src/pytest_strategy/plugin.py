@@ -23,11 +23,12 @@ import os
 import re
 import sys
 import traceback
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from pathlib import Path, PurePath
 from types import ModuleType
 from typing import Any, get_args
 
+import _pytest.python
 import pytest
 from _pytest.pathlib import ImportPathMismatchError, import_path
 from pytest import Config, Session
@@ -42,8 +43,9 @@ from ._registry import (
     registry,
 )
 from ._runtime import runtime
+from ._streams import StreamKey, path_part, seed_part
 from ._vector import VECTOR_KEY, VECTORS_KEY, VectorInfo
-from .rng import RNG
+from .rng import RNG, _Stream
 
 # This package's folder, whose frames are left out of the errors shown for a factory
 _PACKAGE_DIR = os.path.normcase(os.path.realpath(os.path.dirname(__file__)))
@@ -51,6 +53,11 @@ _PACKAGE_DIR = os.path.normcase(os.path.realpath(os.path.dirname(__file__)))
 # A test's record parameters that its strategies, in named mode, leave to fixtures:
 # (parameter, error) pairs, checked once the test is parametrized
 _UNFILLED_RECORDS = pytest.StashKey[list[tuple[str, str]]]()
+
+# The function of the fixture pytest makes for each argument of a parametrization
+# (private API; None if a pytest moves it): it returns the argument's value and runs
+# no user code, so it gets no random stream
+_DIRECT_PARAM_FIXTURE: Any = getattr(_pytest.python, "get_direct_param_fixture_func", None)
 
 # Strategy file names; a file is imported only if it also contains a registration
 _STRATEGY_FILE_PATTERNS = ("strategies.py", "strategy.py", "*_strategies.py", "*_strategy.py")
@@ -240,6 +247,29 @@ class PytestStrategyPlugin:
         """
         if isinstance(collector, pytest.Module) and runtime.current is not None:
             self._load_directories(collector.config, os.path.realpath(collector.path.parent))
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_make_collect_report(
+        self, collector: pytest.Collector
+    ) -> Generator[None, pytest.CollectReport, pytest.CollectReport]:
+        """
+        Collect a test module on a random stream of its own, root(S, "module", path)
+        (streams v1), where path is the module's path relative to the rootdir.
+
+        Values the module draws when it is imported (``BASE = RNG.integer(0, 9)`` at
+        module level) are then the same whether it is collected alone or with other
+        modules, in any order. The module is imported here, after pytest_collectstart
+        loaded its folder's strategy files.
+        """
+        if not isinstance(collector, pytest.Module) or runtime.current is None:
+            return (yield)
+        key = StreamKey.root(
+            seed_part(_run_seed()),
+            "module",
+            path_part(collector.path, collector.config.rootpath),
+        )
+        with _Stream(key):
+            return (yield)
 
     @pytest.hookimpl(tryfirst=True)
     def pytest_generate_tests(self, metafunc: pytest.Metafunc) -> None:
@@ -475,6 +505,54 @@ class PytestStrategyPlugin:
             return
         for line in state.unmatched_constraints_off:
             self._write_line(session.config, line, red=True)
+
+    # ==== RANDOM STREAMS OF FIXTURES AND TESTS ====
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(
+        self, fixturedef: pytest.FixtureDef[Any], request: pytest.FixtureRequest
+    ) -> Generator[None, Any, Any]:
+        """
+        Set a fixture up on a random stream of its own (streams v1): root(S,
+        "fixture", scope, name, param_index), where scope is the node ID of the
+        fixture's scope node ("" for the session).
+
+        A module- or session-scoped fixture is set up during the setup of whichever
+        test needs it first; with its own stream, its draws, and that test's, do
+        not depend on which test that is. Its teardown runs in the teardown of a
+        test, and draws from that test's teardown stream.
+        """
+        if fixturedef.func is _DIRECT_PARAM_FIXTURE or runtime.current is None:
+            return (yield)
+        key = StreamKey.root(
+            seed_part(_run_seed()),
+            "fixture",
+            request.node.nodeid,
+            fixturedef.argname,
+            getattr(request, "param_index", 0),
+        )
+        with _Stream(key):
+            return (yield)
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_runtest_setup(self, item: pytest.Item) -> Generator[None, None, None]:
+        """Run a test's setup on its own random stream (see ``_phase_stream``)."""
+        with _phase_stream(item, "setup"):
+            return (yield)
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_runtest_call(self, item: pytest.Item) -> Generator[None, None, None]:
+        """Run a test's body on its own random stream (see ``_phase_stream``)."""
+        with _phase_stream(item, "call"):
+            return (yield)
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_runtest_teardown(
+        self, item: pytest.Item, nextitem: pytest.Item | None
+    ) -> Generator[None, None, None]:
+        """Run a test's teardown on its own random stream (see ``_phase_stream``)."""
+        with _phase_stream(item, "teardown"):
+            return (yield)
 
     # ==== STRATEGY LOOKUP ====
 
@@ -954,8 +1032,9 @@ class PytestStrategyPlugin:
         Each file is imported at most once per session, through pytest's own
         importer with the session's --import-mode, so it gets the module name a
         test module importing it would use. Values a file draws from the RNG when
-        it is imported come from a stream of its own, derived from the seed and
-        its path, so they do not depend on which files were loaded before.
+        it is imported come from a stream of its own, derived from the run's seed
+        and its path relative to the rootdir, so they do not depend on which files
+        were loaded before, nor on where the checkout is.
 
         Args:
             strategy_files: List of strategy file paths to load
@@ -978,10 +1057,17 @@ class PytestStrategyPlugin:
                 self._record_loaded(file_path, imported, config)
                 continue
 
-            rng_state = RNG.generator().getstate()
-            RNG.refresh_seed(key=f"file:{_relative(file_path, config)}")
+            # Imported on its own random stream, root(S, "file", path) (streams v1)
+            stream = _Stream(
+                StreamKey.root(
+                    seed_part(_run_seed()),
+                    "file",
+                    path_part(file_path, getattr(config, "rootpath", None)),
+                )
+            )
             try:
-                module = self._import(file_path, config)
+                with stream:
+                    module = self._import(file_path, config)
 
             except pytest.skip.Exception as e:
                 # pytest.skip() / pytest.importorskip() at module level: the file
@@ -1010,9 +1096,6 @@ class PytestStrategyPlugin:
                 # turn it into a load error.
                 self._record_loaded(file_path, module, config)
                 _install_strategy_file_finder()
-
-            finally:
-                RNG.generator().setstate(rng_state)
 
     def _import(self, file_path: Path, config: Config) -> ModuleType:
         """
@@ -1216,10 +1299,8 @@ def _inside(registration: Registration, rootpath: str | None) -> bool:
 
 def _relative(file_path: Path | str, config: Config | None) -> str:
     """
-    Return a path relative to the rootdir in posix form, or as it is outside it.
-
-    The file system's spelling is kept, also on Windows, so the per-file random
-    stream is the same on every OS.
+    Return a path relative to the rootdir in posix form, or as it is outside it,
+    for messages. The file system's spelling is kept, also on Windows.
     """
     rootpath = getattr(config, "rootpath", None)
     if rootpath is not None:
@@ -1310,6 +1391,20 @@ def strategy_not_found_message(name: str, directory: str, rootpath: str | None) 
 def _run_seed() -> int:
     """The seed the current session started from, even if a test reseeded the RNG."""
     return runtime.run_seed()
+
+
+def _phase_stream(item: pytest.Item, phase: str) -> contextlib.AbstractContextManager[Any]:
+    """
+    Return the random stream of one phase of a test (``setup``, ``call`` or
+    ``teardown``): root(S, "body", nodeid, phase) (streams v1).
+
+    A test body's ``RNG`` draws are then the same alone, in the whole suite, in
+    any order and on any pytest-xdist worker, and an ``RNG.seed()`` call in it
+    changes nothing after the phase. Without a session there is no stream.
+    """
+    if runtime.current is None:
+        return contextlib.nullcontext()
+    return _Stream(StreamKey.root(seed_part(_run_seed()), "body", item.nodeid, phase))
 
 
 def _summary(state: Any) -> dict[str, Any]:

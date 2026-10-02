@@ -292,14 +292,15 @@ RNG.wfloat(ranges, predicate=None)
 ```
 
 - The helpers draw from a generator the plugin owns, never from the global `random`.
-  Inside a factory, and in a strategies file while the plugin imports it, that
-  generator follows the seed.
+  In a factory, a strategies file while the plugin imports it, a test module's top
+  level, a fixture's setup and each phase of a test, that generator follows the
+  seed on a stream of its own: a test body's `RNG.integer()` is the same alone, in
+  the suite and under xdist, and an `RNG.seed()` call changes only the rest of its
+  stream. Draws when a `conftest.py` is imported do not follow the seed.
 - The plugin never calls `random.seed()`. Plain `random` calls (in factories,
   strategies files, conftest or test bodies) are not reproduced by `--rng-seed`.
   To seed plain `random` from the run's seed, do it yourself, for example per test
   with an autouse fixture: `random.seed(f"{RNG.get_seed()}:{request.node.nodeid}")`.
-- Draws inside test bodies are not part of the parametrization. Seed them in the test
-  (as above) if they must be reproducible.
 
 ## 9. Sample counts and vector modes
 
@@ -382,8 +383,9 @@ strategies file work in package folders. `test_strategies.py` keeps assertion
 rewriting.
 
 **Import-time draws:** each strategies file is imported with its own random stream,
-derived from the seed and the file's path relative to the rootdir, so values drawn at
-import time through the plugin's generators do not depend on which folders load first.
+derived from the seed and the file's path relative to the rootdir (`../shared/...`
+outside it), so values drawn at import time through the plugin's generators do not
+depend on which folders load first.
 
 **Lookup:**
 

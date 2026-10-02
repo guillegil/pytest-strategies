@@ -12,14 +12,15 @@ inside the outer one. A single global flag would let the outer session's
 "already discovered" state leak into the inner run and skip its discovery. A
 stack gives each session its own state and restores the parent's on exit.
 
-The process-global state a session changes (the RNG seed and generator state,
-and the strategy registry) is snapshotted when the session begins and put back
-when it ends, so an inner session leaves no trace in the enclosing session or in
-later sibling sessions.
+The process-global state a session changes (the RNG seed, the ambient
+generator's state, and the strategy registry) is snapshotted when the session
+begins and put back when it ends, so an inner session leaves no trace in the
+enclosing session or in later sibling sessions.
 """
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType, TracebackType
@@ -27,7 +28,8 @@ from typing import TYPE_CHECKING, Any
 
 from ._options import SessionOptions, StrategyOptions, parse_session_options
 from ._registry import Registration, registry
-from .rng import RNG
+from ._streams import StreamKey, seed_part
+from .rng import RNG, _Stream
 
 if TYPE_CHECKING:
     import pytest
@@ -125,6 +127,7 @@ class SessionState:
         # must not leak into the enclosing session or later sibling sessions.
         self.prev_seed: int | None = None
         self.prev_rng_state: Any = None
+        self.prev_generator: random.Random | None = None
         self.prev_registry: dict[str, list[Registration]] | None = None
 
 
@@ -138,7 +141,8 @@ class StrategyRuntime:
         """Begin a session (``pytest_configure``)."""
         state = SessionState(config)
         state.prev_seed = RNG.get_seed()
-        state.prev_rng_state = RNG.generator().getstate()
+        state.prev_rng_state = RNG._ambient.getstate()
+        state.prev_generator = RNG._generator
         state.prev_registry = registry.snapshot()
         self._stack.append(state)
         return state
@@ -152,7 +156,9 @@ class StrategyRuntime:
             if state.prev_seed is not None:
                 RNG._seed = state.prev_seed
             if state.prev_rng_state is not None:
-                RNG.generator().setstate(state.prev_rng_state)
+                RNG._ambient.setstate(state.prev_rng_state)
+            if state.prev_generator is not None:
+                RNG._generator = state.prev_generator
             # Only a nested session's registrations are removed. The modules that
             # registered stay in sys.modules and are not run again, so a second
             # pytest.main() in the same process needs the registrations.
@@ -255,18 +261,15 @@ class StrategyRuntime:
             return None
         if not state.context_loaded:
             state.context_loaded = True
-            # The hook is first needed while a test's random stream is active. Give
-            # it a stream of its own, derived from the seed, and put the test's
-            # back: RNG draws in the hook must not shift that test's vectors.
-            random_state = RNG.generator().getstate()
-            RNG.refresh_seed(key="pytest_strategies_context")
+            # The hook is first needed while a factory's random stream is active. It
+            # draws from a stream of its own, root(S, "ctx") (streams v1), which puts
+            # the factory's back: its draws do not depend on which factory asked first.
             try:
-                state.context = state.config.hook.pytest_strategies_context(config=state.config)
+                with _Stream(StreamKey.root(seed_part(self.run_seed()), "ctx")):
+                    state.context = state.config.hook.pytest_strategies_context(config=state.config)
             except (Exception, pytest.skip.Exception, pytest.fail.Exception) as e:
                 state.context_error = e
                 state.context_traceback = e.__traceback__
-            finally:
-                RNG.generator().setstate(random_state)
         if state.context_error is not None:
             # Restore the original traceback, so re-raising does not stack frames
             raise state.context_error.with_traceback(state.context_traceback)

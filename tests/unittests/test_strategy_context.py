@@ -9,6 +9,7 @@ import pytest
 from pytest_strategy import RNG, Parameter, RNGInteger, StrategyOptions, TestArg
 from pytest_strategy._factory import FactoryInputs, call_factory
 from pytest_strategy._runtime import StrategyRuntime, runtime
+from pytest_strategy._streams import StreamKey
 
 
 class HookCalls:
@@ -197,12 +198,18 @@ class TestWithoutHookResult:
 
 
 class TestHookRandomStream:
+    @staticmethod
+    def session(hook):
+        """Push a session whose run seed is 77 and whose hook is ``hook``."""
+        config = SimpleNamespace(hook=SimpleNamespace(pytest_strategies_context=hook))
+        state = runtime.push(config)
+        state.run_seed = 77
+
     def test_draws_in_the_hook_leave_the_callers_random_state_alone(self):
         def draw_in_hook(config):
             return RNG.generator().random()
 
-        config = SimpleNamespace(hook=SimpleNamespace(pytest_strategies_context=draw_in_hook))
-        runtime.push(config)
+        self.session(draw_in_hook)
         try:
             RNG.generator().seed("caller stream")
             expected = random.Random("caller stream").random()
@@ -211,8 +218,38 @@ class TestHookRandomStream:
         finally:
             runtime.pop()
 
-        # The hook's own draws come from a stream derived from the seed
-        assert ctx == random.Random(f"{RNG.get_seed()}:pytest_strategies_context").random()
+        # The hook's own draws come from the stream root(S, "ctx") of the run seed
+        assert ctx == random.Random(StreamKey.root(77, "ctx").seed_int()).random()
+
+    def test_the_hook_draws_the_same_whatever_drew_before(self):
+        def draw_in_hook(config):
+            return RNG.integer(0, 10**9)
+
+        contexts = []
+        for seed in (1, 2):
+            self.session(draw_in_hook)
+            try:
+                RNG.seed(seed)  # The factory's stream, which differs per test
+                RNG.generator().random()
+                contexts.append(_call(lambda ctx: ctx))
+            finally:
+                runtime.pop()
+
+        expected = random.Random(StreamKey.root(77, "ctx").seed_int()).randint(0, 10**9)
+        assert contexts == [expected, expected]
+
+    def test_a_reseed_in_the_hook_stays_in_the_hook(self):
+        def reseeding_hook(config):
+            RNG.seed(5)
+            return RNG.get_seed()
+
+        self.session(reseeding_hook)
+        try:
+            RNG.seed(3)
+            assert _call(lambda ctx: ctx) == 5
+            assert RNG.get_seed() == 3
+        finally:
+            runtime.pop()
 
 
 class TestHookErrors:
