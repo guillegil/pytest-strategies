@@ -9,6 +9,7 @@ import inspect
 import json
 import textwrap
 import warnings
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -415,7 +416,23 @@ class TestResolverFactoryCalling:
 class TestExportStrategiesFactoryCalling:
     """export_strategies calls factories as the resolver does, with the session's options."""
 
-    def test_keyword_only_var_keyword_and_zero_arg_factories(self, restore_registry):
+    @staticmethod
+    def _own_session(monkeypatch, **options):
+        """
+        Make the active session one of the test's own, whose config serves
+        ``options``, so the options of the run that runs this test do not count.
+        """
+        monkeypatch.setattr(runtime, "_stack", [])
+        config = SimpleNamespace(getoption=lambda name, default=None: options.get(name, default))
+        # No strategy files to load: the factories are the test's own
+        runtime.push(config).all_loaded = True
+        return config
+
+    @pytest.mark.parametrize(("options", "nsamples"), [({}, 10), ({"nsamples": 4}, 4)])
+    def test_keyword_only_var_keyword_and_zero_arg_factories(
+        self, monkeypatch, restore_registry, options, nsamples
+    ):
+        self._own_session(monkeypatch, **options)
         received = []
 
         @Strategy.register("fix_export_kwonly")
@@ -433,13 +450,14 @@ class TestExportStrategiesFactoryCalling:
 
         data = json.loads(Strategy.export_strategies())
 
-        # The session's count: 10 without --nsamples (3.0 passed 1)
-        assert received == [10]
+        # The session's count: --nsamples, or 10 without it (3.0 passed 1)
+        assert received == [nsamples]
         assert data["fix_export_kwonly"]["arguments"][0]["name"] == "x"
         assert data["fix_export_varkw"]["arguments"][0]["name"] == "x"
         assert data["fix_export_noargs"]["arguments"][0]["name"] == "x"
 
-    def test_rng_and_options_factory(self, restore_registry):
+    def test_rng_and_options_factory(self, monkeypatch, restore_registry):
+        config = self._own_session(monkeypatch, nsamples=4)
         received = []
 
         @Strategy.register("fix_export_rng_options")
@@ -453,9 +471,9 @@ class TestExportStrategiesFactoryCalling:
         [(rng, options)] = received
         assert rng is RNG.generator()
         # The instance the session's collection gives the strategy
-        assert options is runtime.strategy_options("fix_export_rng_options", runtime.current.config)
+        assert options is runtime.strategy_options("fix_export_rng_options", config)
         assert options.strategy == "fix_export_rng_options"
-        assert (options.nsamples, options.nsamples_source) == (10, "default")
+        assert (options.nsamples, options.nsamples_source) == (4, "--nsamples")
 
     def test_without_a_session_the_defaults_apply(self, monkeypatch, restore_registry):
         monkeypatch.setattr(runtime, "_stack", [])
