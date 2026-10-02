@@ -1531,8 +1531,11 @@ class Parameter:
                 calls differ and ``RNG.seed(s)`` repeats them.
 
         Returns:
-            A Vector of generated values, one per TestArg: the first random row of
-            generate_vectors() with the same key
+            A Vector of generated values, one per TestArg, every argument drawn (a
+            Series or RNGSequence argument too, from its own stream). Unless the
+            Parameter has a Series argument, or per_sequence_samples=True with a
+            Series or RNGSequence argument, this is the first random row of
+            generate_vectors() with the same key.
 
         Raises:
             ValueError: If the constraints reject max_retries draws; the message
@@ -1747,7 +1750,7 @@ class Parameter:
             key: The key of the rows' streams: the test's key T for the plugin.
                 Without it, the key comes from the seed and 128 bits of
                 ``RNG.generator()`` (``_direct_key()``), drawn only when the call
-                generates random or exhaustive rows.
+                generates random or exhaustive rows (not for n=0).
 
         Returns:
             The rows in order: the directed or test vectors the mode and the filters
@@ -1801,6 +1804,9 @@ class Parameter:
         if mode == "all" or mode == "mixed" and self.always_include_directed:
             rows.extend(self._vector_rows("directed"))
 
+        if not exhaustive and n == 0:
+            # No random rows: the direct key's bits are not drawn either
+            return rows
         if key is None:
             key = _direct_key()
         if exhaustive:

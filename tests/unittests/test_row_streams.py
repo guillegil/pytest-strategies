@@ -285,6 +285,18 @@ class TestOneRowOnItsOwn:
         with pytest.raises(ValueError, match=r"random row 4 \(ch=1\) after max_retries=3.*never=3"):
             param._generate_row(KEY, [("ch", "i:1")], 4)
 
+    def test_an_enumerated_row_the_constraints_reject(self):
+        """A row with nothing to redraw is rejected for its values."""
+        param = Parameter(
+            TestArg("ch", rng_type=Series([0, 1])),
+            vector_constraints={"never": lambda v: False},
+        )
+
+        with pytest.raises(
+            ValueError, match=r"random row 0 \(ch=1\): the constraints reject its values"
+        ):
+            param._generate_row(KEY, [("ch", "i:1")], 0)
+
 
 # ---------------------------------------------------------------------------
 # The other arguments
@@ -673,6 +685,25 @@ class TestDirectCalls:
         RNG.seed(9)
         assert single == param.generate_vectors(1)[0]
 
+    def test_generate_vector_draws_a_series_argument(self):
+        """
+        It draws every argument, so its row is not the first of a call that
+        enumerates the Series (whose row 0 is pos ch=0).
+        """
+        param = Parameter(
+            TestArg("ch", rng_type=Series([0, 1, 2])),
+            TestArg("x", rng_type=RNGInteger(0, 10**9)),
+        )
+
+        row = param.generate_vector(_key=KEY)
+
+        streams = KEY.child("row")
+        assert row == (
+            random.Random(streams.child(0, "ch").seed_int()).choice([0, 1, 2]),
+            random.Random(streams.child(0, "x").seed_int()).randint(0, 10**9),
+        )
+        assert param._generate_rows(1, mode="random_only", key=KEY)[0].pos == (("ch", "i:0"),)
+
     def test_generate_exhaustive_takes_a_key(self):
         param = sequence_param()
         rows = param._generate_rows(0, exhaustive=True, key=KEY)
@@ -695,6 +726,12 @@ class TestDirectCalls:
 
         param.generate_vectors(5, mode="directed_only")
         param.generate_vectors(0, filter_by_name="zeros")
+        # n=0 in the modes that draw random rows: the direct key is not drawn
+        assert param.generate_vectors(0) == [(0, 0.0, "a")]
+        param.generate_vectors(0, mode="mixed")
+        param.generate_vectors(0, mode="random_only")
+        Parameter(TestArg("ch", rng_type=Series([1, 2])), *three_args()).generate_vectors(0)
+        sequence_param(per_sequence_samples=True).generate_vectors(0)
 
         assert RNG.generator().getstate() == state
 
