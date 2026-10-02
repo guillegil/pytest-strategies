@@ -292,15 +292,22 @@ class TestGenerators:
         assert excinfo.value.strictest == "big"
 
     def test_stats_count_only_the_constraints_still_on(self):
+        draws = []
+
+        def every_other(v):
+            draws.append(v)
+            return len(draws) % 2 == 0
+
         stats = _GenerationStats()
         param = Parameter(
             TestArg("x", rng_type=RNGInteger(0, 9)),
-            vector_constraints={"never": never, "odd": lambda v: v.x % 2 == 1},
+            vector_constraints={"never": never, "every_other": every_other},
         )
 
         param.generate_vectors(5, constraints_off=["never"], _stats=stats)
 
-        assert set(stats.rejected) <= {"odd"}
+        # One rejected draw per row, all by the constraint still on
+        assert stats.rejected == {"every_other": 5}
 
     def test_a_name_the_parameter_does_not_have_is_ignored(self):
         """As a bare --strategy-constraint-off name: options.constraints_off holds the
@@ -465,6 +472,12 @@ class TestResolver:
             "'nonzero' before it is turned off by --strategy-constraint-off)"
         )
         assert isinstance(excinfo.value.__cause__, ZeroDivisionError)
+        # The note on the constraint's own exception, which the error shows, names the
+        # option too, not the generators' constraints_off
+        assert excinfo.value.__cause__.__notes__ == [
+            "Raised by constraint 'ratio' on random row 0, Vector(len=0) (constraint "
+            "'nonzero' before it is turned off by --strategy-constraint-off)"
+        ]
 
     def test_a_cached_factorys_parameter_keeps_its_constraints(self):
         @functools.cache

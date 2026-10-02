@@ -397,7 +397,8 @@ def build_parametrization(
         failure = _constraint_failure(e)
         if failure is not None:
             # A constraint raised (a KeyError too): chained to its own exception, so
-            # the error shows the user's frame
+            # the error shows the user's frame, whose note names the option too
+            failure.attach(e, "--strategy-constraint-off")
             raise ValueError(
                 f"Error generating samples for strategy '{name}': "
                 f"{failure.message('--strategy-constraint-off')}"

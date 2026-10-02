@@ -329,9 +329,11 @@ message counts the draws by the name of the first failing constraint
 its last sentence with advice that names the strategy and its strictest
 constraint. The exception of a constraint that raises goes up unchanged, so a
 caller that catches its type keeps working, with a note naming the constraint
-and the row and a `_ConstraintFailure` in its `_CONSTRAINT_FAILURE` attribute;
-the resolver builds the collection error from that and chains it to the user's
-exception. The private
+and the row and a `_ConstraintFailure` in its `_CONSTRAINT_FAILURE` attribute
+(`_ConstraintFailure.attach()`, which replaces the note of an earlier failure on
+the same exception object, so a re-raised instance keeps one note); the resolver
+attaches it again so the note names `--strategy-constraint-off`, builds the
+collection error from it and chains it to the user's exception. The private
 `_stats` keyword of `generate_vectors()` and `generate_exhaustive()` collects the
 counts (and the combinations `--nsamples=auto` left out) for the `-v` summary.
 Their keyword-only `constraints_off` names constraints the call does not

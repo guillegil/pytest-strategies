@@ -28,6 +28,7 @@ from pytest_strategy import (
     Series,
     TestArg,
 )
+from pytest_strategy._resolver import _exhausted_message
 from pytest_strategy.parameters import _constraint_failure, _GenerationStats
 
 FIRST_FAILING = "Rejected by (first failing constraint per draw): "
@@ -517,6 +518,53 @@ class TestExhaustedRetries:
             param.generate_vectors(5)
         assert len(draws) == 12
 
+    def test_the_series_cycle_error_leaves_out_the_visits_before_a_row(self):
+        draws = []
+
+        def gate(v):
+            # Accepts only the 5th draw: ch=2, after the 4 draws of ch=1 ran out
+            draws.append(v)
+            return len(draws) == 5
+
+        param = Parameter(
+            TestArg("ch", rng_type=Series([1, 2, 3])),
+            TestArg("x", rng_type=RNGInteger(0, 9)),
+            vector_constraints={"gate": gate},
+            max_retries=4,
+        )
+        stats = _GenerationStats()
+
+        with pytest.raises(ValueError) as excinfo:
+            param.generate_vectors(2, _stats=stats)
+
+        # The cycle that failed (ch=3, 1, 2), not the visit of ch=1 before the row
+        assert f"{FIRST_FAILING}gate=12. First rows rejected: gate: Vector(ch=3, " in str(
+            excinfo.value
+        )
+        assert len(draws) == 17
+        # The -v summary counts every rejected draw of the call
+        assert stats.rejected == {"gate": 16}
+
+    def test_a_tie_names_the_constraint_evaluated_first(self):
+        draws = []
+
+        def zeta(v):
+            # Rejects the odd draws; never rejects the even ones
+            draws.append(v)
+            return len(draws) % 2 == 0
+
+        param = _burst(vector_constraints={"zeta": zeta, "alpha": never}, max_retries=4)
+
+        with pytest.raises(ValueError) as excinfo:
+            param.generate_vectors(1)
+
+        assert f"{FIRST_FAILING}zeta=2, alpha=2. " in str(excinfo.value)
+        # The advice turns off the first of the strictest in evaluation order
+        assert excinfo.value.strictest == "zeta"
+        assert _exhausted_message("s", excinfo.value).endswith(
+            "turn one off for this run with --strategy-constraint-off=s:zeta."
+        )
+
     def test_the_per_sequence_error_counts_by_name(self):
         param = Parameter(
             TestArg("ch", rng_type=RNGSequence([0, 1])),
@@ -649,6 +697,28 @@ class TestRaisingConstraints:
             param.generate_vectors(2)
 
         assert excinfo.value.__notes__ == ["Raised by constraint 'ratio' on the row Vector(ch=0)"]
+
+    def test_an_exception_raised_again_keeps_one_note(self):
+        """A constraint that raises one exception object again: one note, for the last row."""
+        error = LookupError("no such mode")
+
+        def lookup(v):
+            raise error
+
+        for x in (1, 2):
+            param = Parameter(TestArg("x", value=x), vector_constraints=[lookup])
+            with pytest.raises(LookupError):
+                param.generate_vector()
+            assert error.__notes__ == [f"Raised by constraint 'lookup' on the row Vector(x={x})"]
+
+        # A note the caller added in between keeps its place
+        error.add_note("seen by the caller")
+        with pytest.raises(LookupError):
+            Parameter(TestArg("x", value=3), vector_constraints=[lookup]).generate_vectors(1)
+        assert error.__notes__ == [
+            "Raised by constraint 'lookup' on random row 0, Vector(x=3)",
+            "seen by the caller",
+        ]
 
     def test_a_truth_value_that_raises_is_named_too(self):
         class Ambiguous:

@@ -405,9 +405,10 @@ class _ConstraintFailure:
         detail: The message without the note on the constraints turned off
         off_before: The constraints before it in the mapping that the generation
             call turned off (one of them may have guarded it)
+        added_note: The note :meth:`attach` added to the exception, or None
     """
 
-    __slots__ = ("label", "row", "detail", "off_before")
+    __slots__ = ("label", "row", "detail", "off_before", "added_note")
 
     def __init__(
         self,
@@ -423,12 +424,37 @@ class _ConstraintFailure:
         # Not the exception itself, which holds this object
         self.detail = f"Constraint {label} raised {type(error).__name__} on {self.row}: {error}"
         self.off_before = tuple(off_before)
+        self.added_note: str | None = None
 
     def note(self, turned_off_by: str) -> str:
         """Return the note the exception gets: ``Raised by constraint 'ratio' on ...``."""
         return self._with_off_before(
             f"Raised by constraint {self.label} on {self.row}", turned_off_by
         )
+
+    def attach(self, error: BaseException, turned_off_by: str) -> None:
+        """
+        Attach this failure to the exception the constraint raised, with its note.
+
+        The note of the failure attached before, if any, is replaced in place: the
+        resolver attaches the failure again to name ``--strategy-constraint-off``
+        instead of ``constraints_off``, and a constraint may raise one exception
+        object again (a module-level instance), so the notes do not pile up.
+        """
+        note = self.note(turned_off_by)
+        previous = _constraint_failure(error)
+        notes = getattr(error, "__notes__", None)
+        if (
+            previous is not None
+            and previous.added_note is not None
+            and isinstance(notes, list)
+            and previous.added_note in notes
+        ):
+            notes[notes.index(previous.added_note)] = note
+        else:
+            error.add_note(note)
+        self.added_note = note
+        setattr(error, _CONSTRAINT_FAILURE, self)
 
     def message(self, turned_off_by: str) -> str:
         """
@@ -768,8 +794,7 @@ class Parameter:
                 failure = _ConstraintFailure(
                     label, vector, index, e, self._off_before(name, constraints)
                 )
-                setattr(e, _CONSTRAINT_FAILURE, failure)
-                e.add_note(failure.note("constraints_off"))
+                failure.attach(e, "constraints_off")
                 raise
             if rejected:
                 if rejections is not None:
