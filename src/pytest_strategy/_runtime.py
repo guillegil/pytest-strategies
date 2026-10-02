@@ -25,6 +25,7 @@ from pathlib import Path
 from types import ModuleType, TracebackType
 from typing import TYPE_CHECKING, Any
 
+from ._options import SessionOptions, StrategyOptions, parse_session_options
 from ._registry import Registration, registry
 from .rng import RNG
 
@@ -89,6 +90,10 @@ class SessionState:
         self.vector_filter_resolved: bool = False
         self.vector_filter_matched: bool = False
         self.vector_filter_misses: dict[str, list[str]] = {}
+        # The options factories receive: the session-wide part, read from the
+        # config on first use, and each strategy's instance, by resolved name
+        self.options: SessionOptions | None = None
+        self.strategy_options: dict[str, StrategyOptions] = {}
         # pytest_strategies_context: called when a factory first needs ctx. Its
         # result, or the exception it raised (with that traceback), is kept for
         # the rest of the session, so the hook runs at most once.
@@ -240,6 +245,25 @@ class StrategyRuntime:
             # Restore the original traceback, so re-raising does not stack frames
             raise state.context_error.with_traceback(state.context_traceback)
         return state.context
+
+    def strategy_options(self, name: str, config: pytest.Config | None) -> StrategyOptions:
+        """
+        Return the options of the strategy resolved under ``name``.
+
+        For the active session's config, the session-wide part is read once and
+        each name gets one instance, reused for the rest of the session. Any other
+        config (a unit test's stand-in) or None gets a new instance, read from it
+        or with the defaults, and leaves the session's cache alone.
+        """
+        state = self.current
+        if config is None or state is None or state.config is not config:
+            return parse_session_options(config).for_strategy(name)
+        options = state.strategy_options.get(name)
+        if options is None:
+            if state.options is None:
+                state.options = parse_session_options(config)
+            options = state.strategy_options[name] = state.options.for_strategy(name)
+        return options
 
     def record_vector_filter(
         self, strategy: str, matched: bool, vector_names: list[str] | None = None

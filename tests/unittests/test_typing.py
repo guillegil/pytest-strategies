@@ -1,6 +1,6 @@
 """
-The decorators keep the decorated function's type, and the keyword-only options
-are keyword-only for type checkers too.
+The decorators keep the decorated function's type, the keyword-only options are
+keyword-only for type checkers too, and StrategyOptions is typed as frozen.
 
 CI also type-checks this file with ``mypy --strict``: ``assert_type`` fails the
 check if a decorator loses the type (a call on ``Callable[..., Any]`` returns
@@ -9,13 +9,15 @@ check if a decorator loses the type (a call on ``Callable[..., Any]`` returns
 fails it too. At runtime it only runs the code.
 """
 
-from typing import assert_type
+import dataclasses
+from typing import Literal, assert_type
 
 import pytest
 
 from pytest_strategy import (
     Parameter,
     RNGInteger,
+    StrategyOptions,
     TestArg,
     export_strategies,
     register,
@@ -71,3 +73,16 @@ def test_mypy_accepts_the_keyword_forms() -> None:
     param = Parameter(arg)
 
     assert len(param.generate_vectors(2, mode="random_only")) == 2
+
+
+def test_strategy_options_types() -> None:
+    """Each ignore below is needed: mypy reports the line as an error, as Python does."""
+    options = StrategyOptions(strategy="s", nsamples="auto", mode="test")
+
+    assert_type(options.nsamples, int | Literal["auto"])
+    assert_type(options.mode, Literal["all", "random_only", "directed_only", "mixed", "test"])
+    assert assert_type(options.filtered, bool) is False
+    with pytest.raises(TypeError):
+        StrategyOptions("s")  # type: ignore[call-arg]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        options.mode = "all"  # type: ignore[misc]

@@ -26,12 +26,13 @@ import traceback
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path, PurePath
 from types import ModuleType
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 from _pytest.pathlib import ImportPathMismatchError, import_path
 from pytest import Config, Session
 
+from ._options import VectorMode
 from ._registry import (
     Registration,
     _contains,
@@ -1294,7 +1295,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         action="store",
         type=str,
         default="all",
-        choices=["all", "random_only", "directed_only", "mixed", "test"],
+        choices=list(get_args(VectorMode)),
         help="Vector generation mode: all, random_only, directed_only, mixed, or test",
     )
 

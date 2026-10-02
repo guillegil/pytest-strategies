@@ -95,7 +95,7 @@ src/pytest_strategy/
 ├── skill/               # The agent skill that pytest-strategies skill install copies
 ├── py.typed             # PEP 561 marker: type checkers use the package's annotations
 └── _*.py                # Other internal helpers (introspection, test IDs, dataclasses,
-                         # runtime state, warning categories)
+                         # StrategyOptions, runtime state, warning categories)
 ```
 
 ## Core Components

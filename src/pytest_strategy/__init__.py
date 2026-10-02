@@ -71,6 +71,7 @@ __email__ = "guillegil@proton.me"
 # keeps finding the module
 from . import strategy as _strategy_module  # noqa: F401
 from ._api import Strategy, export_strategies, register, strategy
+from ._options import StrategyOptions
 from ._warnings import PytestStrategiesWarning
 from .parameters import Parameter
 
@@ -109,6 +110,7 @@ __all__ = [
     "Strategy",
     "Parameter",
     "TestArg",
+    "StrategyOptions",
     # RNG classes
     "RNG",
     "RNGType",

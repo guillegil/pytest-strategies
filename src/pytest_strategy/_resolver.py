@@ -412,27 +412,20 @@ def build_parametrization(
         ValueError: With a message naming the strategy when the factory, the
             generation or the signature check fails
     """
-    # Get CLI options
-    cli_nsamples = config.getoption("nsamples") if config else None
-    vector_mode = config.getoption("vector_mode") if config else "all"
-    vector_name = config.getoption("vector_name") if config else None
-    vector_index = config.getoption("vector_index") if config else None
-
-    # The factory receives the --nsamples value, "auto", or 10 without the option,
-    # never None (FR-8). The count the rows use is resolved below, once the
-    # Parameter's own nsamples is known.
-    if cli_nsamples == "auto":
-        factory_nsamples: int | str = "auto"
-    elif cli_nsamples is not None:
-        factory_nsamples = int(cli_nsamples)
-    else:
-        factory_nsamples = 10
+    # The CLI options, read once per session
+    options = runtime.strategy_options(name, config)
+    vector_mode = options.mode
+    vector_name = options.vector_name
+    vector_index = options.vector_index
 
     # Restart the RNG generator on this strategy and test's own stream
     RNG.refresh_seed(key=f"{name}:{_test_location(test_fn, config)}::{test_fn.__qualname__}")
 
-    # Call the factory function the way its signature accepts nsamples
-    param = check_factory_result(name, factory, call_factory(name, factory, factory_nsamples))
+    # Call the factory function the way its signature accepts nsamples. It receives
+    # the --nsamples value, "auto", or 10 without the option, never None (FR-8).
+    # The count the rows use is resolved below, once the Parameter's own nsamples
+    # is known.
+    param = check_factory_result(name, factory, call_factory(name, factory, options.nsamples))
 
     resolution = Resolution(strategy=name, where=_where(factory, config))
 
@@ -445,11 +438,8 @@ def build_parametrization(
     #   2. CLI explicit int → use it
     #   3. param.nsamples set → use it
     #   4. fallback → 10
-    if cli_nsamples == "auto":
-        effective_nsamples: int | str = "auto"
-        source = "--nsamples"
-    elif cli_nsamples is not None:
-        effective_nsamples = int(cli_nsamples)
+    if options.nsamples_source == "--nsamples":
+        effective_nsamples: int | str = options.nsamples
         source = "--nsamples"
     elif param.nsamples is not None:
         effective_nsamples = param.nsamples
@@ -472,7 +462,7 @@ def build_parametrization(
         source += ", no Series/RNGSequence for auto"
     resolution.nsamples, resolution.source = effective_nsamples, source
 
-    filtered = vector_name is not None or vector_index is not None
+    filtered = options.filtered
     if not filtered and vector_mode not in ("test", "directed_only"):
         if effective_nsamples == "auto":
             _check_size(name, param, 1, "--nsamples=auto", _max_exhaustive(param, config))
