@@ -141,7 +141,8 @@ class Parameter:
   otherwise, naming the vector: a wrong length, a missing or unknown dict key,
   with "did you mean"). A str, bytes or scalar vector fails with
   `For a one-argument strategy write ('a',) or {'x': 'a'}`, and a dict value for
-  one argument is written `({"a": 1},)` or `{"cfg": {"a": 1}}`. Dataclass and
+  one argument is written `({"a": 1},)` or `{"cfg": {"a": 1}}` (in a `pytest.param`,
+  only `pytest.param({"cfg": {"a": 1}}, marks=...)`). Dataclass and
   pydantic model instances are not supported as vectors yet; use a dict.
   `pytest.param(..., marks=...)` wraps any of these forms. Vectors are not
   checked by predicates, constraints or validators.

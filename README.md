@@ -333,7 +333,7 @@ def api_test_strategy(nsamples):
 ```
 Running with `pytest --vector-mode=test` runs only the test vectors, ignoring random and directed vectors.
 
-A directed or test vector holds one value per argument, in argument order. It can be a tuple or a list (for example read from a YAML file), so `[404]` works like `(404,)`, or a dict of argument names to values in any order, such as `{"status_code": 404}`. A namedtuple is placed by its field names, which must be the argument names. A bare value such as `404` or `"a"` is an error, and a dict value for a one-argument strategy is written `({"a": 1},)` or `{"cfg": {"a": 1}}`. Vector names are non-empty strings. `directed_vectors` and `test_vectors` are read-only mappings: change them with `add_directed_vector()`, `remove_directed_vector()` and the `test` equivalents.
+A directed or test vector holds one value per argument, in argument order. It can be a tuple or a list (for example read from a YAML file), so `[404]` works like `(404,)`, or a dict of argument names to values in any order, such as `{"status_code": 404}`. A namedtuple is placed by its field names, which must be the argument names. A bare value such as `404` or `"a"` is an error, and a dict value for a one-argument strategy is written `({"a": 1},)` or `{"cfg": {"a": 1}}`, and in a `pytest.param` only `pytest.param({"cfg": {"a": 1}}, marks=...)`. Vector names are non-empty strings. `directed_vectors` and `test_vectors` are read-only mappings: change them with `add_directed_vector()`, `remove_directed_vector()` and the `test` equivalents.
 
 ### 8. Per-Strategy Sample Count (New in v2.0.0)
 

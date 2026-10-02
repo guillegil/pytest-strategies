@@ -73,7 +73,7 @@ def _normalize_vector(kind: str, name: object, raw: object, arg_names: tuple[str
         # A ParameterSet is itself a namedtuple of (values, marks, id), so it comes first
         given = raw.values
         if len(given) == 1 and isinstance(given[0], Mapping):
-            row = _vector_by_name(where, given[0], "dict", arg_names, row_type)
+            row = _vector_by_name(where, given[0], "dict", arg_names, row_type, in_param=True)
         else:
             row = _vector_by_position(where, given, row_type)
         # Typed as a Vector, like every row: the API types its rows as Vectors, as
@@ -146,6 +146,8 @@ def _vector_by_name(
     what: str,
     arg_names: tuple[str, ...],
     row_type: type[Vector],
+    *,
+    in_param: bool = False,
 ) -> Vector:
     """
     Build the row of a vector whose values are given by argument name.
@@ -156,16 +158,23 @@ def _vector_by_name(
         what: "dict" or "namedtuple", for the messages
         arg_names: The strategy's argument names, in declaration order
         row_type: The class of the row
+        in_param: Whether the dict is the only value of a pytest.param(...), for
+            the hint of a one-argument strategy
     """
     part = "keys" if what == "dict" else "fields"
     expected = f"The {part} of a {what} vector are the strategy's arguments: {', '.join(arg_names)}"
     if what == "dict" and len(arg_names) == 1:
         # A dict is always a named vector, also for a one-argument strategy
         shown = reprlib.repr(dict(values))
-        expected += (
-            f". A dict value for the one argument is written ({shown},) or "
-            f"{{{arg_names[0]!r}: {shown}}}"
-        )
+        named = f"{{{arg_names[0]!r}: {shown}}}"
+        if in_param:
+            # pytest.param((d,)) would be read by position and pass the tuple (d,)
+            expected += (
+                f". In a pytest.param, a dict value for the one argument is written "
+                f"pytest.param({named}, marks=...)"
+            )
+        else:
+            expected += f". A dict value for the one argument is written ({shown},) or {named}"
     for key in values:
         if not isinstance(key, str):
             raise RNGValueError(f"{where} has the key {key!r}, which is not a str. {expected}")
@@ -484,7 +493,8 @@ class Parameter:
                 namedtuple whose fields are the argument names. A
                 pytest.param(*values, marks=...) of one of these keeps its marks (and
                 id) on its row. Each is stored as a Vector; a dict value for a
-                one-argument strategy is written ({"a": 1},) or {"cfg": {"a": 1}}.
+                one-argument strategy is written ({"a": 1},) or {"cfg": {"a": 1}}, and
+                in a pytest.param only pytest.param({"cfg": {"a": 1}}, marks=...).
             test_vectors: Mapping of test vector names to vectors (for test mode), in
                 the forms directed_vectors takes
             always_include_directed: If True, directed vectors are included in "mixed" mode

@@ -120,6 +120,21 @@ class TestDictVectors:
             "argument is written ({'a': 1},) or {'cfg': {'a': 1}}"
         )
 
+    def test_a_pytest_param_shows_its_own_way_to_write_a_dict_value(self):
+        """Inside a pytest.param, ({'a': 1},) is read by position and passes the tuple."""
+        with pytest.raises(RNGValueError) as excinfo:
+            _param("cfg", test_vectors={"v": pytest.param({"a": 1}, marks=pytest.mark.xfail)})
+
+        assert str(excinfo.value) == (
+            "Test vector 'v' has unknown argument 'a' and is missing 'cfg'. The keys of a dict "
+            "vector are the strategy's arguments: cfg. In a pytest.param, a dict value for "
+            "the one argument is written pytest.param({'cfg': {'a': 1}}, marks=...)"
+        )
+        written = _param(
+            "cfg", test_vectors={"v": pytest.param({"cfg": {"a": 1}}, marks=pytest.mark.xfail)}
+        )
+        assert written.test_vectors["v"].values.cfg == {"a": 1}
+
     def test_tuple_and_dict_vectors_mix(self):
         param = _addr_len(
             directed_vectors={"t": (1, 2), "d": {"len": 4, "addr": 3}, "l": [5, 6]},
