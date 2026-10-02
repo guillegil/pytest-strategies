@@ -328,7 +328,7 @@ usage error listing each strategy's directed vectors.
 | `--vector-mode=MODE` | `all`, `random_only`, `directed_only`, `mixed`, `test` |
 | `--vector-name=NAME` | only the directed vector named NAME |
 | `--vector-index=I` | only the directed vector at index I |
-| `--strategy-constraint-off=[S:]NAME[,...]` | turn the constraint NAME off for this run, in every strategy or only in strategy S; repeatable. The header lists what is off and `-v` adds `off: NAME`. An item that matches no constraint of a resolved strategy is a usage error in a whole-suite run (with "did you mean" and the constraints by strategy), and a red line in a run narrowed by paths, node IDs, `--lf`, `--sw` or `--ignore` |
+| `--strategy-constraint-off=[S:]NAME[,...]` | turn the constraint NAME off for this run, in every strategy or only in strategy S; repeatable. The header lists what is off and `-v` adds `off: NAME`. An item that matches no constraint of a resolved strategy is a usage error in a whole-suite run (with "did you mean" and the constraints by strategy), and a red line in a run narrowed by paths, node IDs, `--lf`, `--sw`, `--ignore` or a start below the rootdir, or with a module that was skipped or failed to collect |
 | `--list-strategies` | load every strategies file, list the registered names and exit |
 
 | ini option | Meaning |

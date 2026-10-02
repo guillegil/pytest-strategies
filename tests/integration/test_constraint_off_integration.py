@@ -12,6 +12,7 @@ test_session_isolation_integration.py for rationale).
 """
 
 import json
+import textwrap
 
 import pytest
 
@@ -269,6 +270,29 @@ UNMATCHED = {
 }
 
 UNMATCHED_ITEM = "--strategy-constraint-off=nevr matched no constraint. Did you mean 'never'?"
+
+# The rest of a module whose strategy has the constraint aligned. The tests put
+# lines before it that skip the module, fail its import, or set BROKEN, which
+# makes the factory raise.
+ALIGNED = textwrap.dedent("""
+    from pytest_strategy import Parameter, RNGInteger, TestArg, register, strategy
+
+    BROKEN = globals().get("BROKEN", False)
+
+    @register("co_um_aligned")
+    def aligned():
+        if BROKEN:
+            raise RuntimeError("the factory broke")
+        return Parameter(
+            TestArg("addr", rng_type=RNGInteger(0, 9)),
+            directed_vectors={"zero": (0,)},
+            vector_constraints={"aligned": lambda v: v.addr % 4 == 0},
+        )
+
+    @strategy("co_um_aligned")
+    def test_aligned(addr):
+        pass
+    """)
 UNMATCHED_MESSAGE = (
     f"{UNMATCHED_ITEM} Constraints by strategy: co_um_never: never; co_um_plain: none"
 )
@@ -280,10 +304,20 @@ class TestUnmatchedItems:
         pytester.makepyfile(**UNMATCHED)
 
     def test_a_whole_suite_run_fails_with_a_usage_error(self, pytester):
-        result = pytester.runpytest("--strategy-constraint-off=nevr")
+        # The directed rows only, so co_um_never collects (its never is not evaluated)
+        result = pytester.runpytest("--vector-mode=directed_only", "--strategy-constraint-off=nevr")
 
         assert result.ret == pytest.ExitCode.USAGE_ERROR
         result.stderr.fnmatch_lines([f"ERROR: {UNMATCHED_MESSAGE}"])
+
+    def test_a_run_with_a_collection_error_prints_a_red_line(self, pytester):
+        # never rejects every draw, so co_um_never fails to collect, and a module
+        # that fails stops collecting the tests after it: the run counts as narrowed
+        result = pytester.runpytest("--strategy-constraint-off=nevr")
+
+        assert result.ret == pytest.ExitCode.INTERRUPTED
+        result.assert_outcomes(errors=1)
+        result.stdout.fnmatch_lines([f"pytest-strategies: {UNMATCHED_MESSAGE}"])
 
     def test_a_name_that_exists_counts_even_where_it_is_not_evaluated(self, pytester):
         result = pytester.runpytest(
@@ -380,6 +414,38 @@ class TestUnmatchedItems:
             ]
         )
 
+    @pytest.mark.parametrize(
+        ("prefix", "ret"),
+        [
+            ('import pytest\npytest.importorskip("co_um_not_installed")\n', pytest.ExitCode.OK),
+            (
+                'import pytest\npytest.skip("not here", allow_module_level=True)\n',
+                pytest.ExitCode.OK,
+            ),
+            ("import co_um_not_installed\n", pytest.ExitCode.INTERRUPTED),
+            ("BROKEN = True\n", pytest.ExitCode.INTERRUPTED),
+        ],
+        ids=["importorskip", "module_skip", "import_error", "factory_raises"],
+    )
+    def test_a_run_that_did_not_resolve_a_module_prints_a_red_line(self, pytester, prefix, ret):
+        """A whole-suite run whose module was skipped or failed did not resolve that
+        module's strategies, so a correct item cannot be told from a typo."""
+        pytester.makepyfile(test_co_um_aligned=prefix + ALIGNED)
+        args = ["--vector-mode=directed_only"]
+        without = pytester.runpytest(*args)
+
+        result = pytester.runpytest(*args, "--strategy-constraint-off=co_um_aligned:aligned")
+
+        assert without.ret == result.ret == ret
+        assert result.parseoutcomes() == without.parseoutcomes()
+        result.stdout.fnmatch_lines(
+            [
+                "pytest-strategies: --strategy-constraint-off=co_um_aligned:aligned matched no "
+                "constraint. Constraints by strategy: co_um_never: never; co_um_plain: none"
+            ]
+        )
+        assert "ERROR: --strategy-constraint-off" not in result.stderr.str()
+
     def test_not_checked_under_list_strategies(self, pytester):
         result = pytester.runpytest(
             "--list-strategies", "--vector-mode=directed_only", "--strategy-constraint-off=nevr"
@@ -422,6 +488,28 @@ class TestUnmatchedItems:
         # The workers ran nothing
         result.assert_outcomes()
 
+    def test_under_xdist_a_run_that_skipped_a_module_runs_its_tests(self, pytester):
+        pytest.importorskip("xdist")
+        pytester.makepyfile(
+            test_co_um_aligned='import pytest\npytest.importorskip("co_um_not_installed")\n'
+            + ALIGNED
+        )
+
+        result = pytester.runpytest_subprocess(
+            "-p",
+            "no:cacheprovider",
+            "--vector-mode=directed_only",
+            "--strategy-constraint-off=aligned",
+            "-n",
+            "2",
+        )
+
+        assert result.ret == pytest.ExitCode.OK, result.stdout.str()
+        result.assert_outcomes(passed=1, skipped=2)
+        result.stdout.fnmatch_lines(
+            ["pytest-strategies: --strategy-constraint-off=aligned matched no constraint. *"]
+        )
+
     def test_under_xdist_a_narrowed_run_prints_the_workers_red_line(self, pytester):
         pytest.importorskip("xdist")
 
@@ -442,6 +530,101 @@ class TestUnmatchedItems:
                 "Constraints by strategy: co_um_plain: none"
             ]
         )
+
+
+# Two folders under testpaths, with a strategy each; the ini turns off the
+# constraint of the strategy in tests/a for every run
+FOLDERS = {
+    "tests/a/test_co_sd_a": """
+        from pytest_strategy import Parameter, RNGInteger, TestArg, register, strategy
+
+        @register("co_sd_a")
+        def small():
+            return Parameter(
+                TestArg("x", rng_type=RNGInteger(0, 9)),
+                vector_constraints={"small": lambda v: v.x < 5},
+            )
+
+        @strategy("co_sd_a")
+        def test_a(x):
+            pass
+        """,
+    "tests/b/test_co_sd_b": """
+        from pytest_strategy import Parameter, RNGInteger, TestArg, register, strategy
+
+        @register("co_sd_b")
+        def plain():
+            return Parameter(TestArg("y", rng_type=RNGInteger(0, 9)))
+
+        @strategy("co_sd_b")
+        def test_b(y):
+            pass
+        """,
+}
+
+
+class TestTheItemInAddopts:
+    """
+    A run without arguments counts as the whole suite only when it starts in the
+    rootdir: pytest then collects testpaths, and from a folder below the rootdir
+    only that folder. So an item kept in addopts works in both.
+    """
+
+    @staticmethod
+    def _ini(pytester, item):
+        pytester.makeini(f"""
+            [pytest]
+            testpaths = tests
+            addopts = --strategy-constraint-off={item}
+            """)
+
+    @pytest.fixture(autouse=True)
+    def _project(self, pytester):
+        pytester.makepyfile(**FOLDERS)
+
+    def test_a_run_from_the_rootdir_matches_the_item(self, pytester):
+        self._ini(pytester, "co_sd_a:small")
+
+        result = pytester.runpytest("-v")
+
+        assert result.ret == pytest.ExitCode.OK
+        result.assert_outcomes(passed=20)
+        result.stdout.fnmatch_lines(["  co_sd_a (*): *; off: small"])
+        assert "matched no constraint" not in result.stdout.str() + result.stderr.str()
+
+    def test_a_typo_stops_a_run_from_the_rootdir(self, pytester):
+        self._ini(pytester, "co_sd_a:smal")
+
+        result = pytester.runpytest()
+
+        assert result.ret == pytest.ExitCode.USAGE_ERROR
+        result.stderr.fnmatch_lines(
+            [
+                "ERROR: --strategy-constraint-off=co_sd_a:smal matched no constraint. Did you "
+                "mean 'co_sd_a:small'? Constraints by strategy: co_sd_a: small; co_sd_b: none"
+            ]
+        )
+
+    @pytest.mark.parametrize(
+        ("folder", "args"),
+        [("tests/b", []), (".", ["tests/b"]), ("tests", ["b"])],
+        ids=["from_the_folder", "path_from_the_rootdir", "path_from_another_folder"],
+    )
+    def test_a_run_of_another_folder_prints_a_red_line(self, pytester, monkeypatch, folder, args):
+        self._ini(pytester, "co_sd_a:small")
+        monkeypatch.chdir(pytester.path / folder)
+
+        result = pytester.runpytest(*args)
+
+        assert result.ret == pytest.ExitCode.OK
+        result.assert_outcomes(passed=10)
+        result.stdout.fnmatch_lines(
+            [
+                "pytest-strategies: --strategy-constraint-off=co_sd_a:small matched no "
+                "constraint. Constraints by strategy: co_sd_b: none"
+            ]
+        )
+        assert "ERROR: --strategy-constraint-off" not in result.stderr.str()
 
 
 @pytest.mark.parametrize(

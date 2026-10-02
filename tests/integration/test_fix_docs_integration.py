@@ -188,22 +188,46 @@ class TestExamples:
             )
         assert bad == []
 
-    @pytest.mark.parametrize("seed", [2, 4, 5])
-    def test_values_example_passes_with_its_constraint_turned_off(self, pytester, seed):
-        """CI runs test_values_example.py with --strategy-constraint-off=date_range_test:ordered.
-
-        No path is given, so a name that matched no constraint would stop the run
-        with a usage error.
+    @staticmethod
+    def _run_as_ci(pytester, *args):
+        """
+        Run test_values_example.py as CI does, from the rootdir with the example's
+        folder as testpaths and no path on the command line.
         """
         example = REPO_ROOT / "examples" / "test_values_example.py"
-        pytester.makepyfile(test_test_values_example=example.read_text(encoding="utf-8"))
+        pytester.mkdir("examples")
+        (pytester.path / "examples" / example.name).write_text(
+            example.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        return pytester.runpytest(
+            "-o", "testpaths=examples", "-o", "python_files=test_values_example.py", *args
+        )
 
-        result = pytester.runpytest(
-            f"--rng-seed={seed}", "--strategy-constraint-off=date_range_test:ordered", "-v"
+    @pytest.mark.parametrize("seed", [2, 4, 5])
+    def test_values_example_passes_with_its_constraint_turned_off(self, pytester, seed):
+        """CI runs test_values_example.py with --strategy-constraint-off=date_range_test:ordered."""
+        result = self._run_as_ci(
+            pytester,
+            f"--rng-seed={seed}",
+            "--strategy-constraint-off=date_range_test:ordered",
+            "-v",
         )
 
         assert result.ret == pytest.ExitCode.OK, result.stdout.str()
         result.stdout.fnmatch_lines(["  date_range_test (*): *; off: ordered"])
+
+    def test_ci_run_of_the_example_counts_as_the_whole_suite(self, pytester):
+        """The run collects testpaths, so a misspelled name fails CI instead of
+        printing a red line."""
+        result = self._run_as_ci(pytester, "--strategy-constraint-off=date_range_test:orderd")
+
+        assert result.ret == pytest.ExitCode.USAGE_ERROR
+        result.stderr.fnmatch_lines(
+            [
+                "ERROR: --strategy-constraint-off=date_range_test:orderd matched no "
+                "constraint. Did you mean 'date_range_test:ordered'? *"
+            ]
+        )
 
     def test_values_example_rejects_the_ranges_its_constraint_keeps_out(self, monkeypatch):
         """With 'ordered' off, date_range_test draws ranges that end before they

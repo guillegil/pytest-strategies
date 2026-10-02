@@ -571,6 +571,9 @@ resolved.
   files of its folder and the folders above it
 - `pytest_generate_tests` - Resolves the test's `strategy` markers into
   `parametrize` markers
+- `pytest_collectreport` - Notes a test module or class that was skipped or
+  failed to collect: its strategies may be unresolved, so the run counts as
+  narrowed for `--strategy-constraint-off`
 - `pytest_collection_modifyitems` - Fails the run on a name registered twice in
   one folder, when `--vector-name` or `--vector-index` matched no strategy, and
   when a `--strategy-constraint-off` item matched no constraint in a run of the

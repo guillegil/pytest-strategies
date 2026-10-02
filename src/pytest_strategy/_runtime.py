@@ -101,9 +101,11 @@ class SessionState:
         # Parameter strategy resolved in this session, by strategy name, in
         # evaluation order (a name resolved in two folders gets both sets), and
         # the lines reporting the items that matched none of them in a run that
-        # did not collect the whole suite
+        # did not collect the whole suite. A collector that was skipped or failed
+        # leaves its tests' strategies unresolved, so the run counts as narrowed.
         self.constraint_names: dict[str, dict[str, None]] = {}
         self.unmatched_constraints_off: list[str] = []
+        self.collectors_incomplete: bool = False
         # The options factories receive: the session-wide part, read from the
         # config on first use, and each strategy's instance, by resolved name
         self.options: SessionOptions | None = None

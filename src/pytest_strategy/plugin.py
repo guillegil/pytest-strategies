@@ -298,6 +298,18 @@ class PytestStrategyPlugin:
             )
         own_markers[:] = markers
 
+    @pytest.hookimpl
+    def pytest_collectreport(self, report: pytest.CollectReport) -> None:
+        """
+        Note a collector (a test module, a class) that was skipped, such as a module
+        that calls ``pytest.importorskip()``, or failed, such as a module that does
+        not import or a strategy whose factory raised: the strategies of its tests
+        may not have been resolved.
+        """
+        state = runtime.current
+        if state is not None and (report.skipped or report.failed):
+            state.collectors_incomplete = True
+
     @pytest.hookimpl(trylast=True)
     def pytest_collection_modifyitems(
         self, session: Session, config: Config, items: list[pytest.Item]
@@ -313,18 +325,21 @@ class PytestStrategyPlugin:
         the vector, but when none has it (a typo, an index out of range) every
         test would be skipped and the run would still pass. Likewise, a misspelled
         constraint name would leave the constraint on while the user believes it is
-        off. A run that collected only some tests resolved only some strategies, so
+        off. A run that collected only some tests resolved only some strategies, and
+        so did a run in which a test module was skipped or failed to collect, so
         there the unmatched items are reported in red and the run goes on.
         """
         message = self._clash_error() or self._vector_filter_error(config)
         unmatched = self._constraint_off_error(config)
         if unmatched is not None:
-            if _collects_whole_suite(config):
+            state = runtime.current
+            complete = state is not None and not state.collectors_incomplete
+            if complete and _collects_whole_suite(config):
                 message = message or unmatched
-            elif runtime.current is not None:
+            elif state is not None:
                 # Printed once pytest has reported the collection (on a pytest-xdist
                 # worker, by the controller: see pytest_terminal_summary)
-                runtime.current.unmatched_constraints_off = unmatched.splitlines()
+                state.unmatched_constraints_off = unmatched.splitlines()
         if message is None:
             return
         if getattr(config, "workerinput", None) is None:
@@ -1386,10 +1401,24 @@ def _constraint_off_type(value: str) -> str:
 
 def _collects_whole_suite(config: Config) -> bool:
     """
-    Check whether the run collected every test: no paths or node IDs on the
-    command line, and none of --lf, --sw, --ignore or --ignore-glob.
+    Check whether the run collected every test, by what it was asked to collect:
+    no paths or node IDs on the command line, started from the rootdir (pytest
+    collects only the current folder when run without arguments from a folder
+    below it), and none of --lf, --sw, --ignore or --ignore-glob.
+
+    A run that asked for every test can still leave strategies unresolved, when a
+    test module was skipped or failed to collect: pytest_collectreport notes that.
     """
-    if config.args_source is Config.ArgsSource.ARGS:
+    source = config.args_source
+    if source is Config.ArgsSource.ARGS:
+        return False
+    # pytest's own rule (Config._decide_args): without arguments, a run started in
+    # the rootdir collects testpaths (or the rootdir), and any other run the
+    # current folder
+    if (
+        source is Config.ArgsSource.INVOCATION_DIR
+        and config.invocation_params.dir != config.rootpath
+    ):
         return False
     narrowing = ("lf", "stepwise", "stepwise_skip", "ignore", "ignore_glob")
     return not any(config.getoption(dest, None) for dest in narrowing)
