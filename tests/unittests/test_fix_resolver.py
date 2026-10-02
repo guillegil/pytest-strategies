@@ -1,8 +1,8 @@
 """
 Regression tests for resolver and strategy registration fixes.
 
-Most tests mock the pytest.Config and registry to drive resolve_and_parametrize
-directly and inspect the pytest.mark.parametrize it applies.
+Most tests mock the pytest.Config and registry to drive build_parametrization
+directly and inspect the rows and IDs it parametrizes the test with.
 """
 
 import inspect
@@ -16,7 +16,7 @@ import pytest
 
 from pytest_strategy import RNG, RNGInteger, Strategy, StrategyOptions
 from pytest_strategy._factory import FactoryInputs, call_factory
-from pytest_strategy._resolver import resolve_and_parametrize
+from pytest_strategy._resolver import build_parametrization
 from pytest_strategy._runtime import runtime
 from pytest_strategy.parameters import Parameter
 from pytest_strategy.rng import RNGChoice, RNGValueError, Series
@@ -67,18 +67,17 @@ def _make_test_fn(argnames):
 def _resolve(factory, argnames, *, validate=False, **options):
     """Resolve ``factory`` for a test taking ``argnames`` under the given CLI options.
 
-    Returns the (argstr, samples, ids) passed to pytest.mark.parametrize.
+    Returns the (argstr, samples, ids) the test is parametrized with.
     """
-    marked = resolve_and_parametrize(
+    parametrization = build_parametrization(
         "strat",
+        factory,
         _make_test_fn(argnames),
-        registry={"strat": factory},
         config=_make_config(**options),
         pytest_fixtures=set(),
         validate=validate,
     )
-    mark = marked.pytestmark[-1]
-    return mark.args[0], list(mark.args[1]), mark.kwargs["ids"]
+    return parametrization.argnames, parametrization.values, parametrization.ids
 
 
 def _series_param(**kwargs):
@@ -374,7 +373,7 @@ class TestCallFactory:
 
 
 class TestResolverFactoryCalling:
-    """resolve_and_parametrize goes through call_factory."""
+    """build_parametrization goes through call_factory."""
 
     def test_type_error_in_body_is_reported_once(self):
         calls = []

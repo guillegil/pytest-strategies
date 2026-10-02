@@ -40,9 +40,12 @@ class Resolution:
     strategy: str
     # Where the factory is defined, for the summary ("tests/payments/strategies.py")
     where: str
+    # The rows of each kind
     directed: int = 0
     random: int = 0
     test: int = 0
+    exhaustive: int = 0
+    skipped: int = 0
     # The count the factory's random rows were generated with, and where it came from
     nsamples: int | str | None = None
     source: str = ""
@@ -161,6 +164,13 @@ class StrategyRuntime:
         return self._stack[-1] if self._stack else None
 
     # Convenience accessors that operate on the active session ----------- #
+
+    def run_seed(self) -> int:
+        """The seed the active session started from, even if a test reseeded the RNG."""
+        state = self.current
+        if state is not None and state.run_seed is not None:
+            return state.run_seed
+        return RNG.get_seed()
 
     @property
     def strategies_loaded(self) -> bool:

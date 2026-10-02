@@ -11,7 +11,8 @@ from __future__ import annotations
 import inspect
 import os
 import warnings
-from collections.abc import Callable, Collection, Mapping
+from collections import Counter
+from collections.abc import Callable, Collection, Mapping, Sequence
 from pathlib import Path
 from types import TracebackType
 from typing import Any, NamedTuple, cast
@@ -37,6 +38,7 @@ from ._records import (
 )
 from ._registry import _describe_factory, display_path, factory_source
 from ._runtime import Resolution, runtime
+from ._vector import VectorInfo
 from ._warnings import PytestStrategiesWarning
 from .parameters import (
     Parameter,
@@ -44,6 +46,7 @@ from .parameters import (
     _ConstraintsExhausted,
     _forget_constraint_failure,
     _GenerationStats,
+    _ParameterSet,
     _Row,
 )
 from .rng import RNG, SequenceLike
@@ -54,15 +57,38 @@ DEFAULT_MAX_EXHAUSTIVE = 100_000
 
 class Parametrization(NamedTuple):
     """
-    The arguments of ``pytest.mark.parametrize`` for one test and strategy, and in
-    named mode the test parameters annotated with the strategy's record type, with
-    the error to report when no fixture or parametrization gives one a value.
+    The parametrization of one test by one strategy: its argument names, the rows
+    the test receives (a vector's ``pytest.param`` where it has marks), their IDs
+    and the VectorInfo of each, and in named mode the test parameters annotated
+    with the strategy's record type, with the error to report when no fixture or
+    parametrization gives one a value.
     """
 
     argnames: str
     values: list[Any]
     ids: list[str]
     unfilled: tuple[tuple[str, str], ...] = ()
+    infos: tuple[VectorInfo, ...] = ()
+
+    def params(self) -> list[Any]:
+        """
+        Return the rows as ``pytest.mark.parametrize`` receives them:
+        ``pytest.param(*values, id=..., marks=[*the vector's marks, strategy mark])``,
+        whose ``strategy`` mark holds the row's VectorInfo (the plugin stores it on
+        the item, see ``pytest_itemcollected``).
+        """
+        single = "," not in self.argnames
+        strategy_mark = pytest.mark.strategy
+        params = []
+        for value, row_id, info in zip(self.values, self.ids, self.infos, strict=True):
+            if isinstance(value, _ParameterSet):
+                values, marks = tuple(value.values), list(value.marks)
+            else:
+                # As pytest reads a row: one value for a single argument, else a tuple
+                values, marks = ((value,) if single else tuple(value)), []
+            marks.append(strategy_mark.with_args(info))
+            params.append(pytest.param(*values, id=row_id, marks=marks))
+        return params
 
 
 def _skipped_param(reason: str, width: int) -> Any:
@@ -173,6 +199,45 @@ def check_ids_format(config: pytest.Config) -> None:
 def _row_ids(rows: list[_Row]) -> list[str]:
     """Return the rows' test IDs in the names format."""
     return [names_id(row.kind, row.name, row.j, row.labels) for row in rows]
+
+
+def _vector_infos(
+    rows: list[_Row],
+    ids: Sequence[str],
+    *,
+    strategy: str,
+    origin: str | None,
+    arg_names: Sequence[str],
+    constraints_off: tuple[str, ...],
+) -> tuple[VectorInfo, ...]:
+    """Return the VectorInfo of each row, whose final test ID is in ``ids``."""
+    seed = runtime.run_seed()
+    order = {arg: position for position, arg in enumerate(arg_names)}
+    # The enumerated arguments in declaration order, per set of enumerated arguments
+    enumerated: dict[tuple[str, ...], tuple[str, ...]] = {}
+    infos = []
+    for row, row_id in zip(rows, ids, strict=True):
+        names = tuple(arg for arg, _ in row.pos)
+        declared = enumerated.get(names)
+        if declared is None:
+            declared = enumerated[names] = tuple(sorted(names, key=order.__getitem__))
+        infos.append(
+            VectorInfo(
+                strategy=strategy,
+                origin=origin,
+                kind=row.kind,
+                name=row.name,
+                index=row.index,
+                enumerated=declared,
+                values=row.values,
+                id=row_id,
+                seed=seed,
+                # The context's fingerprint is not computed yet
+                context=None,
+                constraints_off=constraints_off,
+            )
+        )
+    return tuple(infos)
 
 
 def _test_location(test_fn: Callable[..., Any], config: pytest.Config | None) -> str:
@@ -448,10 +513,9 @@ def build_parametrization(
         # A skipped Parameter gives one "skipped" row, which stands in for its values
         # below. A vector filter that names none of its vectors keeps the empty set,
         # as for any strategy.
-        rows = [row for row in rows if row.kind != "skipped"]
         skip_reason = param.skip_reason
 
-    _count_rows(resolution, param, rows, vector_mode, filtered)
+    _count_rows(resolution, rows)
     resolution.constraints = constraint_names
     resolution.rejected = dict(stats.rejected)
     if exhaustive:
@@ -460,6 +524,17 @@ def build_parametrization(
     argnames = param.arg_names
 
     runtime.record_resolution(resolution)
+
+    def row_infos(ids: list[str]) -> tuple[VectorInfo, ...]:
+        """The rows' VectorInfos, given their final IDs."""
+        return _vector_infos(
+            rows,
+            ids,
+            strategy=name,
+            origin=_origin(factory, config),
+            arg_names=argnames,
+            constraints_off=constraints_off,
+        )
 
     # Record mode: the test receives the row as one record when neither the test nor
     # any fixture it uses asks for an argument by name, and exactly one parameter is
@@ -487,7 +562,10 @@ def build_parametrization(
                 raise ValueError(
                     f"Error converting samples to dataclass for strategy '{name}': {e}"
                 ) from e
-            return Parametrization(dc_param, [_skipped_param(skip_reason, 1)], ["skipped"])
+            ids = ["skipped"]
+            return Parametrization(
+                dc_param, [_skipped_param(skip_reason, 1)], ids, infos=row_infos(ids)
+            )
         try:
             dataclass_samples = convert_to_dataclass(
                 [row.values for row in rows], argnames, dc_type
@@ -510,7 +588,8 @@ def build_parametrization(
         ]
 
         # Parametrize the dataclass parameter chosen by detection
-        return Parametrization(dc_param, params, _unique_ids(ids, config))
+        ids = _unique_ids(ids, config)
+        return Parametrization(dc_param, params, ids, infos=row_infos(ids))
 
     else:
         # NAMED PARAMETERS MODE: Standard behavior
@@ -570,7 +649,8 @@ def build_parametrization(
             else:
                 samples = [row.sample for row in rows]
 
-        return Parametrization(argstr, samples, _unique_ids(ids, config), unfilled)
+        ids = _unique_ids(ids, config)
+        return Parametrization(argstr, samples, ids, unfilled, row_infos(ids))
 
 
 def _unfilled_message(name: str, record: RecordParam, hints: list[str]) -> str:
@@ -599,19 +679,26 @@ def _where(factory: Callable[..., Any], config: pytest.Config | None) -> str:
     return display_path(filename, _rootpath(config))
 
 
-def _count_rows(
-    resolution: Resolution, param: Parameter, rows: list[_Row], mode: str, filtered: bool
-) -> None:
-    """Split a Parameter's generated rows into directed, random and test rows."""
-    total = len(rows)
-    if filtered or mode == "directed_only":
-        resolution.directed = total
-    elif mode == "test":
-        resolution.test = total
-    else:
-        if mode == "all" or (mode == "mixed" and param.always_include_directed):
-            resolution.directed = min(len(param.directed_vectors), total)
-        resolution.random = total - resolution.directed
+def _origin(factory: Callable[..., Any], config: pytest.Config | None) -> str | None:
+    """
+    Return where the factory is defined, as ``file:line`` with the file relative
+    to the rootdir when inside it, or None when its file is unknown.
+    """
+    filename, _, line = factory_source(factory)
+    if filename is None:
+        return None
+    where = display_path(filename, _rootpath(config))
+    return where if line is None else f"{where}:{line}"
+
+
+def _count_rows(resolution: Resolution, rows: list[_Row]) -> None:
+    """Count a strategy's rows by kind, for the -v summary."""
+    kinds = Counter(row.kind for row in rows)
+    resolution.directed = kinds["directed"]
+    resolution.test = kinds["test"]
+    resolution.random = kinds["random"]
+    resolution.exhaustive = kinds["exhaustive"]
+    resolution.skipped = kinds["skipped"]
 
 
 def resolve_and_parametrize(
@@ -634,7 +721,5 @@ def resolve_and_parametrize(
         validate=validate,
         fixturenames=fixturenames,
     )
-    mark = pytest.mark.parametrize(
-        parametrization.argnames, parametrization.values, ids=parametrization.ids
-    )
+    mark = pytest.mark.parametrize(parametrization.argnames, parametrization.params())
     return cast(Callable[..., Any], mark(test_fn))

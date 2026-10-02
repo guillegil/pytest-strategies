@@ -12,7 +12,7 @@ import pytest
 
 from pytest_strategy import Parameter, RNGInteger, RNGSequence, Series, TestArg
 from pytest_strategy._ids import ID_FORMATS, names_id
-from pytest_strategy._resolver import check_ids_format, ids_format, resolve_and_parametrize
+from pytest_strategy._resolver import build_parametrization, check_ids_format, ids_format
 
 
 class Color(enum.Enum):
@@ -57,15 +57,14 @@ def _make_test_fn(argnames):
 
 def _ids(param, **options):
     """Return the test IDs the resolver gives the rows of ``param`` under the options."""
-    marked = resolve_and_parametrize(
+    return build_parametrization(
         "strat",
+        lambda: param,
         _make_test_fn(param.arg_names),
-        registry={"strat": lambda: param},
         config=_make_config(**options),
         pytest_fixtures=set(),
         validate=False,
-    )
-    return list(marked.pytestmark[-1].kwargs["ids"])
+    ).ids
 
 
 def _burst(**kwargs):

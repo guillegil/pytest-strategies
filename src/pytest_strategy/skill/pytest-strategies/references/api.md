@@ -29,6 +29,8 @@ from pytest_strategy import (
     register, strategy, Strategy,           # decorators; Strategy holds the aliases
     Parameter, TestArg,
     StrategyOptions,                        # what a factory receives as options
+    Vector,                                 # the class of every generated row
+    VectorInfo, VECTOR_KEY, VECTORS_KEY,    # a test item's row: item.stash[VECTOR_KEY]
     RNG, RNGType,
     RNGInteger, RNGFloat, RNGBoolean, RNGChoice, RNGEnum, RNGString,
     RNGWeightedInteger, RNGWeightedFloat,
@@ -348,8 +350,8 @@ Reporting:
 - A run with failures prints "reproduce with `--rng-seed=S`" after the tracebacks,
   also under `-q`.
   A passing run does not print it.
-- `-v` adds, per strategy, the counts of directed, random and test rows and where
-  `nsamples` came from.
+- `-v` adds, per strategy, the counts of directed and random rows (and of test,
+  exhaustive and skipped rows when there are some) and where `nsamples` came from.
 - Warnings raised while generating a strategy's rows are reported at the test, prefixed
   with `Strategy '<name>' (<test>): `.
 

@@ -42,6 +42,7 @@ from ._registry import (
     registry,
 )
 from ._runtime import runtime
+from ._vector import VECTOR_KEY, VECTORS_KEY, VectorInfo
 from .rng import RNG
 
 # This package's folder, whose frames are left out of the errors shown for a factory
@@ -297,14 +298,32 @@ class PytestStrategyPlugin:
                 # frames of a factory that raised, without the plugin's
                 pytest.fail(error, pytrace=False)
             markers.append(
-                pytest.mark.parametrize(
-                    parametrization.argnames, parametrization.values, ids=parametrization.ids
-                ).mark
+                pytest.mark.parametrize(parametrization.argnames, parametrization.params()).mark
             )
             unfilled.extend(parametrization.unfilled)
         own_markers[:] = markers
         if unfilled:
             metafunc.definition.stash[_UNFILLED_RECORDS] = unfilled
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_itemcollected(self, item: pytest.Item) -> None:
+        """
+        Store the VectorInfo of the strategy rows an item runs: the first one in
+        the node ID under ``VECTOR_KEY``, every one under ``VECTORS_KEY``.
+
+        Each row carries a ``strategy`` mark holding its VectorInfo (the test's own
+        ``strategy`` marks hold a strategy name or factory), and pytest copies a
+        row's marks onto its item in the order of the node ID. This runs as each
+        item is collected, before any ``pytest_collection_modifyitems`` hook.
+        """
+        infos = tuple(
+            mark.args[0]
+            for mark in item.iter_markers("strategy")
+            if mark.args and isinstance(mark.args[0], VectorInfo)
+        )
+        if infos:
+            item.stash[VECTOR_KEY] = infos[0]
+            item.stash[VECTORS_KEY] = infos
 
     @pytest.hookimpl
     def pytest_collectreport(self, report: pytest.CollectReport) -> None:
@@ -1289,10 +1308,7 @@ def strategy_not_found_message(name: str, directory: str, rootpath: str | None) 
 
 def _run_seed() -> int:
     """The seed the current session started from, even if a test reseeded the RNG."""
-    state = runtime.current
-    if state is not None and state.run_seed is not None:
-        return state.run_seed
-    return RNG.get_seed()
+    return runtime.run_seed()
 
 
 def _summary(state: Any) -> dict[str, Any]:
@@ -1312,10 +1328,14 @@ def _registration_count() -> int:
     return sum(len(registry.registrations(name)) for name in registry.names())
 
 
+# The row kinds of the -v summary, in the order it lists them
+_SUMMARY_KINDS = ("directed", "random", "test", "exhaustive", "skipped")
+
+
 def _summary_lines(resolutions: list[Any]) -> list[str]:
     """
-    Summarize the resolved strategies for -v: tests and rows per strategy, and for
-    a strategy with constraints the draws each rejected (and, under
+    Summarize the resolved strategies for -v: tests and rows of each kind per
+    strategy, and for a strategy with constraints the draws each rejected (and, under
     --nsamples=auto, the combinations left out) and the constraints
     --strategy-constraint-off turned off.
     """
@@ -1324,12 +1344,13 @@ def _summary_lines(resolutions: list[Any]) -> list[str]:
         by_strategy.setdefault((resolution.strategy, resolution.where), []).append(resolution)
     lines = []
     for (name, where), entries in sorted(by_strategy.items()):
-        directed = sum(e.directed for e in entries)
-        random_rows = sum(e.random for e in entries)
-        test_rows = sum(e.test for e in entries)
-        rows = f"{directed} directed, {random_rows} random"
-        if test_rows:
-            rows += f", {test_rows} test"
+        counts = {kind: sum(getattr(e, kind) for e in entries) for kind in _SUMMARY_KINDS}
+        # Directed and random rows always, the other kinds when there are some
+        rows = ", ".join(
+            f"{count} {kind}"
+            for kind, count in counts.items()
+            if count or kind in ("directed", "random")
+        )
         sources = sorted({f"{e.nsamples} from {e.source}" for e in entries if e.source})
         line = f"{name} ({where}): {len(entries)} test(s), {rows} rows"
         if sources:

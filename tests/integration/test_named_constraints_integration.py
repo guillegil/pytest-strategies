@@ -311,8 +311,8 @@ def test_verbose_summary_counts_the_combinations_auto_left_out(pytester):
     result.assert_outcomes(passed=2 + 2 + 10)
     result.stdout.re_match_lines(
         [
-            r"  nc_sum_aligned \(test_nc_summary_auto\.py\): 2 test\(s\), 0 directed, 4 "
-            r"random rows; nsamples=auto from --nsamples; rejected: not_two=100, aligned=\d+; "
-            r"left out: 2 combinations$"
+            r"  nc_sum_aligned \(test_nc_summary_auto\.py\): 2 test\(s\), 0 directed, 0 "
+            r"random, 4 exhaustive rows; nsamples=auto from --nsamples; rejected: not_two=100, "
+            r"aligned=\d+; left out: 2 combinations$"
         ]
     )

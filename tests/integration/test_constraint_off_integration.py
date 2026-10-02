@@ -229,8 +229,8 @@ def test_auto_generates_the_combinations_the_constraint_left_out(pytester, flags
     result.assert_outcomes(passed=rows)
     result.stdout.re_match_lines(
         [
-            rf"  co_auto \(test_co_auto\.py\): 1 test\(s\), 0 directed, {rows} random rows; "
-            rf"nsamples=auto from --nsamples; {summary}"
+            rf"  co_auto \(test_co_auto\.py\): 1 test\(s\), 0 directed, 0 random, {rows} "
+            rf"exhaustive rows; nsamples=auto from --nsamples; {summary}"
         ]
     )
 

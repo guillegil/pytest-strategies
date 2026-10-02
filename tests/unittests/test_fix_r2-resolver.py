@@ -2,8 +2,8 @@
 Regression tests for the second round of resolver, introspection, dataclass and ID fixes.
 
 Each test here failed before its fix, except those whose docstring says they guard
-behaviour that already worked. Most drive resolve_and_parametrize directly with a
-mocked pytest.Config and inspect the pytest.mark.parametrize it applies.
+behaviour that already worked. Most drive build_parametrization directly with a
+mocked pytest.Config and inspect the rows and IDs it parametrizes the test with.
 """
 
 import functools
@@ -29,7 +29,7 @@ from pytest_strategy import RNG, RNGInteger, Strategy, StrategyOptions, _resolve
 from pytest_strategy._factory import FactoryInputs, call_factory
 from pytest_strategy._ids import generate_dataclass_ids, generate_test_ids
 from pytest_strategy._records import convert_to_dataclass, detect_record_param
-from pytest_strategy._resolver import resolve_and_parametrize
+from pytest_strategy._resolver import build_parametrization
 from pytest_strategy.parameters import Parameter
 from pytest_strategy.rng import Series
 from pytest_strategy.strategy import PytestStrategiesWarning
@@ -77,18 +77,17 @@ def _make_test_fn(argnames):
 
 
 def _parametrize(factory, test_fn, *, validate=True, config=None, fixturenames=None):
-    """Resolve ``factory`` for ``test_fn``; return the mark's (argnames, values, ids)."""
-    marked = resolve_and_parametrize(
+    """Resolve ``factory`` for ``test_fn``; return the (argnames, values, ids) it gives."""
+    parametrization = build_parametrization(
         "strat",
+        factory,
         test_fn,
-        registry={"strat": factory},
         config=config if config is not None else _make_config(),
         pytest_fixtures=set(),
         validate=validate,
         fixturenames=fixturenames,
     )
-    mark = marked.pytestmark[-1]
-    return mark.args[0], list(mark.args[1]), mark.kwargs["ids"]
+    return parametrization.argnames, parametrization.values, parametrization.ids
 
 
 def _resolve(factory, argnames, **options):

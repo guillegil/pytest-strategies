@@ -30,7 +30,7 @@ from pytest_strategy import (
     Strategy,
     TestArg,
 )
-from pytest_strategy._resolver import resolve_and_parametrize
+from pytest_strategy._resolver import build_parametrization
 from pytest_strategy.strategy import PytestStrategiesWarning
 
 
@@ -94,14 +94,9 @@ class TestNsamplesAutoAccepted:
         def test_fn(x):
             pass
 
-        marked = resolve_and_parametrize(
-            "fix_r2_auto",
-            test_fn,
-            registry={"fix_r2_auto": factory},
-            config=config,
-            pytest_fixtures=set(),
-        )
-        return list(marked.pytestmark[0].args[1])
+        return build_parametrization(
+            "fix_r2_auto", factory, test_fn, config=config, pytest_fixtures=set()
+        ).values
 
     def test_factory_forwarding_cli_auto_is_exhaustive(self):
         """--nsamples=auto reaches the factory as "auto"; forwarding it used to raise."""

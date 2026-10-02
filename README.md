@@ -530,7 +530,7 @@ When tests fail, the plugin also prints how to rerun them with the same vectors,
 pytest-strategies: reproduce with --rng-seed=1763926297314361000
 ```
 
-With `-v`, a "Strategy Summary" section lists each strategy with the number of tests that use it, their directed, random and test rows, and where the sample count came from (`--nsamples`, `Parameter(nsamples=)` or the default).
+With `-v`, a "Strategy Summary" section lists each strategy with the number of tests that use it, their directed and random rows (and their test rows, the exhaustive rows of `--nsamples=auto` and the skipped row of an empty `skip_if_empty` sequence, when there are some), and where the sample count came from (`--nsamples`, `Parameter(nsamples=)` or the default).
 
 Each strategy and test pair draws from its own random stream. The stream is derived from the seed, the strategy name, the test's file path relative to the rootdir, and the test's qualified name. As a result:
 - A test gets the same vectors and node IDs whether you run the whole suite, one file or one test, in any collection order and with any `--import-mode`.

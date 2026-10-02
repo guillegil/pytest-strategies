@@ -2,8 +2,9 @@
 The decorators keep the decorated function's type, the keyword-only options are
 keyword-only for type checkers too, StrategyOptions is typed as frozen, a
 Vector's fields type-check by name, vectors given by name type-check next to
-tuples while the vector mappings are read-only, and constraints type-check by
-name too, and can be turned off per generation call.
+tuples while the vector mappings are read-only, constraints type-check by name
+too, and can be turned off per generation call, and the stash keys of the per-test
+metadata are typed with VectorInfo.
 
 CI also type-checks this file with ``mypy --strict``: ``assert_type`` fails the
 check if a decorator loses the type (a call on ``Callable[..., Any]`` returns
@@ -19,12 +20,15 @@ from typing import Any, Literal, assert_type
 import pytest
 
 from pytest_strategy import (
+    VECTOR_KEY,
+    VECTORS_KEY,
     Parameter,
     RNGInteger,
     Series,
     StrategyOptions,
     TestArg,
     Vector,
+    VectorInfo,
     export_strategies,
     register,
     strategy,
@@ -207,3 +211,38 @@ def test_vectors_by_name_type_check() -> None:
         param.directed_vectors["x"] = (1, 1)  # type: ignore[index]
     with pytest.raises(AttributeError):
         param.test_vectors = {}  # type: ignore[misc]
+
+
+def test_vector_info_types() -> None:
+    """Each ignore below is needed: mypy reports the line as an error, as Python does."""
+    assert_type(VECTOR_KEY, pytest.StashKey[VectorInfo])
+    assert_type(VECTORS_KEY, pytest.StashKey[tuple[VectorInfo, ...]])
+    row = Parameter(TestArg("addr", value=4)).generate_vector()
+    info = VectorInfo(
+        strategy="s",
+        origin=None,
+        kind="random",
+        name=None,
+        index=0,
+        enumerated=(),
+        values=row,
+        id="rand-0",
+        seed=1,
+        context=None,
+        constraints_off=(),
+    )
+    stash = pytest.Stash()
+    stash[VECTOR_KEY] = info
+    stash[VECTORS_KEY] = (info,)
+
+    assert assert_type(stash[VECTOR_KEY], VectorInfo) is info
+    assert assert_type(stash.get(VECTOR_KEY, None), VectorInfo | None) is info
+    assert assert_type(stash[VECTORS_KEY], tuple[VectorInfo, ...]) == (info,)
+    assert_type(info.kind, Literal["directed", "test", "random", "exhaustive", "skipped"])
+    assert assert_type(info.values, Vector).addr == 4
+    assert assert_type(info.to_dict(), dict[str, Any])["schema"] == 1
+    _wrong: int = stash[VECTOR_KEY]  # type: ignore[assignment]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        info.index = 1  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        VectorInfo("s")  # type: ignore[call-arg]

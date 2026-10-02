@@ -1,12 +1,21 @@
 """
-The rows of a strategy: tuples whose fields are the strategy's argument names.
+The rows of a strategy: tuples whose fields are the strategy's argument names, and
+the metadata of each row's test (``VectorInfo``, stored under ``VECTOR_KEY``).
 """
 
 from __future__ import annotations
 
 import collections
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, Self, cast
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn, Self, cast
+
+import pytest
+
+from ._encode import encode
+
+# The kinds of rows a strategy generates
+RowKind = Literal["directed", "test", "random", "exhaustive", "skipped"]
 
 
 class Vector(tuple[Any, ...]):
@@ -101,3 +110,87 @@ def vector_type(names: Iterable[str]) -> type[Vector]:
 def _rebuild(names: tuple[str, ...], values: tuple[Any, ...]) -> Vector:
     """Rebuild a pickled Vector (see ``Vector.__reduce__``)."""
     return vector_type(names)._make(values)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class VectorInfo:
+    """
+    The strategy row a test item runs: ``item.stash[VECTOR_KEY]``.
+
+    The plugin fills it for every row of a strategy while the tests are collected,
+    before any ``pytest_collection_modifyitems`` hook runs, so hooks, fixtures and
+    reports can read it. An item without a strategy, and the item pytest makes for
+    an empty parameter set, have none: ``item.stash.get(VECTOR_KEY, None)`` is None.
+    A test with several ``@strategy`` decorators has one per strategy, in
+    ``item.stash[VECTORS_KEY]``, in the order of the node ID.
+
+    It is frozen and read, not built: later releases may add fields, always
+    keyword-only and with defaults.
+
+    Attributes:
+        strategy: The strategy's resolved name, as in the ``-v`` summary
+        origin: Where the factory is defined, as ``"tests/dma/strategies.py:12"``
+            (relative to the rootdir, in posix form), or None when unknown
+        kind: "directed", "test", "random", "exhaustive", or "skipped" for the one
+            row of a strategy whose skip_if_empty sequence has no values
+        name: The directed or test vector's name, else None
+        index: The vector's position in ``directed_vectors`` (the number
+            ``--vector-index`` takes) or ``test_vectors``; the row's number within
+            its combination for a random row; the row's position in the product of
+            the enumerated arguments' sequences, in declaration order, for an
+            exhaustive row; None for "skipped"
+        enumerated: The arguments the row enumerates (Series arguments, and with
+            ``--nsamples=auto`` or ``per_sequence_samples=True`` RNGSequence
+            arguments), in declaration order: in the names format, the arguments
+            whose values are in the ID
+        values: The row, by argument name (Nones for "skipped"); a record-mode
+            test receives a record built from it
+        id: This strategy's part of the test ID, before pytest escapes it
+        seed: The run's seed (``--rng-seed``)
+        context: The fingerprint of the context the factory received, or None
+        constraints_off: The constraints turned off in this strategy, in order
+        streams: The version of the random streams the values come from
+    """
+
+    strategy: str
+    origin: str | None
+    kind: RowKind
+    name: str | None
+    index: int | None
+    enumerated: tuple[str, ...]
+    values: Vector
+    id: str
+    seed: int
+    context: str | None
+    constraints_off: tuple[str, ...]
+    streams: int = 1
+
+    def to_dict(self) -> dict[str, Any]:
+        """
+        Return the row as a JSON-ready dict with ``"schema": 1``, its values by
+        argument name in the schema's value encoding (``{"$float": "nan"}``,
+        ``{"$enum": "Color", "member": "RED"}``, ``{"$repr": ..., "$type": ...}``).
+        """
+        return {
+            "schema": 1,
+            "strategy": self.strategy,
+            "origin": self.origin,
+            "kind": self.kind,
+            "name": self.name,
+            "index": self.index,
+            "enumerated": list(self.enumerated),
+            "values": {
+                name: encode(value)
+                for name, value in zip(type(self.values)._fields, self.values, strict=True)
+            },
+            "id": self.id,
+            "seed": self.seed,
+            "context": self.context,
+            "constraints_off": list(self.constraints_off),
+            "streams": self.streams,
+        }
+
+
+# The VectorInfo of an item's first strategy in the node ID, and of each of them
+VECTOR_KEY = pytest.StashKey[VectorInfo]()
+VECTORS_KEY = pytest.StashKey[tuple[VectorInfo, ...]]()

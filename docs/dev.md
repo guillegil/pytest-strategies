@@ -89,14 +89,16 @@ src/pytest_strategy/
 ├── _cli.py              # pytest-strategies skill install
 ├── strategy.py          # 2.x compatibility module (Strategy, PytestStrategiesWarning)
 ├── parameters.py        # Parameter class (vector container)
-├── _vector.py           # Vector, the class of the generated rows (a namedtuple per argument names)
+├── _vector.py           # Vector, the class of the generated rows (a namedtuple per argument names),
+│                        # and VectorInfo, each row's metadata in item.stash[VECTOR_KEY]
 ├── test_args.py         # TestArg class (single argument definition)
 ├── rng.py               # Random number generation and RNG types
 ├── hookspecs.py         # Hooks the plugin adds (pytest_strategies_context)
 ├── skill/               # The agent skill that pytest-strategies skill install copies
 ├── py.typed             # PEP 561 marker: type checkers use the package's annotations
 └── _*.py                # Other internal helpers (introspection, test IDs, record mode,
-                         # StrategyOptions, factory calls, runtime state, warning categories)
+                         # StrategyOptions, factory calls, runtime state, warning categories,
+                         # the value encoding of schema 1 documents)
 ```
 
 ## Core Components
@@ -606,8 +608,8 @@ strategies of its tests may not have been resolved). It is not checked under
   items when given
 - `pytest_terminal_summary` - After a failed run, prints
   `pytest-strategies: reproduce with --rng-seed=S`; with `-v`, a Strategy
-  Summary (tests and directed, random and test rows per strategy, and where
-  `nsamples` came from)
+  Summary (tests and the rows of each kind per strategy, and where `nsamples`
+  came from)
 
 **Strategy files:** a strategy file is named `strategies.py`, `strategy.py`,
 `*_strategies.py` or `*_strategy.py` and contains a registration decorator

@@ -24,6 +24,7 @@ from typing import Any, Literal, NamedTuple, cast
 
 import pytest
 
+from ._vector import RowKind as _RowKind
 from ._vector import Vector
 from ._vector import vector_type as _vector_type
 from ._warnings import PytestStrategiesWarning
@@ -443,10 +444,6 @@ def _equal_position(declared: Sequence[Any], value: object, taken: set[int]) -> 
             # A comparison that raises (or gives an ambiguous truth value) is no match
             continue
     return None
-
-
-# The kinds of rows
-_RowKind = Literal["directed", "test", "random", "exhaustive", "skipped"]
 
 
 def _describe_row(kind: str, index: int | None, labels: tuple[str, ...] = ()) -> str:

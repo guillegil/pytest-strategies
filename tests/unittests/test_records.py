@@ -772,7 +772,7 @@ class TestResolver:
         def test_fn(p: Sum):
             pass
 
-        argnames, values, ids, _ = _build(test_fn, ids="values")
+        argnames, values, ids, *_ = _build(test_fn, ids="values")
         assert argnames == "p" and ids == ["x=1,y=2"]
         assert not hasattr(values[0], "total")
 
@@ -780,7 +780,7 @@ class TestResolver:
         def test_fn(p: Sum):
             pass
 
-        argnames, values, ids, _ = _build(test_fn)
+        argnames, values, ids, *_ = _build(test_fn)
         assert argnames == "p" and ids == ["rand-0"]
         assert not hasattr(values[0], "total")
 
