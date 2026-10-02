@@ -301,11 +301,13 @@ To reproduce a failure:
   ```
 
 - **Dataclass mode.** A test can take the row as one dataclass instead of one
-  parameter per argument: `def test_p(point: Point)`. It applies only when the
-  strategy has two or more arguments, none of them is a test parameter, and exactly
-  one parameter is annotated with a dataclass whose `__init__` fields are exactly
-  the argument names. Mismatched fields fail collection with the missing and extra
-  names. With string annotations, define the dataclass at module level.
+  parameter per argument: `def test_p(point: Point)`. It applies when neither the
+  test nor any fixture it uses asks for an argument name, and exactly one
+  parameter is annotated with a dataclass whose `__init__` fields are exactly the
+  argument names. A fixture that takes the arguments and builds the object keeps
+  the strategy in named mode. Mismatched fields fail collection with the missing
+  and extra names; NamedTuple, TypedDict and pydantic models fail with "not
+  supported yet". With string annotations, define the dataclass at module level.
 - **Shadowing.** A subfolder that registers a name hides the parent's strategy of
   that name for its tests. Pass the factory itself when a test needs a specific one.
 - **Over-constrained strategies** fail with "Could not generate valid vector"

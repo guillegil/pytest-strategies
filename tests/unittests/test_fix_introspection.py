@@ -11,13 +11,9 @@ from dataclasses import KW_ONLY, dataclass, field
 
 import pytest
 
-from pytest_strategy._dataclass import convert_to_dataclass
 from pytest_strategy._ids import generate_dataclass_ids, generate_test_ids
-from pytest_strategy._introspection import (
-    detect_dataclass_mode,
-    detect_dataclass_param,
-    validate_signature,
-)
+from pytest_strategy._introspection import detect_dataclass_mode, validate_signature
+from pytest_strategy._records import convert_to_dataclass, detect_record_param
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -76,8 +72,14 @@ class Pipeline:
 
 
 # ---------------------------------------------------------------------------
-# detect_dataclass_param / detect_dataclass_mode
+# detect_record_param / detect_dataclass_mode
 # ---------------------------------------------------------------------------
+
+
+def _record(test_fn, argnames):
+    """The (parameter, record type) of record mode, or None in named mode."""
+    record = detect_record_param(test_fn, argnames, None)
+    return None if record is None else (record.name, record.record_type)
 
 
 class TestDetectDataclassParam:
@@ -86,19 +88,19 @@ class TestDetectDataclassParam:
             def test_point(self, p: Point):
                 pass
 
-        assert detect_dataclass_param(TestPoints.test_point, ["x", "y"]) == (True, Point, "p")
+        assert _record(TestPoints.test_point, ["x", "y"]) == ("p", Point)
 
     def test_classmethod_style_cls_is_ignored(self):
         def test_point(cls, p: Point):
             pass
 
-        assert detect_dataclass_param(test_point, ["x", "y"]) == (True, Point, "p")
+        assert _record(test_point, ["x", "y"]) == ("p", Point)
 
     def test_custom_fixture_after_dataclass_param(self):
         def test_fn(p: Point, db):
             pass
 
-        assert detect_dataclass_param(test_fn, ["x", "y"]) == (True, Point, "p")
+        assert _record(test_fn, ["x", "y"]) == ("p", Point)
 
     def test_custom_fixture_before_dataclass_param(self):
         """The dataclass parameter is chosen by annotation, not by position."""
@@ -106,7 +108,7 @@ class TestDetectDataclassParam:
         def test_fn(db, p: Point):
             pass
 
-        assert detect_dataclass_param(test_fn, ["x", "y"]) == (True, Point, "p")
+        assert _record(test_fn, ["x", "y"]) == ("p", Point)
 
     def test_dataclass_typed_fixture_is_left_alone(self):
         """Only the dataclass whose init fields equal the argnames is parametrized."""
@@ -114,13 +116,13 @@ class TestDetectDataclassParam:
         def test_fn(cfg: Config, p: Point):
             pass
 
-        assert detect_dataclass_param(test_fn, ["x", "y"]) == (True, Point, "p")
+        assert _record(test_fn, ["x", "y"]) == ("p", Point)
 
     def test_string_annotation_is_resolved(self):
         def test_fn(p: "Point"):
             pass
 
-        assert detect_dataclass_param(test_fn, ["x", "y"]) == (True, Point, "p")
+        assert _record(test_fn, ["x", "y"]) == ("p", Point)
 
     def test_unresolvable_fixture_annotation_does_not_disable_detection(self):
         """get_type_hints fails on the fixture; the dataclass is still resolved."""
@@ -128,25 +130,29 @@ class TestDetectDataclassParam:
         def test_fn(p: "Point", db: "NotImportedAtRuntime"):  # noqa: F821
             pass
 
-        assert detect_dataclass_param(test_fn, ["x", "y"]) == (True, Point, "p")
+        assert _record(test_fn, ["x", "y"]) == ("p", Point)
 
     def test_init_false_field_excluded_from_matching(self):
         def test_fn(cfg: Config, c: Computed):
             pass
 
-        assert detect_dataclass_param(test_fn, ["x", "y"]) == (True, Computed, "c")
+        assert _record(test_fn, ["x", "y"]) == ("c", Computed)
 
     def test_argname_in_signature_is_named_mode(self):
         def test_fn(x, p: Point):
             pass
 
-        assert detect_dataclass_param(test_fn, ["x", "y"]) == (False, None, None)
+        assert _record(test_fn, ["x", "y"]) is None
 
     def test_two_matching_dataclass_params_is_ambiguous(self):
+        """3.0 fell back to named mode; 4.0 names both parameters."""
+
         def test_fn(p: Point, q: Point):
             pass
 
-        assert detect_dataclass_param(test_fn, ["x", "y"]) == (False, None, None)
+        with pytest.raises(ValueError, match="parameters 'p' \\(Point\\) and 'q' \\(Point\\)"):
+            detect_record_param(test_fn, ["x", "y"], None)
+        assert detect_dataclass_mode(test_fn, ["x", "y"]) == (False, None)
 
     def test_detect_dataclass_mode_keeps_two_tuple(self):
         def test_fn(db, p: Point):

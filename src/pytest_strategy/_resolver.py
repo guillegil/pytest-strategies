@@ -3,7 +3,7 @@
 This is the orchestration the plugin runs for each test marked with
 ``@strategy`` (from ``pytest_generate_tests``): read CLI options, call the
 factory, generate vectors, and build the arguments of ``pytest.mark.parametrize``
-for either dataclass or named-parameter mode.
+for either record (dataclass) or named-parameter mode.
 """
 
 from __future__ import annotations
@@ -12,17 +12,17 @@ import contextlib
 import inspect
 import os
 import warnings
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
 from pathlib import Path
 from typing import Any, NamedTuple, cast
 
 import pytest
 
-from ._dataclass import convert_to_dataclass
 from ._factory import FactoryInputs, call_factory
 from ._ids import generate_dataclass_ids, generate_test_ids, make_unique_ids
-from ._introspection import detect_dataclass_param, validate_signature
+from ._introspection import validate_signature
 from ._options import constraint_off_item
+from ._records import convert_to_dataclass, detect_record_param, record_hints
 from ._registry import _describe_factory, display_path, factory_source
 from ._runtime import Resolution, runtime
 from ._warnings import PytestStrategiesWarning
@@ -249,6 +249,7 @@ def build_parametrization(
     config: pytest.Config | None,
     pytest_fixtures: set[str],
     validate: bool = True,
+    fixturenames: Collection[str] | None = None,
 ) -> Parametrization:
     """
     Call a strategy's factory and build the parametrization of a test.
@@ -261,6 +262,8 @@ def build_parametrization(
         config: The session's config (CLI options), or None
         pytest_fixtures: Fixture names the signature check ignores
         validate: Check that the test takes the strategy's arguments
+        fixturenames: The names the test and its fixtures ask for
+            (``metafunc.fixturenames``), or None to read only the test's parameters
 
     Raises:
         ValueError: With a message naming the strategy when the factory, the
@@ -414,16 +417,23 @@ def build_parametrization(
 
     runtime.record_resolution(resolution)
 
-    # Detect dataclass mode. Without signature validation, parameters other than the
-    # dataclass one may be fixtures consuming the argnames, so the dataclass
-    # parameter must then be the test's only one.
-    is_dc_mode, dc_type, dc_param = detect_dataclass_param(
-        test_fn, argnames, pytest_fixtures=pytest_fixtures, allow_fixtures=validate
-    )
+    # Record mode: the test receives the row as one record when neither the test nor
+    # any fixture it uses asks for an argument by name, and exactly one parameter is
+    # annotated with a record type whose fields are the arguments. validate_signature
+    # does not change the choice.
+    try:
+        record = detect_record_param(
+            test_fn, argnames, fixturenames, pytest_fixtures=pytest_fixtures
+        )
+    except ValueError as e:
+        raise ValueError(f"Strategy '{name}': {e}") from None
 
-    if is_dc_mode:
-        # DATACLASS MODE: Convert samples to dataclass instances
-        assert dc_type is not None and dc_param is not None  # guaranteed when is_dc_mode is True
+    if record is not None:
+        # RECORD MODE: Convert samples to dataclass instances. A fixture that asks for
+        # an argument by name would get nothing, since only the record parameter is
+        # parametrized: the rule's first condition rules that out.
+        assert fixturenames is None or not set(argnames) & set(fixturenames)
+        dc_type, dc_param = record.record_type, record.name
         if skip_reason is not None:
             # No values to build an instance from, but the dataclass must still match
             # the strategy, as the signature check does in named mode
@@ -462,12 +472,28 @@ def build_parametrization(
     else:
         # NAMED PARAMETERS MODE: Standard behavior
 
-        # Validate signature if requested
+        # Validate signature if requested. An argument that a fixture of the test asks
+        # for is taken by that fixture.
         if validate:
             try:
-                validate_signature(test_fn, argnames, name, pytest_fixtures=pytest_fixtures)
+                validate_signature(
+                    test_fn,
+                    argnames,
+                    name,
+                    pytest_fixtures=pytest_fixtures,
+                    fixturenames=fixturenames,
+                )
             except ValueError as e:
-                raise ValueError(f"Signature validation failed for strategy '{name}': {e}") from e
+                # Say why no parameter receives the row as a record, if one could
+                hints = "".join(
+                    f"  {hint}\n"
+                    for hint in record_hints(
+                        test_fn, argnames, fixturenames, pytest_fixtures=pytest_fixtures
+                    )
+                )
+                raise ValueError(
+                    f"Signature validation failed for strategy '{name}': {e}{hints}"
+                ) from e
 
         # Create comma-separated string of parameter names for pytest.mark.parametrize
         argstr = ",".join(argnames)
@@ -528,6 +554,7 @@ def resolve_and_parametrize(
     config: pytest.Config | None,
     pytest_fixtures: set[str],
     validate: bool = True,
+    fixturenames: Collection[str] | None = None,
 ) -> Callable[..., Any]:
     """Build the parametrization for a registered strategy and apply it to ``test_fn``."""
     parametrization = build_parametrization(
@@ -537,6 +564,7 @@ def resolve_and_parametrize(
         config=config,
         pytest_fixtures=pytest_fixtures,
         validate=validate,
+        fixturenames=fixturenames,
     )
     mark = pytest.mark.parametrize(
         parametrization.argnames, parametrization.values, ids=parametrization.ids

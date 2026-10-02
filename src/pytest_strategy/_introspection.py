@@ -1,14 +1,12 @@
 """
-Signature introspection and dataclass detection utilities.
+Signature introspection utilities. Record mode's detection is in ``_records``.
 
-Pure functions — no pytest runtime dependency beyond inspect/dataclasses.
+Pure functions — no pytest runtime dependency beyond inspect.
 """
 
 import inspect
 import sys
-import typing
-from collections.abc import Callable, Sequence
-from dataclasses import fields, is_dataclass
+from collections.abc import Callable, Collection, Sequence
 from typing import Any
 
 # Common pytest fixtures to exclude from signature validation.
@@ -58,6 +56,7 @@ def validate_signature(
     argnames: Sequence[str],
     strategy_name: str,
     pytest_fixtures: "frozenset[str] | set[str]" = PYTEST_FIXTURES,  # noqa: ARG001
+    fixturenames: Collection[str] | None = None,
 ) -> None:
     """
     Validate that a test function's signature matches the strategy argnames.
@@ -65,7 +64,9 @@ def validate_signature(
     Parameters whose name does not appear in *argnames* are excluded from
     validation (built-in or custom fixtures). A parameter named in *argnames*
     is always a strategy parameter, even when it shares its name with a
-    built-in fixture: pytest's parametrize overrides that fixture.
+    built-in fixture: pytest's parametrize overrides that fixture. An argname
+    that a fixture of the test asks for (it is in *fixturenames* but not a
+    parameter) is taken too: that fixture receives it.
 
     Args:
         test_fn: The test function to inspect.
@@ -73,6 +74,8 @@ def validate_signature(
         strategy_name: Name of the strategy (used in error messages).
         pytest_fixtures: Built-in fixture names. Kept for backward
             compatibility; every name outside *argnames* is ignored anyway.
+        fixturenames: The names the test asks for, through its fixtures too
+            (``metafunc.fixturenames``), or None to read only its parameters.
 
     Raises:
         ValueError: When the test-function signature does not match *argnames*.
@@ -87,92 +90,28 @@ def validate_signature(
         actual_params.append(p)
 
     expected_params = list(argnames)
+    asked = [
+        name
+        for name in expected_params
+        if fixturenames is not None and name in fixturenames and name not in actual_params
+    ]
 
-    if set(expected_params) != set(actual_params):
-        missing = set(expected_params) - set(actual_params)
+    if set(expected_params) != set(actual_params) | set(asked):
+        missing = [p for p in expected_params if p not in actual_params and p not in asked]
         extra = set(actual_params) - set(expected_params)
 
         error_msg = f"Test function signature mismatch for strategy '{strategy_name}'!\n"
         error_msg += f"  Strategy provides: {expected_params}\n"
         error_msg += f"  Test function expects: {actual_params}\n"
+        if asked:
+            error_msg += f"  Fixtures of the test ask for: {asked}\n"
 
         if missing:
-            error_msg += f"  Missing parameters: {list(missing)}\n"
+            error_msg += f"  Missing parameters: {missing}\n"
         if extra:
             error_msg += f"  Extra parameters: {list(extra)}\n"
 
         raise ValueError(error_msg)
-
-
-def detect_dataclass_param(
-    test_fn: Callable[..., Any],
-    argnames: Sequence[str],
-    pytest_fixtures: "frozenset[str] | set[str]" = PYTEST_FIXTURES,
-    allow_fixtures: bool = True,
-) -> tuple[bool, type | None, str | None]:
-    """
-    Detect dataclass mode and the test parameter that receives the dataclass.
-
-    The test is in dataclass mode when the strategy provides several *argnames*,
-    none of them is itself a test parameter, and exactly one parameter is
-    annotated with a dataclass whose ``__init__`` fields equal *argnames*.
-    ``self``/``cls``, the names in *pytest_fixtures* and every other parameter
-    are fixtures and are left alone. When no annotation matches the fields
-    exactly but a single parameter is dataclass-annotated, that parameter is
-    still chosen so that the field mismatch is reported by
-    ``convert_to_dataclass``.
-
-    With ``allow_fixtures=False`` (used when signature validation is off), the
-    dataclass parameter must be the only parameter besides ``self``/``cls`` and
-    *pytest_fixtures*. A dataclass-typed parameter next to other parameters is
-    then treated as a fixture, which may itself consume the *argnames*.
-
-    String annotations (``from __future__ import annotations`` or quoted
-    forward references) are resolved in the test module's globals, so the
-    dataclass must be defined at module level before the decorator runs.
-
-    Returns:
-        ``(True, dataclass_type, param_name)`` in dataclass mode;
-        ``(False, None, None)`` otherwise.
-    """
-    if len(argnames) < 2:
-        return False, None, None
-
-    sig = lazy_signature(test_fn)
-    if any(name in sig.parameters for name in argnames):
-        return False, None, None
-
-    try:
-        hints = typing.get_type_hints(test_fn)
-    except Exception:
-        # One unresolvable annotation (e.g. a fixture type imported under
-        # TYPE_CHECKING) must not disable dataclass mode: fall back to the raw
-        # annotations and resolve the candidates one by one below.
-        hints = {}
-
-    others = [n for n in sig.parameters if n not in ("self", "cls") and n not in pytest_fixtures]
-    if not allow_fixtures and len(others) != 1:
-        return False, None, None
-
-    candidates: list[tuple[str, type]] = []
-    for name in others:
-        param = sig.parameters[name]
-        annotation = hints.get(name, param.annotation)
-        if isinstance(annotation, str):
-            annotation = _eval_annotation(test_fn, annotation)
-        if isinstance(annotation, type) and is_dataclass(annotation):
-            candidates.append((name, annotation))
-
-    wanted = set(argnames)
-    exact = [c for c in candidates if {f.name for f in fields(c[1]) if f.init} == wanted]
-    if len(exact) == 1:
-        param_name, dc_type = exact[0]
-    elif not exact and len(candidates) == 1:
-        param_name, dc_type = candidates[0]
-    else:
-        return False, None, None
-
-    return True, dc_type, param_name
 
 
 def detect_dataclass_mode(
@@ -183,20 +122,20 @@ def detect_dataclass_mode(
     """
     Detect whether a test function expects a single dataclass parameter.
 
-    Backward-compatible wrapper around :func:`detect_dataclass_param` that
-    omits the parameter name.
+    Backward-compatible wrapper around ``_records.detect_record_param``, reading
+    only the test's own parameters. It never raises: two matching parameters, or a
+    record type that is not a dataclass, give ``(False, None)``.
 
     Returns:
         ``(True, dataclass_type)`` in dataclass mode; ``(False, None)`` otherwise.
     """
-    is_dc_mode, dc_type, _ = detect_dataclass_param(test_fn, argnames, pytest_fixtures)
-    return is_dc_mode, dc_type
+    # _records imports this module
+    from ._records import detect_record_param
 
-
-def _eval_annotation(test_fn: Callable[..., Any], annotation: str) -> Any:
-    """Evaluate a string annotation in *test_fn*'s module globals (``None`` on failure)."""
-    module_globals = getattr(inspect.unwrap(test_fn), "__globals__", {})
     try:
-        return eval(annotation, module_globals)
-    except Exception:
-        return None
+        record = detect_record_param(test_fn, argnames, None, pytest_fixtures=pytest_fixtures)
+    except ValueError:
+        return False, None
+    if record is None:
+        return False, None
+    return True, record.record_type

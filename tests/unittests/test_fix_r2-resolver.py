@@ -26,10 +26,9 @@ import pytest
 
 import pytest_strategy
 from pytest_strategy import RNG, RNGInteger, Strategy, StrategyOptions, _resolver
-from pytest_strategy._dataclass import convert_to_dataclass
 from pytest_strategy._factory import FactoryInputs, call_factory
 from pytest_strategy._ids import generate_dataclass_ids, generate_test_ids
-from pytest_strategy._introspection import detect_dataclass_param
+from pytest_strategy._records import convert_to_dataclass, detect_record_param
 from pytest_strategy._resolver import resolve_and_parametrize
 from pytest_strategy.parameters import Parameter
 from pytest_strategy.rng import Series
@@ -77,7 +76,7 @@ def _make_test_fn(argnames):
     return _fn
 
 
-def _parametrize(factory, test_fn, *, validate=True, config=None):
+def _parametrize(factory, test_fn, *, validate=True, config=None, fixturenames=None):
     """Resolve ``factory`` for ``test_fn``; return the mark's (argnames, values, ids)."""
     marked = resolve_and_parametrize(
         "strat",
@@ -86,6 +85,7 @@ def _parametrize(factory, test_fn, *, validate=True, config=None):
         config=config if config is not None else _make_config(),
         pytest_fixtures=set(),
         validate=validate,
+        fixturenames=fixturenames,
     )
     mark = marked.pytestmark[-1]
     return mark.args[0], list(mark.args[1]), mark.kwargs["ids"]
@@ -437,7 +437,7 @@ class TestDuplicateRegistrationPaths:
 
 
 # ---------------------------------------------------------------------------
-# Dataclass detection without signature validation
+# A dataclass-typed fixture that consumes the argnames
 # ---------------------------------------------------------------------------
 
 
@@ -460,66 +460,68 @@ class Point:
     y: int
 
 
+def _record(test_fn, argnames, fixturenames=None):
+    """The (parameter, record type) of record mode, or None in named mode."""
+    record = detect_record_param(test_fn, argnames, fixturenames)
+    return None if record is None else (record.name, record.record_type)
+
+
 def _one_server(nsamples):
     """A strategy with the single row host="localhost", port=8000."""
     return Parameter(TestArg("host", value="localhost"), TestArg("port", value=8000), nsamples=1)
 
 
+# The test's fixture names when its server fixture asks for host and port
+SERVER_FIXTURES = ["server", "client", "host", "port"]
+
+
 class TestDataclassTypedFixture:
-    """With allow_fixtures=False, a dataclass parameter next to others is a fixture."""
+    """
+    A fixture that asks for the argnames takes them: the test is then in named mode,
+    whatever its annotations. validate_signature no longer changes the choice (3.0
+    left a dataclass parameter next to others alone only with validation off).
+    """
 
     def test_exact_match_next_to_fixture_is_left_alone(self):
         def test_fn(server: Server, client):
             pass
 
-        assert detect_dataclass_param(test_fn, ["host", "port"], allow_fixtures=False) == (
-            False,
-            None,
-            None,
-        )
+        assert _record(test_fn, ["host", "port"], SERVER_FIXTURES) is None
 
     def test_field_mismatch_next_to_fixture_is_left_alone(self):
         def test_fn(server: StartedServer, client):
             pass
 
-        assert detect_dataclass_param(test_fn, ["host", "port"], allow_fixtures=False) == (
-            False,
-            None,
-            None,
-        )
+        assert _record(test_fn, ["host", "port"], SERVER_FIXTURES) is None
 
     def test_default_still_allows_fixtures(self):
         def test_fn(server: Server, client):
             pass
 
-        assert detect_dataclass_param(test_fn, ["host", "port"]) == (True, Server, "server")
+        assert _record(test_fn, ["host", "port"]) == ("server", Server)
+        assert _record(test_fn, ["host", "port"], ["server", "client"]) == ("server", Server)
 
     def test_only_parameter_is_still_dataclass_mode(self):
         def test_fn(p: Point):
             pass
 
-        assert detect_dataclass_param(test_fn, ["x", "y"], allow_fixtures=False) == (
-            True,
-            Point,
-            "p",
-        )
+        assert _record(test_fn, ["x", "y"], ["p"]) == ("p", Point)
 
     def test_self_and_builtin_fixtures_do_not_count(self):
         class TestPoints:
             def test_point(self, p: Point, tmp_path):
                 pass
 
-        assert detect_dataclass_param(TestPoints.test_point, ["x", "y"], allow_fixtures=False) == (
-            True,
-            Point,
-            "p",
-        )
+        assert _record(TestPoints.test_point, ["x", "y"], ["p", "tmp_path"]) == ("p", Point)
 
-    def test_resolver_parametrizes_the_argnames_without_validation(self):
+    @pytest.mark.parametrize("validate", [False, True])
+    def test_resolver_parametrizes_the_argnames_the_fixture_asks_for(self, validate):
         def test_server(server: Server, client):
             pass
 
-        argstr, samples, _ = _parametrize(_one_server, test_server, validate=False)
+        argstr, samples, _ = _parametrize(
+            _one_server, test_server, validate=validate, fixturenames=SERVER_FIXTURES
+        )
         assert argstr == "host,port"
         assert samples == [("localhost", 8000)]
 
@@ -528,6 +530,18 @@ class TestDataclassTypedFixture:
             pass
 
         argstr, samples, _ = _parametrize(_one_server, test_server)
+        assert argstr == "server"
+        assert samples == [Server("localhost", 8000)]
+
+    def test_resolver_keeps_dataclass_mode_next_to_fixture_without_validation(self):
+        """3.0 gave named mode, which pytest then rejected: the test takes no 'host'."""
+
+        def test_server(server: Server, client):
+            pass
+
+        argstr, samples, _ = _parametrize(
+            _one_server, test_server, validate=False, fixturenames=["server", "client"]
+        )
         assert argstr == "server"
         assert samples == [Server("localhost", 8000)]
 
@@ -635,13 +649,15 @@ class TestIdsOfSets:
 
 
 class TestNoneDefaultDataclassParam:
-    """``p: DC = None`` is detected whether or not get_type_hints adds Optional."""
+    """``p: DC = None`` has a default, so pytest does not fill it."""
 
-    def test_none_default(self):
+    def test_none_default_is_not_record_mode(self):
+        """3.0 chose it, and pytest then refused to parametrize an argument with a default."""
+
         def test_fn(p: Point = None):
             pass
 
-        assert detect_dataclass_param(test_fn, ["x", "y"]) == (True, Point, "p")
+        assert _record(test_fn, ["x", "y"]) is None
 
     def test_explicit_optional_is_not_dataclass_mode(self):
         """An Optional written by the user is kept."""
@@ -649,7 +665,7 @@ class TestNoneDefaultDataclassParam:
         def test_fn(p: Optional[Point] = None):  # noqa: UP045
             pass
 
-        assert detect_dataclass_param(test_fn, ["x", "y"]) == (False, None, None)
+        assert _record(test_fn, ["x", "y"]) is None
 
 
 # ---------------------------------------------------------------------------

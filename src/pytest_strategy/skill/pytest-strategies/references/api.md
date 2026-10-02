@@ -438,18 +438,29 @@ def test_scaled(point: Point, scale):   # scale is a fixture
     ...
 ```
 
-Used when all of these hold:
+A test receives the row as one record when (1) neither the test nor any fixture it
+uses asks for one of the strategy's argument names, and (2) exactly one test
+parameter is annotated with a record type whose fields are exactly those names.
+Otherwise the strategy passes its arguments by name, one test parameter each.
 
-- the strategy has at least two arguments;
-- none of the argument names is a parameter of the test;
-- exactly one test parameter is annotated with a dataclass whose `__init__` fields are
-  the argument names.
+- "Asks for" covers the test's parameters, `usefixtures`, autouse fixtures and what
+  they ask for in turn. A fixture that takes `x` and `y` receives them;
+  `validate_signature` does not change the choice, and the named-mode check counts
+  the names a fixture asks for.
+- A test parameter is one that pytest fills: no default, not `*args`/`**kwargs`,
+  not `self`, `cls` or a built-in fixture.
+- Record types: dataclasses (pydantic dataclasses too), after stripping
+  `Annotated[...]` and generic arguments. Fields with `init=False` are not counted
+  and not shown in IDs, `kw_only` fields work, and one-argument strategies work.
+- NamedTuple, TypedDict and pydantic models are recognized (fields: `_fields`, the
+  required and optional keys, the `model_fields` names) and fail with "not
+  supported yet". Unions, pydantic v1 models, attrs classes and unresolvable
+  annotations are not record types.
+- Two matching parameters fail and are both named. A single record parameter whose
+  fields do not match fails with the missing and extra names.
 
-Fields with `init=False` are not counted, `kw_only` fields work, and `self`, `cls` and
-fixtures can be anywhere in the signature. String annotations
-(`from __future__ import annotations`) work if the dataclass is defined at module
-level. A dataclass whose fields do not match fails collection with the missing and
-extra names. IDs look like `x=1,y=2`.
+String annotations (`from __future__ import annotations`) work if the dataclass is
+defined at module level. IDs look like `x=1,y=2`.
 
 ## 14. Reproducibility and pytest-xdist
 
@@ -480,7 +491,9 @@ extra names. IDs look like `x=1,y=2`.
 | `Series combination (...) skipped` warning | One combination's random arguments failed the constraints `max_retries` times. Raise `max_retries` or relax the constraint. |
 | `... would generate N rows ..., more than the limit of ...` | Too many exhaustive combinations. Reduce them or raise `max_exhaustive` / `strategies_max_exhaustive`. |
 | `Directed vector 'x' has N values, expected M` | A directed or test vector does not have one value per argument. |
-| signature mismatch at collection | The test does not take every argument name (and dataclass mode does not apply). Add the parameters or a matching dataclass. |
+| signature mismatch at collection | The test does not take every argument name (and dataclass mode does not apply). Add the parameters or a matching dataclass. Lines below it say when a fixture asks for an argument, or a parameter's annotation is unresolvable, a union or has a default. |
+| `parameters 'p' (Point) and 'q' (Other) are each annotated with a record type ...` | Two parameters match the arguments. Annotate only one with a record type. |
+| `parameter 'txn' is annotated with BusTxn, a pydantic model; ... not supported yet` | Only dataclasses are built in 4.0. Take the arguments as parameters or use a dataclass. |
 | `got empty parameter set` skip | `--vector-name`/`--vector-index` selected a vector this strategy lacks, or `--vector-mode=directed_only`/`test` ran a strategy with no directed/test vectors. |
 | `RNGValueError` when building a type | Bad RNG arguments (section 6). |
 | `Strategy factory 'x' (...) has a parameter 'n', which the plugin does not provide` | Factories receive `nsamples`, `ctx`, `rng` and `options` by name. Rename the parameter, or give it a default. |

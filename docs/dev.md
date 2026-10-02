@@ -95,7 +95,7 @@ src/pytest_strategy/
 ├── hookspecs.py         # Hooks the plugin adds (pytest_strategies_context)
 ├── skill/               # The agent skill that pytest-strategies skill install copies
 ├── py.typed             # PEP 561 marker: type checkers use the package's annotations
-└── _*.py                # Other internal helpers (introspection, test IDs, dataclasses,
+└── _*.py                # Other internal helpers (introspection, test IDs, record mode,
                          # StrategyOptions, factory calls, runtime state, warning categories)
 ```
 
@@ -495,7 +495,15 @@ value to a name that 4.0 accepted.
 
 A test parameter that is not one of the strategy's argument names is left to
 pytest as a fixture. A test can also take the vector as one dataclass instance:
-see "Dataclass Parameters" in the README.
+see "Dataclass Parameters" in the README. `_records.py` holds that rule:
+`detect_record_param(test_fn, argnames, fixturenames)` reads
+`metafunc.fixturenames`, so an argument that the test or any of its fixtures asks
+for keeps the strategy in named mode, and the named-mode signature check counts
+those names as taken. It recognizes dataclasses, NamedTuple, TypedDict and
+pydantic v2 models (through `sys.modules`, never importing pydantic) with fixed
+field sets, and builds only dataclasses. The resolver asserts that no argument
+name is in `fixturenames` in record mode: only the record parameter is
+parametrized, so a fixture asking for an argument would find nothing.
 
 **Key Features:**
 - Folder-scoped strategy names

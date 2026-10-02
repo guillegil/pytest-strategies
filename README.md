@@ -397,12 +397,14 @@ class TestPoints:
         assert 0 <= point.x * scale <= 20
 ```
 
-Dataclass mode is used when all of these are true:
-- the strategy has at least two arguments;
-- none of the arguments is a parameter of the test;
-- exactly one test parameter is annotated with a dataclass whose `__init__` fields are the strategy's argument names.
+A test receives the row as one record when (1) neither the test nor any fixture it uses asks for one of the strategy's argument names, and (2) exactly one test parameter is annotated with a record type whose fields are exactly those names. Otherwise the strategy passes its arguments by name, one test parameter each.
 
-Fields with `init=False` are not counted, and `kw_only` fields work. The other parameters (`self`, `cls`, fixtures) are left alone, in any position. String annotations (`from __future__ import annotations` or quoted names) work too, as long as the dataclass is defined at module level. If a single parameter has a dataclass annotation but its fields do not match, collection fails with a message that lists the missing and extra fields.
+- "Asks for" covers the test's parameters, `usefixtures`, autouse fixtures and what those fixtures ask for in turn. So a fixture that takes `x` and `y` and builds the object itself receives the arguments, with or without `validate_signature`, which does not change the choice.
+- A test parameter is one that pytest fills: no default, not `*args` or `**kwargs`, and not `self`, `cls` or a built-in fixture. The other parameters are left alone, in any position.
+- The record types are dataclasses, pydantic dataclasses included, once `Annotated[...]` and generic arguments are stripped (`Pair[int]` is `Pair`). Their fields are the `init=True` fields: fields with `init=False` are not counted (nor shown in test IDs), and `kw_only` fields work. A strategy with one argument can use a record too.
+- NamedTuple, TypedDict and pydantic models are recognized but not supported yet: a test whose record would be one fails collection with "not supported yet". Their fields are `_fields`, the required and optional keys, and the `model_fields` names (not aliases).
+- `Optional[...]` and other unions, pydantic v1 models, attrs classes and annotations that cannot be resolved are not record types. String annotations (`from __future__ import annotations` or quoted names) work, as long as the class is defined at module level.
+- Two parameters that both match fail collection, naming both. If a single parameter has a record type but its fields do not match, collection fails with a message that lists the missing and extra fields.
 
 ### 10. Strategy Files and Scoped Names
 

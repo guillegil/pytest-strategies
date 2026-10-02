@@ -132,6 +132,9 @@ def generate_dataclass_ids(
     """
     Generate test IDs for dataclass-mode parametrization.
 
+    The IDs list the ``init=True`` fields, the strategy's arguments, in
+    declaration order: an ``init=False`` field may not even be set.
+
     Args:
         dataclass_samples: List of dataclass instances.
         dc_type: The dataclass type (used to enumerate fields in order).
@@ -141,9 +144,10 @@ def generate_dataclass_ids(
         List of test ID strings, one per dataclass instance.
     """
     ids: list[str] = []
+    init_fields = [f for f in fields(dc_type) if f.init]
     for dc_instance in dataclass_samples:
         field_strs = []
-        for f in fields(dc_type):
+        for f in init_fields:
             val = getattr(dc_instance, f.name)
             val_str = _value_repr(val)
             if len(val_str) > 20:

@@ -46,6 +46,9 @@ dev = [
     "ruff>=0.13",
     "mypy>=2.0",
     "pre-commit>=4.0",
+    # Record mode's tests use real pydantic models and attrs classes
+    "pydantic>=2",
+    "attrs",
 ]
 
 [project.urls]

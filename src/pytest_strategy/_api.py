@@ -66,13 +66,15 @@ def strategy(name: str | Factory, *, validate_signature: bool = True) -> Callabl
     Args:
         name: The name a factory was registered under, or the factory itself
             (registered or not)
-        validate_signature: Check that the test takes the strategy's arguments
-            (keyword-only)
+        validate_signature: Check that the test, or a fixture it uses, takes the
+            strategy's arguments (keyword-only). It does not change whether the test
+            receives the row as a dataclass.
 
     The strategy is resolved when pytest collects the test, and its factory must
     return a :class:`Parameter`. The test takes the strategy's arguments by name,
-    or one parameter annotated with a dataclass whose fields are those arguments;
-    any other parameter is a fixture.
+    or, when neither the test nor a fixture it uses asks for one of them, one
+    parameter annotated with a dataclass whose fields are those arguments; any
+    other parameter is a fixture.
 
     Usage::
 
