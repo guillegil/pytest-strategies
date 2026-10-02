@@ -275,6 +275,18 @@ class TestPathPart:
 
         assert path_part(tmp_path / "link" / "s.py", tmp_path) == "real/s.py"
 
+    def test_a_rootdir_reached_through_a_link_is_resolved(self, tmp_path):
+        """A checkout reached through a linked folder keys its files as any other."""
+        (tmp_path / "real").mkdir()
+        try:
+            os.symlink(tmp_path / "real", tmp_path / "link", target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks are not available")
+
+        for base in ("link", "real"):
+            path = tmp_path / base / "tests" / "s.py"
+            assert path_part(path, tmp_path / "link") == "tests/s.py"
+
     def test_without_a_rootdir_the_real_path(self, tmp_path):
         path = tmp_path / "s.py"
 

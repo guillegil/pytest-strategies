@@ -901,29 +901,50 @@ a `StreamKey` under the run seed S (`runtime.run_seed()`, never the mutable
 | `root(S, "file", path)` | a strategy file's import |
 | `root(S, "module", path)` | a test module's import (a `pytest_make_collect_report` wrapper for a `Module`) |
 | `root(S, "ctx")` | the `pytest_strategies_context` call |
-| `root(S, "fixture", scope, name, param_index)` | a fixture's setup (a `pytest_fixture_setup` wrapper); `scope` is the node ID of the node it is set up for, `""` for the session |
+| `root(S, "fixture", scope, name, param_index, where, qualname)` | a fixture's setup (a `pytest_fixture_setup` wrapper); `scope` is the node ID of the node it is set up for, `""` for the session; `where` and `qualname` are the fixture function's file and qualified name (`plugin._fixture_definition()`) |
 | `root(S, "body", nodeid, phase)` | one phase of a test, `setup`, `call` or `teardown` (wrappers around `pytest_runtest_setup`, `_call` and `_teardown`) |
 | `root(RNG.get_seed(), "user", key)` | `RNG.refresh_seed(key=...)` |
 | `root(S, "export", name, folder)` | a factory call from `export_strategies()`; `folder` is the factory file's folder (`""` when it has none) |
 | `root(RNG.get_seed(), "direct", n)` | `generate_vectors()` and the other generators called directly |
 
-`path` and `folder` are relative to the rootdir in posix form, also outside it
-(`../shared/strategies.py`, `_streams.path_part()`), and absolute only on
-another Windows drive. Each non-row stream runs in an `rng._Stream` block: it
-saves the state of `RNG._ambient` (the plugin's generator), `RNG._generator`
-and `RNG._seed`, reseeds `RNG._ambient` in place from the key, installs it as
-`RNG._generator`, and puts all three back when the block ends, also on an
-exception. Streams nest. Reseeding in place keeps a generator taken earlier
-from `RNG.generator()` on the current stream, and installing the ambient
-generator lets a strategy file imported from inside a constraint (when
-`RNG._generator` is an argument's) draw from its file stream. An `RNG.seed()`
-call inside a stream changes only the rest of that stream, and
-`RNG.get_seed()` is S everywhere else. `_Stream` is a class with `__enter__`
-and `__exit__`, not a `contextlib.contextmanager`, so that a frozen dataclass
-exception passes through unchanged. Each stream costs about 27 µs (saving the
-state, seeding and restoring it): a run of 20,000 trivial tests takes about 20%
-longer than without these streams, and one of 10,000 tests with two fixtures
-about 35%.
+`path`, `folder` and a fixture's `where` are relative to the rootdir in posix
+form, also outside it (`../shared/strategies.py`, `_streams.path_part()`), and
+absolute only on another Windows drive. A fixture of an installed package (a
+file in a `site-packages` or `dist-packages` folder, such as a plugin's) has its
+module's name as `where` instead, which does not depend on where the package is
+installed. The fixture's definition is in its key because pytest sets up two
+fixtures of one name for the same scope node: an override that requests the
+fixture it overrides (`def x(x)`), and the session fixtures of one name in two
+sibling folders' `conftest.py` files.
+
+Each non-row stream runs in an `rng._Stream` block: in the block,
+`RNG._ambient` (the plugin's generator, an `rng._Ambient`) draws from the key's
+stream as if reseeded in place from it, and is installed as `RNG._generator`;
+when the block ends, also on an exception, the generator's state,
+`RNG._generator` and `RNG._seed` are put back. Streams nest. Reseeding in place
+keeps a generator taken earlier from `RNG.generator()` on the current stream,
+and installing the ambient generator lets a strategy file imported from inside
+a constraint (when `RNG._generator` is an argument's) draw from its file
+stream. An `RNG.seed()` call inside a stream changes only the rest of that
+stream, and `RNG.get_seed()` is S everywhere else. `_Stream` is a class with
+`__enter__` and `__exit__`, not a `contextlib.contextmanager`, so that a frozen
+dataclass exception passes through unchanged.
+
+The seeding is lazy. Entering a block records its key (or a function that
+builds it) as pending; `_Ambient` seeds itself from it at the first
+`random()` or `getrandbits()`, or when `getstate()` reads its state, and only
+then saves the state in use for the block to put back. `seed()` and
+`setstate()` replace the state, so they skip the pending seeding but still save
+that state. `random.Random` draws only through `random()` and `getrandbits()`
+(its other methods call them, and `_randbelow` stays the `getrandbits()` one),
+so the values are those of a generator seeded when the block starts; a pending
+block also clears `gauss_next`, as seeding does, and puts it back. The plugin
+passes the fixture, phase and test module streams a function that builds the
+key, so a block that draws nothing costs about 2 µs, and one that draws about
+20 µs more, mostly the seeding; each draw from the ambient generator costs
+about 0.1 µs more than from a plain `random.Random`. Most test phases and
+fixtures draw nothing: a run of 20,000 trivial tests takes about 5% longer than
+without these streams, most of it in the three hook wrappers per test.
 
 **Row streams (streams v1, `_streams.py`):** the rows draw from streams keyed
 under `T = StreamKey.root(seed, "test", strategy, nodeid)`, where `nodeid` is the
@@ -956,8 +977,10 @@ ambient generator installed, and a factory's `rng` is the ambient generator
 itself, so a constraint that calls `RNG.*` or an RNG type that draws from a
 generator kept from the factory draws from `RNG._ambient`: its values depend on
 what was drawn before (other rows, other tests of the module), not only on the
-row. `build_parametrization` compares `RNG._ambient.getstate()` before and after
-`_generate_rows()` (about 20 µs per test) and, when the state changed, emits one
+row. `build_parametrization` compares `RNG._ambient._position()` before and
+after `_generate_rows()`: the pending key while nothing has used the current
+stream (the test module's, usually), which costs nothing, or else the
+generator's state (about 20 µs per test). When it changed, it emits one
 `PytestStrategiesWarning` inside `_attributed_warnings`, so it is prefixed with
 `Strategy '<name>' (<test>): ` and points at the test. It is a warning, not an
 error, because the values still repeat for the same seed, tests and options;
@@ -1002,15 +1025,17 @@ with or without `--rng-seed` and every worker generates the same tests.
 **Test bodies and fixtures:** each phase of a test (setup, call and teardown)
 runs on its body stream and each fixture's setup on its fixture stream, so a
 test body's `RNG` draws and a fixture's are the same whether the test runs
-alone, in the suite, in another order or under xdist. A module- or
-session-scoped fixture is set up during the setup of whichever test needs it
-first; with a stream of its own, neither its draws nor that test's depend on
-which test that is. A fixture's teardown and a finalizer run in the teardown of
-the test that ends the fixture's scope, and draw from that test's teardown
-stream. The pseudo-fixtures of direct parametrization draw nothing and get no
-stream. `RNG.refresh_seed(key=request.node.nodeid)` is no longer needed in a
-test body; it still gives the stream of the seed and the key, whatever ran
-before it.
+alone, in the suite, in another order or under xdist. A fixture's stream is
+also keyed by its definition, so a fixture that overrides another of the same
+name and requests it, or two sibling folders' session fixtures of one name,
+draw different values. A module- or session-scoped fixture is set up during
+the setup of whichever test needs it first; with a stream of its own, neither
+its draws nor that test's depend on which test that is. A fixture's teardown
+and a finalizer run in the teardown of the test that ends the fixture's scope,
+and draw from that test's teardown stream. The pseudo-fixtures of direct
+parametrization draw nothing and get no stream.
+`RNG.refresh_seed(key=request.node.nodeid)` is no longer needed in a test body;
+it still gives the stream of the seed and the key, whatever ran before it.
 
 For plain `random` calls, seed the global state per test from the run's seed,
 for example in an autouse fixture:

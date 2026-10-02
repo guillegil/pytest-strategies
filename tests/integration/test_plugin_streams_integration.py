@@ -12,6 +12,7 @@ project on purpose (see test_session_isolation_integration.py for rationale).
 """
 
 import ast
+import importlib.util
 import json
 import random
 from textwrap import dedent
@@ -463,15 +464,20 @@ class TestBodyAndFixtureStreams:
         def body(test, phase="call"):
             return randint(StreamKey.root(SEED, "body", f"{BODY}::{test}", phase))
 
+        def fixture(scope, name, param_index, where):
+            # The scope node's ID, the name and the parameter index, then where the
+            # fixture is defined: its file and its function's qualified name
+            return randint(StreamKey.root(SEED, "fixture", scope, name, param_index, where, name))
+
         assert records == {
             "module": randint(StreamKey.root(SEED, "module", BODY)),
             "test_first": body("test_first"),
-            "sess": randint(StreamKey.root(SEED, "fixture", "", "sess", 0)),
-            "mod": randint(StreamKey.root(SEED, "fixture", BODY, "mod", 0)),
+            "sess": fixture("", "sess", 0, "conftest.py"),
+            "mod": fixture(BODY, "mod", 0, BODY),
             "test_uses": body("test_uses"),
             "test_reseeds": random.Random(5).randint(0, 10**9),
-            "par p": randint(StreamKey.root(SEED, "fixture", f"{BODY}::test_par[p]", "par", 0)),
-            "par q": randint(StreamKey.root(SEED, "fixture", f"{BODY}::test_par[q]", "par", 1)),
+            "par p": fixture(f"{BODY}::test_par[p]", "par", 0, BODY),
+            "par q": fixture(f"{BODY}::test_par[q]", "par", 1, BODY),
             "test_last": body("test_last"),
             # test_reseeds' RNG.seed(5) ended with its call phase
             "seed": SEED,
@@ -507,6 +513,117 @@ class TestBodyAndFixtureStreams:
         suite.pop("mod teardown")
         distributed.pop("mod teardown")
         assert distributed == suite
+
+
+# Fixtures that pytest sets up for the same scope node under one name: an override
+# that requests the fixture it overrides, and session fixtures of one name in two
+# sibling folders' conftest.py files
+
+SAME_NAME_CONFTEST = """
+    import pytest
+
+    from pytest_strategy import RNG
+    from record import record
+
+    @pytest.fixture
+    def value():
+        drawn = RNG.integer(0, 10**9)
+        record("value", drawn)
+        return drawn
+
+    @pytest.fixture(scope="module")
+    def modvalue():
+        drawn = RNG.integer(0, 10**9)
+        record("modvalue", drawn)
+        return drawn
+"""
+
+SAME_NAME_OVERRIDE = """
+    import pytest
+
+    from pytest_strategy import RNG
+    from record import record
+
+    @pytest.fixture
+    def value(value):
+        drawn = RNG.integer(0, 10**9)
+        record("value override", drawn)
+        return drawn
+
+    @pytest.fixture(scope="module")
+    def modvalue(modvalue):
+        drawn = RNG.integer(0, 10**9)
+        record("modvalue override", drawn)
+        return drawn
+
+    def test_override(value, modvalue):
+        pass
+"""
+
+SAME_NAME_SIBLING = """
+    import pytest
+
+    from pytest_strategy import RNG
+    from record import record
+
+    @pytest.fixture(scope="session")
+    def resource():
+        drawn = RNG.integer(0, 10**9)
+        record("resource {folder}", drawn)
+        return drawn
+"""
+
+
+@pytest.fixture
+def same_name_project(pytester):
+    pytester.makeini("[pytest]\npythonpath = .\n")
+    pytester.makepyfile(record=RECORD)
+    pytester.makeconftest(SAME_NAME_CONFTEST)
+    tests = pytester.mkdir("tests")
+    (tests / "test_override.py").write_text(dedent(SAME_NAME_OVERRIDE))
+    for folder in ("a", "b"):
+        (tests / folder).mkdir()
+        (tests / folder / "conftest.py").write_text(
+            dedent(SAME_NAME_SIBLING).replace("{folder}", folder)
+        )
+        (tests / folder / f"test_{folder}.py").write_text(
+            f"def test_{folder}(resource):\n    pass\n"
+        )
+    return pytester
+
+
+class TestFixturesOfOneName:
+    def test_each_definition_draws_from_a_stream_of_its_own(self, same_name_project):
+        records = run_and_read(same_name_project, passed=3)
+
+        def fixture(scope, name, where):
+            return randint(StreamKey.root(SEED, "fixture", scope, name, 0, where, name))
+
+        override = "tests/test_override.py"
+        assert records == {
+            "value": fixture(f"{override}::test_override", "value", "conftest.py"),
+            "value override": fixture(f"{override}::test_override", "value", override),
+            "modvalue": fixture(override, "modvalue", "conftest.py"),
+            "modvalue override": fixture(override, "modvalue", override),
+            "resource a": fixture("", "resource", "tests/a/conftest.py"),
+            "resource b": fixture("", "resource", "tests/b/conftest.py"),
+        }
+        # 4.0's first key had no definition: these pairs drew the same values
+        assert records["value"] != records["value override"]
+        assert records["modvalue"] != records["modvalue override"]
+        assert records["resource a"] != records["resource b"]
+
+    def test_draws_are_the_same_alone_in_the_suite_and_under_xdist(self, same_name_project):
+        suite = run_and_read(same_name_project, passed=3)
+        alone = {
+            **run_and_read(same_name_project, "tests/test_override.py", passed=1),
+            **run_and_read(same_name_project, "tests/b", passed=1),
+            **run_and_read(same_name_project, "tests/a/test_a.py::test_a", passed=1),
+        }
+
+        assert alone == suite
+        if importlib.util.find_spec("xdist") is not None:
+            assert run_and_read(same_name_project, "-n", "2", passed=3) == suite
 
 
 # ---------------------------------------------------------------------------

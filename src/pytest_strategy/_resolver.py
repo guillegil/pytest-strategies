@@ -568,9 +568,11 @@ def build_parametrization(
     # The guard (D5): each drawn argument of a row draws from a generator of its
     # own, so the ambient generator changes while the rows are generated only when
     # something else draws from it: a constraint that calls RNG.*, or an RNG type
-    # that draws from a generator kept from the factory, whose rng is this object
+    # that draws from a generator kept from the factory, whose rng is this object.
+    # Its position is the pending key of a stream nothing has drawn from yet (the
+    # test module's, usually), which costs nothing to read, or else its state.
     ambient = RNG._ambient
-    ambient_state = ambient.getstate()
+    position = ambient._position()
     try:
         # Warnings raised while generating name the strategy and the test
         with _attributed_warnings(name, test_fn):
@@ -586,7 +588,7 @@ def build_parametrization(
                 stats=stats,
                 key=stream_key,
             )
-            if ambient.getstate() != ambient_state:
+            if ambient._position() != position:
                 warnings.warn(_OUTSIDE_STREAMS, PytestStrategiesWarning, stacklevel=1)
     except _ConstraintsExhausted as e:
         raise ValueError(

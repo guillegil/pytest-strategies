@@ -1,16 +1,23 @@
 """
 Tests for the plugin's random streams other than the rows (streams v1, D5): the
 stream a block runs on (``_Stream``), ``RNG.refresh_seed(key)``, a session's save and
-restore of the ambient generator, the factory's stream T/"factory" and a strategy
-file's stream. Each one reseeds the ambient generator in place from its key and
-puts back its state, the installed generator and the seed when it ends.
+restore of the ambient generator, the factory's stream T/"factory", a strategy
+file's stream and the definition part of a fixture's key. Each one reseeds the
+ambient generator in place from its key, when the block first uses it, and puts
+back its state, the installed generator and the seed when it ends.
 
 The fixture, test phase, test module and export streams run inside pytest; their
 tests are in tests/integration/test_plugin_streams_integration.py.
 """
 
+import _random
+import copy
 import dataclasses
+import functools
+import importlib.util
 import random
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -19,7 +26,7 @@ from pytest_strategy import RNG, Parameter, RNGInteger, TestArg
 from pytest_strategy._resolver import build_parametrization
 from pytest_strategy._runtime import StrategyRuntime, runtime
 from pytest_strategy._streams import StreamKey
-from pytest_strategy.plugin import PytestStrategyPlugin
+from pytest_strategy.plugin import PytestStrategyPlugin, _fixture_definition
 from pytest_strategy.rng import _Stream
 
 KEY = StreamKey.root(7, "body", "tests/test_x.py::test_x", "call")
@@ -124,6 +131,148 @@ class TestTheStream:
         assert excinfo.value is error
 
 
+def operations(rng):
+    """Draw with every kind of method random.Random has, from ``rng``."""
+    items = list(range(10))
+    rng.shuffle(items)
+    return [
+        rng.random(),
+        rng.randint(0, 10**9),
+        rng.getrandbits(70),
+        rng.randbytes(5),
+        rng.choice("abcdef"),
+        rng.choices("abc", weights=[1, 2, 3], k=4),
+        rng.sample(range(100), 5),
+        items,
+        rng.uniform(-1.0, 1.0),
+        rng.gauss(0.0, 1.0),
+        rng.gauss(0.0, 1.0),
+        rng.expovariate(2.0),
+    ]
+
+
+class TestTheStreamIsSeededWhenUsed:
+    """
+    The ambient generator seeds a stream at its first draw, or when its state is
+    read, so a block that draws nothing costs no seeding, saving or restoring of
+    the generator's state; the values are those of a stream seeded on entry.
+    """
+
+    def test_a_block_that_draws_nothing_leaves_the_state_alone(self):
+        calls = []
+
+        def key():
+            calls.append(1)
+            return KEY
+
+        RNG.seed(3)
+        state = _random.Random.getstate(RNG._ambient)
+        with _Stream(key):
+            # Neither the key nor the generator's state is touched
+            assert calls == []
+            assert _random.Random.getstate(RNG._ambient) == state
+
+        assert calls == []
+        assert RNG.generator().random() == random.Random(3).random()
+
+    def test_the_key_is_built_once_at_the_first_draw(self):
+        calls = []
+
+        def key():
+            calls.append(1)
+            return KEY
+
+        with _Stream(key):
+            drawn = [RNG.generator().random() for _ in range(3)]
+
+        assert calls == [1]
+        assert drawn == first_draws(KEY)
+
+    def test_every_method_draws_what_a_generator_seeded_on_entry_draws(self):
+        with _Stream(KEY) as rng:
+            drawn = operations(rng)
+
+        assert drawn == operations(random.Random(KEY.seed_int()))
+
+    def test_a_cached_gauss_value_stays_with_its_stream(self):
+        """random.Random.gauss() keeps a second value for its next call."""
+        RNG.seed(3)
+        outer = [RNG.generator().gauss(0.0, 1.0)]
+        with _Stream(KEY):
+            inner = [RNG.generator().gauss(0.0, 1.0) for _ in range(3)]
+        outer += [RNG.generator().gauss(0.0, 1.0) for _ in range(2)]
+
+        reference = random.Random(3)
+        assert outer == [reference.gauss(0.0, 1.0) for _ in range(3)]
+        reference = random.Random(KEY.seed_int())
+        assert inner == [reference.gauss(0.0, 1.0) for _ in range(3)]
+
+    def test_an_inner_stream_leaves_an_outer_one_that_has_not_drawn(self):
+        RNG.seed(3)
+        with _Stream(KEY):
+            with _Stream(OTHER):
+                inner = RNG.generator().random()
+            outer = [RNG.generator().random() for _ in range(2)]
+        after = RNG.generator().random()
+
+        assert inner == first_draws(OTHER, 1)[0]
+        assert outer == first_draws(KEY, 2)
+        assert after == random.Random(3).random()
+
+    def test_an_inner_stream_leaves_an_outer_one_that_has_drawn(self):
+        with _Stream(KEY):
+            outer = [RNG.generator().random()]
+            with _Stream(OTHER), _Stream(StreamKey.root(7, "ctx")):
+                RNG.generator().random()
+            outer.append(RNG.generator().random())
+
+        assert outer == first_draws(KEY, 2)
+
+    def test_reading_the_state_gives_the_streams(self):
+        with _Stream(KEY):
+            state = RNG.generator().getstate()
+            drawn = RNG.generator().random()
+
+        generator = random.Random()
+        generator.setstate(state)
+        assert generator.random() == drawn == first_draws(KEY, 1)[0]
+
+    @pytest.mark.parametrize("replace", ["seed", "setstate"])
+    def test_replacing_the_state_before_a_draw_changes_only_the_block(self, replace):
+        RNG.seed(3)
+        RNG.generator().random()
+        with _Stream(KEY):
+            if replace == "seed":
+                RNG.generator().seed(5)
+            else:
+                RNG.generator().setstate(random.Random(5).getstate())
+            drawn = RNG.generator().random()
+        after = RNG.generator().random()
+
+        assert drawn == random.Random(5).random()
+        generator = random.Random(3)
+        assert after == [generator.random() for _ in range(2)][1]
+
+    def test_the_position_is_the_pending_key_until_the_stream_is_used(self):
+        def key():
+            return KEY
+
+        with _Stream(key):
+            assert RNG._ambient._position() is key
+            with _Stream(OTHER):
+                pass
+            assert RNG._ambient._position() is key
+            RNG.generator().random()
+            assert RNG._ambient._position() == RNG._ambient.getstate()
+
+    def test_a_copy_is_a_plain_generator_on_the_same_state(self):
+        with _Stream(KEY):
+            copied = copy.copy(RNG.generator())
+            drawn = RNG.generator().random()
+
+        assert copied.random() == drawn
+
+
 # ---------------------------------------------------------------------------
 # RNG.refresh_seed(key)
 # ---------------------------------------------------------------------------
@@ -158,10 +307,24 @@ class TestRefreshSeed:
 
         assert RNG.generator().random() == drawn
 
-    @pytest.mark.parametrize("key", [1.5, ("a", 1), True])
-    def test_a_key_that_is_not_a_str_is_refused(self, key):
-        with pytest.raises(TypeError, match="must be an int or a str"):
-            RNG.refresh_seed(key=key)
+    @pytest.mark.parametrize("key", [1.5, ("a", 1), True, Path("tests") / "test_x.py"])
+    def test_another_key_names_the_stream_of_its_str(self, key):
+        """3.x formatted any key into its string, so any key still works."""
+        RNG.seed(42)
+        RNG.refresh_seed(key=key)
+
+        assert [RNG.generator().random() for _ in range(3)] == first_draws(
+            StreamKey.root(42, "user", str(key))
+        )
+
+    def test_an_int_key_and_its_str_are_two_streams(self):
+        RNG.seed(42)
+        RNG.refresh_seed(key=3)
+        drawn = RNG.generator().random()
+        RNG.refresh_seed(key="3")
+
+        assert drawn == first_draws(StreamKey.root(42, "user", 3), 1)[0]
+        assert RNG.generator().random() != drawn
 
     def test_without_a_key_the_generator_restarts_from_the_seed(self):
         RNG.seed(42)
@@ -358,3 +521,99 @@ class TestFileStream:
         module = session.strategy_modules[next(iter(session.strategy_modules))]
         assert (5, random.Random(5).randint(0, 10**9)) == (module.SEED, module.RESEEDED)
         assert (RNG.get_seed(), RNG._ambient.getstate()) == (3, state)
+
+
+# ---------------------------------------------------------------------------
+# Where a fixture is defined, a part of its stream's key
+# ---------------------------------------------------------------------------
+
+
+FIXTURES_SOURCE = """
+import functools
+
+
+def wrap(function):
+    @functools.wraps(function)
+    def wrapper(*args, **kwargs):
+        return function(*args, **kwargs)
+
+    return wrapper
+
+
+def conn():
+    pass
+
+
+@wrap
+def wrapped():
+    pass
+
+
+class TestDb:
+    def conn(self):
+        pass
+"""
+
+
+def load(path, name):
+    """Import the file at ``path`` as the module ``name``."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        del sys.modules[name]
+    return module
+
+
+class TestFixtureDefinition:
+    def test_a_fixture_is_named_by_its_file_and_qualified_name(self, tmp_path):
+        path = tmp_path / "tests" / "conftest.py"
+        path.parent.mkdir()
+        path.write_text(FIXTURES_SOURCE)
+        module = load(path, "ps_unit_fixtures")
+
+        assert _fixture_definition(module.conn, tmp_path) == ("tests/conftest.py", "conn")
+        assert _fixture_definition(module.TestDb().conn, tmp_path) == (
+            "tests/conftest.py",
+            "TestDb.conn",
+        )
+        # A functools.wraps decorator is looked through
+        assert _fixture_definition(module.wrapped, tmp_path) == ("tests/conftest.py", "wrapped")
+
+    def test_a_file_outside_the_rootdir_is_relative_to_it(self, tmp_path):
+        path = tmp_path / "shared" / "fixtures.py"
+        path.parent.mkdir()
+        path.write_text(FIXTURES_SOURCE)
+        (tmp_path / "proj").mkdir()
+        module = load(path, "ps_unit_shared_fixtures")
+
+        assert _fixture_definition(module.conn, tmp_path / "proj") == (
+            "../shared/fixtures.py",
+            "conn",
+        )
+
+    @pytest.mark.parametrize("folder", ["site-packages", "dist-packages"])
+    def test_an_installed_packages_fixture_is_named_by_its_module(self, tmp_path, folder):
+        """Its path depends on where the package is installed; its module does not."""
+        path = tmp_path / ".venv" / "lib" / "python3.11" / folder / "acme" / "fixtures.py"
+        path.parent.mkdir(parents=True)
+        path.write_text(FIXTURES_SOURCE)
+        module = load(path, "acme.fixtures")
+
+        assert _fixture_definition(module.conn, tmp_path) == ("acme.fixtures", "conn")
+        assert _fixture_definition(module.TestDb().conn, tmp_path) == (
+            "acme.fixtures",
+            "TestDb.conn",
+        )
+
+    def test_a_partial_counts_as_the_function_it_wraps(self, tmp_path):
+        path = tmp_path / "conftest.py"
+        path.write_text(FIXTURES_SOURCE)
+        module = load(path, "ps_unit_partial_fixtures")
+
+        assert _fixture_definition(functools.partial(module.conn), tmp_path) == (
+            "conftest.py",
+            "conn",
+        )

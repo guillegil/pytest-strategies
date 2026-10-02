@@ -1,5 +1,6 @@
 # rng.py
 
+import _random
 import builtins
 import math
 import random
@@ -13,6 +14,14 @@ from ._streams import StreamKey, seed_part
 T = TypeVar("T")
 E = TypeVar("E", bound=Enum)
 
+# The Mersenne Twister's own methods, which the ambient generator calls once its
+# stream is seeded
+_mt_random = _random.Random.random
+_mt_getrandbits = _random.Random.getrandbits
+_mt_seed = _random.Random.seed
+_mt_getstate = _random.Random.getstate
+_mt_setstate = _random.Random.setstate
+
 
 class RNGValueError(ValueError):
     """Exception raised when an invalid value is provided to RNG operations."""
@@ -20,6 +29,92 @@ class RNGValueError(ValueError):
 
 class _NoValidValue(RNGValueError):
     """A predicate rejected every draw. TestArg.generate re-raises it naming the argument."""
+
+
+class _Ambient(random.Random):
+    """
+    The plugin's generator, ``RNG._ambient``: a ``random.Random`` that seeds the
+    streams it is put on (``_Stream``) only when they are used.
+
+    Entering a stream records the stream's key as pending; the generator seeds
+    itself from it at the first draw, or when its state is read, and only then
+    saves the state that the stream puts back when it ends. A stream that nothing
+    draws from, such as most test phases and fixtures, then costs no seeding,
+    saving or restoring of the Mersenne Twister state, about 20 us each.
+
+    ``random.Random`` draws only through ``random()`` and ``getrandbits()``: its
+    other methods call these two, and ``_randbelow`` stays the one that uses
+    ``getrandbits()``. So the values are those of a generator seeded when the
+    stream is entered. ``seed()`` and ``setstate()`` replace the state, so they
+    skip the pending seeding, but still save the state the stream puts back.
+    """
+
+    # random.Random's cached second value of gauss(), part of its state
+    gauss_next: float | None
+
+    def __init__(self, x: Any = None) -> None:
+        # The key of the stream entered last, while nothing has seeded it (or a
+        # function that returns the key); None when the state in use is the real one
+        self._pending: StreamKey | Callable[[], StreamKey] | None = None
+        # The streams entered and not yet ended, the innermost last
+        self._streams: list[_Stream] = []
+        super().__init__(x)
+
+    def _settle(self, pending: StreamKey | Callable[[], StreamKey], seed: bool = True) -> None:
+        """
+        Make the pending stream's state the real one: save the state in use, which
+        belongs to the innermost stream seeded around it (or to no stream), for the
+        stream to put back when it ends, and seed the generator from the stream's
+        key, unless ``seed`` is False because the caller replaces the state.
+        """
+        seed_int = None
+        if seed:
+            seed_int = (pending if isinstance(pending, StreamKey) else pending()).seed_int()
+        self._pending = None
+        self._streams[-1]._state = _mt_getstate(self)
+        if seed_int is not None:
+            # As random.Random.seed() seeds with an int; gauss_next was cleared when
+            # the stream was entered
+            _mt_seed(self, seed_int)
+
+    def random(self) -> float:
+        pending = self._pending
+        if pending is not None:
+            self._settle(pending)
+        return _mt_random(self)
+
+    def getrandbits(self, k: int, /) -> int:
+        pending = self._pending
+        if pending is not None:
+            self._settle(pending)
+        return _mt_getrandbits(self, k)
+
+    def seed(self, a: Any = None, version: int = 2) -> None:
+        pending = self._pending
+        if pending is not None:
+            self._settle(pending, seed=False)
+        super().seed(a, version)
+
+    def getstate(self) -> tuple[Any, ...]:
+        pending = self._pending
+        if pending is not None:
+            self._settle(pending)
+        return super().getstate()
+
+    def setstate(self, state: tuple[Any, ...]) -> None:
+        pending = self._pending
+        if pending is not None:
+            self._settle(pending, seed=False)
+        super().setstate(state)
+
+    def _position(self) -> object:
+        """
+        Return what the generator would draw from: the pending key while nothing
+        has used the stream entered last, its state otherwise. It changes when
+        something draws from the generator, seeds it or sets its state, and costs
+        nothing while a stream is pending (the guard on the row streams compares it).
+        """
+        return self._pending if self._pending is not None else self.getstate()
 
 
 class RNG:
@@ -37,11 +132,11 @@ class RNG:
     _max_retries = 100
     # The plugin's generator. Each of the plugin's random streams (a factory call, a
     # strategy file's import, a test phase; see _Stream) reseeds this object in
-    # place and restores its state afterwards.
-    _ambient = random.Random(_seed)
+    # place, when it is first used, and restores its state afterwards.
+    _ambient = _Ambient(_seed)
     # The generator the RNG types and helpers draw from: the ambient generator,
     # except while an argument of a random row is drawn, which has its own
-    _generator = _ambient
+    _generator: random.Random = _ambient
 
     # ====
     # Seed Management
@@ -87,14 +182,14 @@ class RNG:
                 is seeded from the stream key ``(seed, "user", key)`` of streams v1,
                 so each key gets its own stream that is the same on every run with
                 this seed, in every process, and does not depend on the order in
-                which keys are used.
-
-        Raises:
-            TypeError: If the key is neither a str nor an int
+                which keys are used. Any other object (a ``pathlib.Path``, a
+                tuple) names the stream of its ``str()``, as 3.x formatted it.
         """
         if key is None:
             RNG._generator.seed(RNG._seed)
         else:
+            if not isinstance(key, (str, int)) or isinstance(key, bool):
+                key = str(key)
             # Hashed with BLAKE2b (see _streams), so stable across processes, unlike
             # hash(), which is salted per process
             key_int = StreamKey.root(seed_part(RNG._seed), "user", key).seed_int()
@@ -368,34 +463,48 @@ class _Stream:
     Run a block on one of the plugin's random streams (streams v1, D5): ``with
     _Stream(key) as rng:``.
 
-    On entry the ambient generator (``RNG._ambient``) is reseeded in place from
-    ``key`` and installed as ``RNG._generator``, so ``rng is RNG.generator()`` in
-    the block, and a generator kept from it is the one the next stream reseeds. On
-    exit its state, the seed (``RNG._seed``) and the generator installed before are
-    put back, also when the block raises. Streams nest: an inner stream leaves the
-    outer one where it was. So what the block draws, and an ``RNG.seed()`` call in
-    it, change only the rest of the block.
+    In the block the ambient generator (``RNG._ambient``) draws from the stream of
+    ``key``, as if reseeded in place from it, and is installed as
+    ``RNG._generator``, so ``rng is RNG.generator()`` in the block, and a generator
+    kept from it is the one the next stream reseeds. On exit its state, the seed
+    (``RNG._seed``) and the generator installed before are put back, also when the
+    block raises. Streams nest: an inner stream leaves the outer one where it was.
+    So what the block draws, and an ``RNG.seed()`` call in it, change only the rest
+    of the block.
+
+    The generator is seeded only when the block first uses it (see ``_Ambient``),
+    and ``key`` may be a function that returns the key, called then: a block that
+    draws nothing costs neither the seeding nor the key.
 
     A class rather than a ``contextlib.contextmanager``: that one assigns the
     exception's ``__traceback__`` on the way out, which a frozen dataclass exception
     rejects.
     """
 
-    __slots__ = ("_key", "_saved")
+    __slots__ = ("_key", "_saved", "_state")
 
-    def __init__(self, key: StreamKey) -> None:
+    def __init__(self, key: StreamKey | Callable[[], StreamKey]) -> None:
         self._key = key
 
     def __enter__(self) -> random.Random:
         ambient = RNG._ambient
-        self._saved = (ambient, ambient.getstate(), RNG._generator, RNG._seed)
-        ambient.seed(self._key.seed_int())
+        self._saved = (ambient, ambient._pending, ambient.gauss_next, RNG._generator, RNG._seed)
+        # The state to put back, saved when the stream is seeded (_Ambient._settle)
+        self._state: tuple[Any, ...] | None = None
+        ambient._streams.append(self)
+        ambient._pending = self._key
+        # random.Random.seed() clears it; a pending stream must not see the outer one's
+        ambient.gauss_next = None
         RNG._generator = ambient
         return ambient
 
     def __exit__(self, *exc_info: object) -> None:
-        ambient, state, generator, seed = self._saved
-        ambient.setstate(state)
+        ambient, pending, gauss_next, generator, seed = self._saved
+        ambient._streams.pop()
+        if self._state is not None:
+            _mt_setstate(ambient, self._state)
+        ambient._pending = pending
+        ambient.gauss_next = gauss_next
         RNG._generator = generator
         RNG._seed = seed
 

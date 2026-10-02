@@ -14,6 +14,7 @@ import argparse
 import contextlib
 import difflib
 import fnmatch
+import functools
 import glob
 import importlib.abc
 import importlib.machinery
@@ -38,6 +39,7 @@ from ._registry import (
     Registration,
     _contains,
     _describe_factory,
+    _unwrap,
     display_path,
     factory_source,
     registry,
@@ -58,6 +60,10 @@ _UNFILLED_RECORDS = pytest.StashKey[list[tuple[str, str]]]()
 # (private API; None if a pytest moves it): it returns the argument's value and runs
 # no user code, so it gets no random stream
 _DIRECT_PARAM_FIXTURE: Any = getattr(_pytest.python, "get_direct_param_fixture_func", None)
+
+# The folders installed packages live in: a fixture defined in one is keyed by its
+# module's name, which does not depend on where the package is installed
+_INSTALLED_FOLDERS = frozenset({"site-packages", "dist-packages"})
 
 # Strategy file names; a file is imported only if it also contains a registration
 _STRATEGY_FILE_PATTERNS = ("strategies.py", "strategy.py", "*_strategies.py", "*_strategy.py")
@@ -259,16 +265,13 @@ class PytestStrategyPlugin:
         Values the module draws when it is imported (``BASE = RNG.integer(0, 9)`` at
         module level) are then the same whether it is collected alone or with other
         modules, in any order. The module is imported here, after pytest_collectstart
-        loaded its folder's strategy files.
+        loaded its folder's strategy files. The key is built only if the module draws.
         """
         if not isinstance(collector, pytest.Module) or runtime.current is None:
             return (yield)
-        key = StreamKey.root(
-            seed_part(_run_seed()),
-            "module",
-            path_part(collector.path, collector.config.rootpath),
-        )
-        with _Stream(key):
+        seed = seed_part(_run_seed())
+        path, rootpath = collector.path, collector.config.rootpath
+        with _Stream(lambda: StreamKey.root(seed, "module", path_part(path, rootpath))):
             return (yield)
 
     @pytest.hookimpl(tryfirst=True)
@@ -514,23 +517,33 @@ class PytestStrategyPlugin:
     ) -> Generator[None, Any, Any]:
         """
         Set a fixture up on a random stream of its own (streams v1): root(S,
-        "fixture", scope, name, param_index), where scope is the node ID of the
-        fixture's scope node ("" for the session).
+        "fixture", scope, name, param_index, where, qualname), where scope is the
+        node ID of the fixture's scope node ("" for the session), and where and
+        qualname tell the fixture's definition from another of the same name
+        (``_fixture_definition``).
 
         A module- or session-scoped fixture is set up during the setup of whichever
         test needs it first; with its own stream, its draws, and that test's, do
         not depend on which test that is. Its teardown runs in the teardown of a
-        test, and draws from that test's teardown stream.
+        test, and draws from that test's teardown stream. The key is built only if
+        the fixture draws.
         """
-        if fixturedef.func is _DIRECT_PARAM_FIXTURE or runtime.current is None:
+        state = runtime.current
+        if fixturedef.func is _DIRECT_PARAM_FIXTURE or state is None:
             return (yield)
-        key = StreamKey.root(
-            seed_part(_run_seed()),
-            "fixture",
-            request.node.nodeid,
-            fixturedef.argname,
-            getattr(request, "param_index", 0),
-        )
+        seed = seed_part(_run_seed())
+        scope = request.node.nodeid
+        param_index = getattr(request, "param_index", 0)
+
+        def key() -> StreamKey:
+            definition = state.fixture_definitions.get(fixturedef)
+            if definition is None:
+                definition = _fixture_definition(fixturedef.func, request.config.rootpath)
+                state.fixture_definitions[fixturedef] = definition
+            return StreamKey.root(
+                seed, "fixture", scope, fixturedef.argname, param_index, *definition
+            )
+
         with _Stream(key):
             return (yield)
 
@@ -1393,6 +1406,30 @@ def _run_seed() -> int:
     return runtime.run_seed()
 
 
+def _fixture_definition(func: Callable[..., Any], rootpath: Path | None) -> tuple[str, str]:
+    """
+    Return where a fixture is defined, as two parts of its stream key: its file,
+    relative to the rootdir in posix form (``path_part()``), and its function's
+    qualified name (``TestDb.conn`` for one defined in a class).
+
+    pytest sets up a fixture that overrides another of the same name (``def
+    x(x)`` in a test module, over the conftest's ``x``), and the session fixtures
+    of one name in two sibling folders' conftest.py files, for the same scope
+    node: their definitions give them streams of their own. A fixture of an
+    installed package (a file in a site-packages or dist-packages folder, such as
+    a plugin's) is named by its module instead of its file, whose path depends on
+    where the package is installed.
+    """
+    source, qualname, _ = factory_source(func)
+    if source and _INSTALLED_FOLDERS.isdisjoint(PurePath(source).parts):
+        return path_part(source, rootpath), qualname or ""
+    # The function factory_source() read, through wrappers and partials
+    function = _unwrap(func)
+    while isinstance(function, functools.partial):
+        function = _unwrap(function.func)
+    return getattr(function, "__module__", None) or "", qualname or ""
+
+
 def _phase_stream(item: pytest.Item, phase: str) -> contextlib.AbstractContextManager[Any]:
     """
     Return the random stream of one phase of a test (``setup``, ``call`` or
@@ -1400,11 +1437,14 @@ def _phase_stream(item: pytest.Item, phase: str) -> contextlib.AbstractContextMa
 
     A test body's ``RNG`` draws are then the same alone, in the whole suite, in
     any order and on any pytest-xdist worker, and an ``RNG.seed()`` call in it
-    changes nothing after the phase. Without a session there is no stream.
+    changes nothing after the phase. Without a session there is no stream. The key
+    is built only if the phase draws.
     """
     if runtime.current is None:
         return contextlib.nullcontext()
-    return _Stream(StreamKey.root(seed_part(_run_seed()), "body", item.nodeid, phase))
+    return _Stream(
+        functools.partial(StreamKey.root, seed_part(_run_seed()), "body", item.nodeid, phase)
+    )
 
 
 def _summary(state: Any) -> dict[str, Any]:
