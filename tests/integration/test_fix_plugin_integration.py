@@ -5,7 +5,6 @@ Subprocess runs are used where a test needs a fresh process (its own RNG seed,
 its own strategy registry) or has to exit the inner session.
 """
 
-import json
 import re
 import textwrap
 
@@ -65,29 +64,10 @@ def _seed_from_header(result):
     return int(match.group(1))
 
 
-# A conftest that writes the parameter values of every collected row, in collection
-# order, to values.json, or to values-<worker>.json on a pytest-xdist worker. Node IDs
-# name the rows, so runs are compared by their values.
-DUMP_VALUES = """
-import json
-
-def pytest_collection_modifyitems(session, config, items):
-    worker = getattr(config, "workerinput", {}).get("workerid")
-    rows = [[item.nodeid, repr(item.callspec.params)] for item in items]
-    name = f"values-{worker}.json" if worker else "values.json"
-    (config.rootpath / name).write_text(json.dumps(rows))
-"""
-
-
-def _values(pytester, name="values.json"):
-    """Return the [node ID, values] of each row the last run collected (DUMP_VALUES)."""
-    return json.loads((pytester.path / name).read_text())
-
-
 class TestUnseededRunReproducibility:
     """The seed printed by an unseeded run must reproduce it exactly."""
 
-    def test_printed_seed_reproduces_module_level_draws(self, pytester):
+    def test_printed_seed_reproduces_module_level_draws(self, pytester, values_dump):
         """Randomness drawn before the first factory runs must also be reproduced.
 
         The strategy file draws an offset at import time, before any factory
@@ -113,35 +93,37 @@ class TestUnseededRunReproducibility:
                 pass
             """)
 
-        pytester.makeconftest(DUMP_VALUES)
+        pytester.makeconftest(values_dump.conftest)
 
-        unseeded = pytester.runpytest_subprocess("--collect-only")
+        unseeded = values_dump.run("--collect-only")
         seed = _seed_from_header(unseeded)
-        unseeded_values = _values(pytester)
-        pytester.runpytest_subprocess("--collect-only", f"--rng-seed={seed}")
+        unseeded_values = values_dump.read()
 
         assert len(unseeded_values) == 3
-        assert _values(pytester) == unseeded_values
+        assert values_dump.collect("--collect-only", f"--rng-seed={seed}") == unseeded_values
 
 
 class TestXdistSeedSharing:
     """pytest-xdist workers must all use the controller's seed."""
 
-    def test_unseeded_xdist_run_collects_the_same_tests_on_every_worker(self, pytester):
+    def test_unseeded_xdist_run_collects_the_same_tests_on_every_worker(
+        self, pytester, values_dump
+    ):
         pytest.importorskip("xdist")
-        pytester.makeconftest(DUMP_VALUES)
+        pytester.makeconftest(values_dump.conftest)
         pytester.makepyfile(strategies=STRATEGIES)
         pytester.makepyfile(test_xdist=TESTS)
 
-        result = pytester.runpytest_subprocess("-n", "2")
+        result = values_dump.run("-n", "2")
 
         result.stdout.no_fnmatch_line("*Different tests were collected*")
         result.assert_outcomes(passed=6)
         # The node IDs do not show the values: the workers drew the same ones
-        assert len(_values(pytester, "values-gw0.json")) == 6
-        assert _values(pytester, "values-gw0.json") == _values(pytester, "values-gw1.json")
+        gw0 = values_dump.read("values-gw0.json")
+        assert len(gw0) == 6
+        assert gw0 == values_dump.read("values-gw1.json")
 
-    def test_worker_uses_seed_from_workerinput(self, pytester):
+    def test_worker_uses_seed_from_workerinput(self, pytester, values_dump):
         """Without --rng-seed, a worker takes the seed the controller sent."""
         pytester.makeconftest(textwrap.dedent("""
             import pytest
@@ -150,17 +132,17 @@ class TestXdistSeedSharing:
             def pytest_configure(config):
                 # Stand in for an xdist worker (workerinput is set before configure).
                 config.workerinput = {"pytest_strategies_seed": 4242}
-            """) + DUMP_VALUES)
+            """) + values_dump.conftest)
         pytester.makepyfile(strategies=STRATEGIES)
         pytester.makepyfile(test_worker=TESTS)
 
-        worker = pytester.runpytest_subprocess("-p", "no:xdist", "--collect-only")
-        worker_values = _values(pytester)
-        pytester.runpytest_subprocess("-p", "no:xdist", "--collect-only", "--rng-seed=4242")
+        worker = values_dump.run("-p", "no:xdist", "--collect-only")
+        worker_values = values_dump.read()
+        seeded = values_dump.collect("-p", "no:xdist", "--collect-only", "--rng-seed=4242")
 
         assert _seed_from_header(worker) == 4242
         assert len(worker_values) == 6
-        assert _values(pytester) == worker_values
+        assert seeded == worker_values
 
     def test_plugin_works_without_xdist(self, pytester):
         """The optional xdist hook must not break a run where xdist is absent."""
@@ -188,12 +170,11 @@ class TestPerTestRandomStreams:
         """
 
     @staticmethod
-    def _values_by_test(pytester, *args):
+    def _values_by_test(pytester, values_dump, *args):
         """Collect with ``args`` and map each test name to its rows' values, in order."""
-        pytester.makeconftest(DUMP_VALUES)
-        pytester.runpytest_subprocess("--collect-only", *args)
+        pytester.makeconftest(values_dump.conftest)
         values = {}
-        for nodeid, params in _values(pytester):
+        for nodeid, params in values_dump.collect("--collect-only", *args):
             values.setdefault(nodeid.split("::")[1].split("[")[0], []).append(params)
         return values
 
@@ -206,7 +187,7 @@ class TestPerTestRandomStreams:
         ]
         return "from pytest_strategy import Strategy\n\n" + "\n".join(blocks)
 
-    def test_tests_and_strategies_get_different_values(self, pytester):
+    def test_tests_and_strategies_get_different_values(self, pytester, values_dump):
         pytester.makepyfile(twin_strategies=self.TWIN_STRATEGIES)
         pytester.makepyfile(
             test_twins=self._test_module(
@@ -214,24 +195,24 @@ class TestPerTestRandomStreams:
             )
         )
 
-        values = self._values_by_test(pytester, "--rng-seed=42")
+        values = self._values_by_test(pytester, values_dump, "--rng-seed=42")
 
         # Same strategy, different tests: different values.
         assert values["test_one"] != values["test_two"]
         # Identical strategy definitions under different names: different values.
         assert values["test_one"] != values["test_three"]
 
-    def test_values_do_not_depend_on_collection_order(self, pytester):
+    def test_values_do_not_depend_on_collection_order(self, pytester, values_dump):
         pytester.makepyfile(twin_strategies=self.TWIN_STRATEGIES)
         pytester.makepyfile(
             test_twins=self._test_module(("test_one", "twin_a"), ("test_two", "twin_b"))
         )
-        forward = self._values_by_test(pytester, "--rng-seed=42")
+        forward = self._values_by_test(pytester, values_dump, "--rng-seed=42")
 
         pytester.makepyfile(
             test_twins=self._test_module(("test_two", "twin_b"), ("test_one", "twin_a"))
         )
-        backward = self._values_by_test(pytester, "--rng-seed=42")
+        backward = self._values_by_test(pytester, values_dump, "--rng-seed=42")
 
         assert len(forward["test_one"]) == 3
         assert forward == backward

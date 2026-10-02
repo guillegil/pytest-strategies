@@ -99,25 +99,6 @@ def project(pytester):
     return pytester
 
 
-# A conftest that writes the parameter values of every collected row, in collection
-# order, to values.json, or to values-<worker>.json on a pytest-xdist worker. Node IDs
-# name the rows, so runs are compared by their values.
-DUMP_VALUES = """
-import json
-
-def pytest_collection_modifyitems(session, config, items):
-    worker = getattr(config, "workerinput", {}).get("workerid")
-    rows = [[item.nodeid, repr(item.callspec.params)] for item in items if hasattr(item, "callspec")]
-    name = f"values-{worker}.json" if worker else "values.json"
-    (config.rootpath / name).write_text(json.dumps(rows))
-"""
-
-
-def _values(pytester, name="values.json"):
-    """Return the [node ID, values] of each row the last run collected (DUMP_VALUES)."""
-    return json.loads((pytester.path / name).read_text())
-
-
 def _hook_calls(pytester):
     path = pytester.path / "hook_calls.txt"
     return len(path.read_text().splitlines()) if path.exists() else 0
@@ -204,18 +185,19 @@ def test_export():
     result.assert_outcomes(passed=1)
 
 
-def test_every_xdist_worker_builds_the_same_tests(project):
+def test_every_xdist_worker_builds_the_same_tests(project, values_dump):
     pytest.importorskip("xdist")
-    project.makeconftest(CONFTEST + DUMP_VALUES)
+    project.makeconftest(CONFTEST + values_dump.conftest)
 
-    result = project.runpytest_subprocess("-n", "2", "--tb-config=two_esm.json")
+    result = values_dump.run("-n", "2", "--tb-config=two_esm.json")
 
     result.assert_outcomes(passed=50)
     # Each worker collects, so each calls the hook once; the controller does not
     assert _hook_calls(project) == 2
     # The node IDs do not show every value: the workers drew the same ones
-    assert len(_values(project, "values-gw0.json")) == 50
-    assert _values(project, "values-gw0.json") == _values(project, "values-gw1.json")
+    gw0 = values_dump.read("values-gw0.json")
+    assert len(gw0) == 50
+    assert gw0 == values_dump.read("values-gw1.json")
 
 
 def test_hook_can_skip_the_modules_that_need_ctx(project):
@@ -232,7 +214,7 @@ def pytest_strategies_context(config):
     result.stdout.fnmatch_lines(["*no testbench configured*"])
 
 
-def test_random_draws_in_the_hook_do_not_change_the_vectors(project):
+def test_random_draws_in_the_hook_do_not_change_the_vectors(project, values_dump):
     project.makeconftest("""
 from pytest_strategy import RNG
 
@@ -240,11 +222,12 @@ def pytest_strategies_context(config):
     channels = [3, 5]
     RNG.generator().shuffle(channels)
     return {"peripherals": [{"type": "Esm", "channel": c} for c in channels]}
-""" + DUMP_VALUES)
+""" + values_dump.conftest)
 
     def collected(*paths):
-        project.runpytest("-p", "no:cacheprovider", "--rng-seed=42", "--collect-only", "-q", *paths)
-        return [row for row in _values(project) if "test_rw_again.py::" in row[0]]
+        args = ("-p", "no:cacheprovider", "--rng-seed=42", "--collect-only", "-q", *paths)
+        rows = values_dump.collect(*args, subprocess=False)
+        return [row for row in rows if "test_rw_again.py::" in row[0]]
 
     # The first test that needs ctx triggers the hook: test_rw.py in the full run,
     # test_rw_again.py when it runs alone

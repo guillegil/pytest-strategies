@@ -5,7 +5,6 @@ Each test here failed before its fix. Runs that depend on the process (environme
 working directory, pyc cache, xdist) use a subprocess; the others run in-process.
 """
 
-import json
 import random
 import re
 import shutil
@@ -34,25 +33,6 @@ def _restore_global_state():
 def _ids(result, test_name):
     """The parametrization IDs of ``test_name`` in a --collect-only -q run."""
     return re.findall(rf"{test_name}\[(.*)\]", result.stdout.str())
-
-
-# A conftest that writes the parameter values of every collected row, in collection
-# order, to values.json, or to values-<worker>.json on a pytest-xdist worker. Node IDs
-# name the rows, so runs are compared by their values.
-DUMP_VALUES = """
-import json
-
-def pytest_collection_modifyitems(session, config, items):
-    worker = getattr(config, "workerinput", {}).get("workerid")
-    rows = [[item.nodeid, repr(item.callspec.params)] for item in items if hasattr(item, "callspec")]
-    name = f"values-{worker}.json" if worker else "values.json"
-    (config.rootpath / name).write_text(json.dumps(rows))
-"""
-
-
-def _values(pytester, name="values.json"):
-    """Return the [node ID, values] of each row the last run collected (DUMP_VALUES)."""
-    return json.loads((pytester.path / name).read_text())
 
 
 # ---------------------------------------------------------------------------
@@ -400,7 +380,10 @@ class TestIdsInRealRuns:
 
 
 class TestDataclassModeSamples:
-    """Custom __init__ dataclasses are built; pytest.param keeps its marks and id."""
+    """
+    Custom __init__ dataclasses are built; pytest.param keeps its marks, and the
+    vector's name is its ID.
+    """
 
     def test_custom_init_dataclass(self, pytester):
         pytester.makepyfile(rect_strategies="""
@@ -496,7 +479,9 @@ class TestDataclassModeSamples:
 class TestStreamKeyIgnoresImportMode:
     """The same --rng-seed gives the same values under prepend and importlib."""
 
-    def test_values_are_identical_across_import_modes_and_selection(self, pytester, monkeypatch):
+    def test_values_are_identical_across_import_modes_and_selection(
+        self, pytester, monkeypatch, values_dump
+    ):
         pytester.makeini("[pytest]\n")
         sub = pytester.path / "tests" / "sub"
         sub.mkdir(parents=True)
@@ -522,11 +507,11 @@ class TestStreamKeyIgnoresImportMode:
             "    pass\n"
         )
 
-        pytester.makeconftest(DUMP_VALUES)
+        pytester.makeconftest(values_dump.conftest)
 
         def collect(*args):
-            pytester.runpytest_subprocess("--collect-only", "-q", "--rng-seed=7", *args)
-            return [row for row in _values(pytester) if "::test_b[" in row[0]]
+            rows = values_dump.collect("--collect-only", "-q", "--rng-seed=7", *args)
+            return [row for row in rows if "::test_b[" in row[0]]
 
         prepend = collect("--import-mode=prepend")
         runs = {

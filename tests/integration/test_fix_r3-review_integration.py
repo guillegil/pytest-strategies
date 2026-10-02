@@ -7,7 +7,6 @@ strategy files with the warning turned into an error, an empty --vector-name,
 list vectors, and discovery below symlinks and norecursedirs path patterns.
 """
 
-import json
 import os
 
 import pytest
@@ -40,25 +39,6 @@ def r3_modes(nsamples):
 """
 
 
-# A conftest that writes the parameter values of every collected row, in collection
-# order, to values.json, or to values-<worker>.json on a pytest-xdist worker. Node IDs
-# name the rows, so runs are compared by their values.
-DUMP_VALUES = """
-import json
-
-def pytest_collection_modifyitems(session, config, items):
-    worker = getattr(config, "workerinput", {}).get("workerid")
-    rows = [[item.nodeid, repr(item.callspec.params)] for item in items if hasattr(item, "callspec")]
-    name = f"values-{worker}.json" if worker else "values.json"
-    (config.rootpath / name).write_text(json.dumps(rows))
-"""
-
-
-def _values(pytester, name="values.json"):
-    """Return the [node ID, values] of each row the last run collected (DUMP_VALUES)."""
-    return json.loads((pytester.path / name).read_text())
-
-
 class TestImportedStrategyFile:
     """A test module or conftest.py that imports a strategy file gets the loaded module."""
 
@@ -86,14 +66,13 @@ class TestImportedStrategyFile:
         )
         return pytester
 
-    def test_same_values_for_the_whole_suite_and_one_file(self, project):
+    def test_same_values_for_the_whole_suite_and_one_file(self, project, values_dump):
         """The import used to run the file again and redraw OFFSET for later tests."""
         args = ("-p", "no:cacheprovider", "--rng-seed=1", "--collect-only", "-q")
-        project.makeconftest(DUMP_VALUES)
+        project.makeconftest(values_dump.conftest)
 
         def test_b_rows(*paths):
-            project.runpytest_subprocess(*args, *paths)
-            return [row for row in _values(project) if "::test_b[" in row[0]]
+            return [row for row in values_dump.collect(*args, *paths) if "::test_b[" in row[0]]
 
         full = test_b_rows()
         alone = test_b_rows("tests/test_b.py")
