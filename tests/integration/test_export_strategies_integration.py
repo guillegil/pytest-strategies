@@ -147,6 +147,43 @@ def test_factories_get_the_sessions_options(pytester, case, args, nsamples, sour
     assert _hook_calls(pytester) == 0
 
 
+def test_a_rejected_factory_is_an_error_entry_relative_to_the_rootdir(pytester):
+    pytester.makeconftest(CONFTEST)
+    pytester.mkdir("sub")
+    pytester.makepyfile(
+        **{
+            "sub/ex_bad_strategies": """
+            from pytest_strategy import Parameter, RNGInteger, TestArg, register
+
+            @register("ex_bad_bad")
+            def bad(n, ctx):
+                return Parameter(TestArg("x", rng_type=RNGInteger(0, 9)))
+            """,
+            "test_ex_bad": """
+            from pathlib import Path
+
+            from pytest_strategy import export_strategies
+
+            def test_export():
+                Path("exported.json").write_text(export_strategies())
+            """,
+        }
+    )
+
+    result = pytester.runpytest("-p", "no:cacheprovider")
+
+    # The export reports the factory instead of failing
+    result.assert_outcomes(passed=1)
+    exported = json.loads((pytester.path / "exported.json").read_text())
+    assert set(exported["ex_bad_bad"]) == {"error"}
+    error = exported["ex_bad_bad"]["error"]
+    where = "(sub/ex_bad_strategies.py:3:bad)"
+    assert f"Strategy factory 'ex_bad_bad' {where} has a parameter 'n'" in error
+    assert "Did you mean 'nsamples'?" in error
+    # Rejected before the hook runs, although the factory declares ctx
+    assert _hook_calls(pytester) == 0
+
+
 def test_only_a_ctx_factory_runs_the_hook(pytester):
     pytester.makeconftest(CONFTEST)
     pytester.makepyfile(

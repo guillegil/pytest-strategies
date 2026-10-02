@@ -28,6 +28,7 @@ Everything public is importable from the package root:
 from pytest_strategy import (
     register, strategy, Strategy,           # decorators; Strategy holds the aliases
     Parameter, TestArg,
+    StrategyOptions,                        # what a factory receives as options
     RNG, RNGType,
     RNGInteger, RNGFloat, RNGBoolean, RNGChoice, RNGEnum, RNGString,
     RNGWeightedInteger, RNGWeightedFloat,

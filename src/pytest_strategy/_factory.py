@@ -19,6 +19,7 @@ import inspect
 import os
 import random
 import sys
+import types
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -131,30 +132,77 @@ def _is_async(factory: Callable[..., Any]) -> bool:
     return inspect.iscoroutinefunction(fn)
 
 
-def _mock_count(factory: Callable[..., Any]) -> int:
-    """
-    Return how many mocks ``unittest.mock.patch`` decorators pass the factory.
+def _constructor(cls: Any) -> Any:
+    """Return the method a class is called through: ``__init__``, or ``__new__`` without one."""
+    return cls.__init__ if cls.__init__ is not object.__init__ else cls.__new__
 
-    pytest's own rule for test functions: each patch without ``new=`` (and not
-    ``patch.multiple``) appends one mock to the positional arguments. The
-    decorated function is looked for where the factory's signature comes from:
-    a partial's function, a callable object's ``__call__`` or a class's ``__init__``.
+
+def _inner(fn: Any) -> Any:
     """
-    fn: Any = factory
+    Return the callable one wrapper below ``fn``, or None at the end of the chain.
+
+    That is ``fn.__wrapped__``. A bound method, a partial, a class (its
+    ``__init__``, or its ``__new__`` without one) and a callable object (its
+    ``__call__``) step through the function they call, and keep what they add to
+    its signature: the bound first argument, the partial's arguments.
+    """
+    if isinstance(fn, types.MethodType):
+        inner = _inner(fn.__func__)
+        return None if inner is None else types.MethodType(inner, fn.__self__)
+    wrapped = getattr(fn, "__wrapped__", None)
+    if wrapped is not None:
+        return wrapped
+    if isinstance(fn, functools.partial):
+        inner = _inner(fn.func)
+        return None if inner is None else functools.partial(inner, *fn.args, **fn.keywords)
+    if inspect.isclass(fn):
+        return _inner(types.MethodType(_constructor(fn), fn))
+    if callable(fn) and not inspect.isroutine(fn):
+        return _inner(fn.__call__)
+    return None
+
+
+def _patchings(fn: Any) -> list[Any] | None:
+    """
+    Return the ``patchings`` list of ``unittest.mock.patch`` that ``fn`` carries, or None.
+
+    The patched function has it, and a ``functools.wraps`` wrapper or an
+    ``update_wrapper`` instance above it carries the same list (copied with its
+    ``__dict__``). A partial is looked through, and a class or a callable object
+    without a list of its own carries its constructor's or ``__call__``'s.
+    """
     while isinstance(fn, functools.partial):
         fn = fn.func
-    if inspect.isclass(fn):
-        fn = fn.__init__
-    elif callable(fn) and not inspect.isroutine(fn):
-        fn = type(fn).__call__
     patchings = getattr(fn, "patchings", None)
-    if not patchings:
-        return 0
+    if patchings is None and inspect.isclass(fn):
+        patchings = getattr(_constructor(fn), "patchings", None)
+    elif patchings is None and callable(fn) and not inspect.isroutine(fn):
+        patchings = getattr(type(fn).__call__, "patchings", None)
+    return patchings if isinstance(patchings, list) else None
+
+
+def _mock_count(passed: list[Any], decider: Any) -> int:
+    """
+    Return how many mocks ``unittest.mock.patch`` decorators pass the function
+    whose signature decides (``decider``), below the wrappers in ``passed``.
+
+    pytest's own rule for test functions: each patch without ``new=`` (and not
+    ``patch.multiple``) appends one mock to the positional arguments. Only the
+    patches of the wrappers passed through count. A list that ``decider``
+    carries too belongs to a function below it, which gets those mocks itself.
+    """
+    own = _patchings(decider)
+    lists: list[list[Any]] = []
+    for wrapper in passed:
+        patchings = _patchings(wrapper)
+        if patchings and patchings is not own and all(patchings is not p for p in lists):
+            lists.append(patchings)
     sentinels = [
         getattr(sys.modules.get(module), "DEFAULT", None) for module in ("mock", "unittest.mock")
     ]
     return sum(
         1
+        for patchings in lists
         for p in patchings
         if not getattr(p, "attribute_name", None)
         and any(s is not None and getattr(p, "new", None) is s for s in sentinels)
@@ -228,18 +276,20 @@ def analyse(factory: Callable[..., Any]) -> CallPlan:
 
     The signature of the callable that is called decides (a decorator's wrapper,
     not the function it wraps). When it has none, or only ``*args``/``**kwargs``,
-    the signature of the function it wraps (``__wrapped__``, also behind a
-    partial, a callable object's ``__call__`` or a class's ``__init__``) decides;
-    when there is none either, the factory is opaque and is called with no
-    arguments.
+    the chain of wrapped functions (``__wrapped__``, also behind a partial, a
+    bound method, a callable object's ``__call__`` or a class's ``__init__``) is
+    followed one level at a time, and the first signature that says what it
+    takes decides: with stacked decorators, that of the outermost wrapper that
+    names its parameters. When no level has one, the factory is opaque and is
+    called with no arguments.
 
     Each parameter named after an input gets that input. Any other parameter
     with a default keeps it, and ``*args``/``**kwargs`` receive nothing.
     Positional-only inputs are passed by position (with the defaults of
-    positional-only parameters before them), the others by keyword. A wrapper
-    with ``*args`` and no ``**kwargs`` gets every input by position, in the
-    wrapped function's order. ``unittest.mock.patch`` passes its mocks to the
-    first parameters, which are skipped.
+    positional-only parameters before them), the others by keyword. When a
+    wrapper passed through has ``*args`` and no ``**kwargs``, every input goes
+    by position, in the deciding signature's order. ``unittest.mock.patch``
+    passes its mocks to the first parameters, which are skipped.
 
     Returns:
         The plan. Its ``problem`` is set for a factory that cannot be called:
@@ -252,16 +302,20 @@ def analyse(factory: Callable[..., Any]) -> CallPlan:
             problem="is an async function: async factories are not supported. Return the "
             "Parameter from a plain function."
         )
-    own = _signature(factory, follow_wrapped=False)
-    from_wrapped = own is None or _only_var_args(own)
-    sig = own
-    if from_wrapped:
-        sig = _signature(factory, follow_wrapped=True)
-    if sig is None or _only_var_args(sig):
-        return CallPlan(opaque=True)
+    # Down the wrapper chain to the first signature that says what it takes
+    level: Any = factory
+    sig = _signature(factory, follow_wrapped=False)
+    passed: list[tuple[Any, inspect.Signature | None]] = []
+    while sig is None or _only_var_args(sig):
+        passed.append((level, sig))
+        level = _inner(level)
+        if level is None or len(passed) >= sys.getrecursionlimit():
+            # The chain ends (or loops) without one
+            return CallPlan(opaque=True)
+        sig = _signature(level, follow_wrapped=False)
 
     params = list(sig.parameters.values())
-    mocks = _mock_count(factory) if from_wrapped else 0
+    mocks = _mock_count([wrapper for wrapper, _ in passed], level)
     taken: list[inspect.Parameter] = []
     if mocks:
         taken = [p for p in params if p.kind in _POSITIONAL][:mocks]
@@ -299,8 +353,8 @@ def analyse(factory: Callable[..., Any]) -> CallPlan:
     if unknown is not None:
         return CallPlan(problem=unknown)
 
-    # A wraps() wrapper with *args and no **kwargs can pass only positions
-    by_position = from_wrapped and not _has_kind(own, inspect.Parameter.VAR_KEYWORD)
+    # A wrapper passed through with *args and no **kwargs can pass only positions
+    by_position = any(not _has_kind(s, inspect.Parameter.VAR_KEYWORD) for _, s in passed)
     if by_position:
         for p in params:
             if p.kind == p.KEYWORD_ONLY and p.name in INPUTS:

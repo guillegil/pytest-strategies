@@ -125,6 +125,27 @@ class TestResolverNsamplesPrecedence:
         samples = mark.args[1]
         assert len(samples) == 5
 
+    def test_cli_explicit_default_value_overrides_param_nsamples(self):
+        """FR-6: CLI='10', the default's value, still overrides Parameter.nsamples=15."""
+        arg = TestArg("x", rng_type=RNGInteger(0, 10))
+        param = Parameter(arg, nsamples=15)
+        config = _make_config("10")
+        registry = _make_registry(param)
+        test_fn = _make_test_fn(["x"])
+
+        marked = resolve_and_parametrize(
+            "strat",
+            test_fn,
+            registry=registry,
+            config=config,
+            pytest_fixtures=set(),
+            validate=False,
+        )
+
+        mark = marked.pytestmark[0]
+        samples = mark.args[1]
+        assert len(samples) == 10
+
     def test_cli_explicit_no_param_nsamples(self):
         """FR-6: CLI='7' + Parameter has no nsamples → 7 vectors."""
         arg = TestArg("x", rng_type=RNGInteger(0, 10))

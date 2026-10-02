@@ -536,6 +536,114 @@ class TestCachedFactories:
         assert _call(factory) == "made"
 
 
+def _passthrough(fn):
+    """A functools.wraps decorator whose wrapper takes ``*args, **kwargs``."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+def _with_width(fn):
+    """A functools.wraps decorator whose wrapper takes nsamples and supplies width."""
+
+    @functools.wraps(fn)
+    def wrapper(nsamples):
+        return fn(nsamples=nsamples, width=16)
+
+    return wrapper
+
+
+class _Logged:
+    """A class-based decorator, made transparent with functools.update_wrapper."""
+
+    def __init__(self, fn):
+        functools.update_wrapper(self, fn)
+        self.fn = fn
+
+    def __call__(self, *args, **kwargs):
+        return self.fn(*args, **kwargs)
+
+
+class TestStackedDecorators:
+    """The outermost wrapper on the chain that names its parameters decides."""
+
+    @pytest.mark.parametrize(
+        "outer",
+        [functools.cache, _passthrough, _Logged, lambda fn: functools.partial(_passthrough(fn))],
+        ids=["cache", "wraps", "update_wrapper", "partial-of-wraps"],
+    )
+    def test_over_a_wrapper_that_names_its_parameters(self, outer):
+        hook = Hook()
+
+        @outer
+        @_with_width
+        def factory(nsamples, width, ctx=None):
+            return nsamples, width, ctx
+
+        # width keeps the decorator's value, and ctx is not passed: the wrapper has none
+        assert _call(factory, hook) == (3, 16, None)
+        assert hook.calls == 0
+
+    def test_a_passthrough_gets_the_inputs_of_the_wrapper_below_it(self):
+        received = []
+
+        def logged(fn):
+            @functools.wraps(fn)
+            def wrapper(*args, **kwargs):
+                received.append((args, kwargs))
+                return fn(*args, **kwargs)
+
+            return wrapper
+
+        @logged
+        @_with_width
+        def factory(nsamples, width):
+            return nsamples, width
+
+        assert _call(factory) == (3, 16)
+        assert received == [((), {"nsamples": 3})]
+
+    def test_a_wrapper_with_only_args_anywhere_on_the_chain_gets_positions(self):
+        def args_only(fn):
+            @functools.wraps(fn)
+            def wrapper(*args):
+                return fn(*args)
+
+            return wrapper
+
+        @_passthrough
+        @args_only
+        def factory(nsamples, ctx=None):
+            return nsamples, ctx
+
+        assert _call(factory, Hook("bench")) == (3, "bench")
+
+    def test_mocks_below_the_deciding_wrapper_are_not_its_parameters(self):
+        @_passthrough
+        @_with_width
+        @mock.patch("os.getcwd", return_value="/fake")
+        def factory(getcwd, nsamples, width):
+            return nsamples, width, os.getcwd()
+
+        assert _call(factory) == (3, 16, "/fake")
+
+    def test_a_wrapper_loop_is_opaque(self):
+        def first(*args, **kwargs):
+            return "called", args, kwargs
+
+        def second(*args, **kwargs):
+            pass
+
+        first.__wrapped__ = second
+        second.__wrapped__ = first
+
+        assert analyse(first).opaque is True
+        assert _call(first) == ("called", (), {})
+
+
 class TestMockPatch:
     def test_mocks_first(self):
         @mock.patch("os.getcwd", return_value="/fake")
@@ -609,6 +717,15 @@ class TestMockPatch:
 
         assert _call(Factory()) == (3, "/fake")
         assert _call(Made).made == (3, "/fake")
+
+    def test_update_wrapper_instance_over_a_patched_factory(self):
+        # The instance carries the patched function's patchings in its own __dict__
+        @_Logged
+        @mock.patch("os.getcwd", return_value="/fake")
+        def factory(getcwd, nsamples):
+            return nsamples, os.getcwd(), getcwd.return_value
+
+        assert _call(factory) == (3, "/fake", "/fake")
 
     def test_unknown_name_in_a_patched_factory(self):
         @mock.patch("os.getcwd", return_value="/fake")
@@ -716,6 +833,14 @@ class TestCallableKinds:
         assert _call(Factory()) == ("callable", 3, BENCH)
         assert _call(Made).nsamples == 3
 
+    def test_wraps_decorated_new_without_init(self):
+        class Made:
+            @_passthrough
+            def __new__(cls, nsamples, ctx):
+                return cls.__name__, nsamples, ctx
+
+        assert _call(Made) == ("Made", 3, BENCH)
+
 
 # ---------------------------------------------------------------------------
 # async factories
@@ -817,6 +942,21 @@ KINDS_STRATEGIES = """
         return _param(("decorated", width), nsamples)
 
 
+    def with_width(fn):
+        @functools.wraps(fn)
+        def wrapper(nsamples):
+            return fn(nsamples, width=16)
+
+        return wrapper
+
+
+    @register("kinds_stacked")
+    @functools.cache
+    @with_width
+    def stacked(nsamples, width):
+        return _param(("stacked", width), nsamples)
+
+
     register("kinds_callable")(Callable())
     register("kinds_bound")(Factories().bound)
     register("kinds_classmethod")(Factories.from_class)
@@ -860,6 +1000,10 @@ KINDS_TESTS = """
     @strategy("kinds_partial")
     def test_partial(x):
         assert x == (("decorated", 16), 2)
+
+    @strategy("kinds_stacked")
+    def test_stacked(x):
+        assert x == (("stacked", 16), 2)
     """
 
 
@@ -869,7 +1013,7 @@ class TestProjects:
 
         result = pytester.runpytest_inprocess("--nsamples=2")
 
-        result.assert_outcomes(passed=8 * 2)
+        result.assert_outcomes(passed=9 * 2)
 
     def test_collection_error_names_the_factory_relative_to_the_rootdir(self, pytester):
         pytester.makepyfile(

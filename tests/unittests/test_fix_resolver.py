@@ -531,6 +531,41 @@ class TestExportStrategiesFactoryCalling:
 
         assert "RuntimeError: boom" in data["fix_export_broken"]["error"]
 
+    def test_rejected_signatures_are_recorded_without_calling_anything(
+        self, monkeypatch, restore_registry
+    ):
+        # Only this test's factories: another registered one may declare ctx
+        Strategy._registry.clear()
+        self._own_session(monkeypatch)
+        asked = []
+        monkeypatch.setattr(runtime, "strategy_context", lambda: asked.append(True))
+        called = []
+
+        @Strategy.register("fix_export_burst")
+        def burst(n):
+            called.append("burst")
+
+        @Strategy.register("fix_export_reserved")
+        def reserved(nsamples, config=None):
+            called.append("reserved")
+
+        @Strategy.register("fix_export_rejected_ctx")
+        def rejected(a, ctx):
+            called.append("rejected")
+
+        data = json.loads(Strategy.export_strategies())
+
+        assert set(data["fix_export_burst"]) == {"error"}
+        assert "has a parameter 'n'" in data["fix_export_burst"]["error"]
+        assert "Did you mean 'nsamples'" in data["fix_export_burst"]["error"]
+        assert set(data["fix_export_reserved"]) == {"error"}
+        assert "'config', a name the plugin reserves" in data["fix_export_reserved"]["error"]
+        assert set(data["fix_export_rejected_ctx"]) == {"error"}
+        assert "has a parameter 'a'" in data["fix_export_rejected_ctx"]["error"]
+        # Rejected before the factory or the context hook runs
+        assert called == []
+        assert asked == []
+
 
 # ---------------------------------------------------------------------------
 # Single-argument strategies: IDs show the whole value passed to the test

@@ -155,6 +155,12 @@ class TestParseSessionOptions:
 
         assert (options.nsamples, options.nsamples_source) == ("auto", "--nsamples")
 
+    def test_an_explicit_nsamples_equal_to_the_default_is_from_the_option(self):
+        # --nsamples=10 overrides Parameter(nsamples=), so it is not the default
+        options = parse_session_options(_mock_config(nsamples=10)).for_strategy("s")
+
+        assert (options.nsamples, options.nsamples_source) == (10, "--nsamples")
+
     def test_nsamples_given_as_text_by_a_stand_in(self):
         options = parse_session_options(_mock_config(nsamples="5")).for_strategy("s")
 

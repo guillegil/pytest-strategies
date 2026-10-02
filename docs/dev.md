@@ -439,13 +439,16 @@ plugin's. `--full-trace` shows the full traceback.
 **Factory inputs:** `_factory.analyse()` reads the factory's signature into a
 `CallPlan` without calling anything, and `call_factory()` follows it. The
 signature of the callable that is called decides; when it has none or only
-`*args`/`**kwargs`, the `__wrapped__` signature decides (also behind a partial,
-a callable object's `__call__` or a class's `__init__`), and without one the
-factory is called with no arguments. Each parameter named `nsamples`, `ctx`,
-`rng` or `options` gets that input (positional-only ones by position, the
-others by keyword, or all by position for a `functools.wraps` wrapper that has
-`*args` but no `**kwargs`); any other parameter keeps its default, `*args` and
-`**kwargs` receive nothing, and `mock.patch`'s mocks take the first parameters.
+`*args`/`**kwargs`, the `__wrapped__` chain is followed one level at a time
+(also behind a partial, a bound method, a callable object's `__call__` or a
+class's `__init__`) and the first signature that names its parameters decides,
+so with stacked decorators it is the outermost wrapper's that does. Without
+one the factory is called with no arguments. Each parameter named `nsamples`,
+`ctx`, `rng` or `options` gets that input (positional-only ones by position,
+the others by keyword, or all by position when a `functools.wraps` wrapper
+passed through has `*args` but no `**kwargs`); any other parameter keeps its
+default, `*args` and `**kwargs` receive nothing, and the mocks of a
+`mock.patch` passed through take the first parameters.
 A parameter without a default that is not an input, a reserved name (`base`,
 `config`, `request`) and an `async def` factory fail with a `ValueError` before
 the factory or the context hook runs. `ctx` is computed only for a factory that

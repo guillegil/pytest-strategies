@@ -93,6 +93,18 @@ TESTS = """
             },
         ),
         (
+            "ten",
+            ["--nsamples=10"],
+            {
+                "nsamples": 10,
+                "nsamples_source": "--nsamples",
+                "mode": "all",
+                "vector_name": None,
+                "vector_index": None,
+                "filtered": False,
+            },
+        ),
+        (
             "auto",
             ["--nsamples=auto"],
             {
