@@ -381,40 +381,26 @@ def build_parametrization(
                 _max_exhaustive(param, config),
             )
 
-    # Generate samples using Parameter's generate_vectors with CLI options
+    # Generate the rows with the CLI options. "auto" replaces only the random rows
+    # with the exhaustive ones: CLI filters, vector modes and directed vectors apply
+    # exactly as they do for a finite count.
     samples: list[Any]
     # The rejections per constraint (and the combinations "auto" left out), for -v
     stats = _GenerationStats()
-    exhaustive = False
+    auto = effective_nsamples == "auto"
+    exhaustive = auto and not filtered and vector_mode not in ("test", "directed_only")
     try:
         # Warnings raised while generating name the strategy and the test
         with _attributed_warnings(name, test_fn):
-            if effective_nsamples == "auto":
-                # "auto" replaces only the random samples: CLI filters, vector modes
-                # and directed vectors apply exactly as they do for a finite count.
-                samples = param.generate_vectors(
-                    n=0,
-                    mode=vector_mode,
-                    filter_by_name=vector_name,
-                    filter_by_index=vector_index,
-                    constraints_off=constraints_off,
-                    _stats=stats,
-                )
-                if not filtered and vector_mode not in ("test", "directed_only"):
-                    exhaustive = True
-                    samples.extend(
-                        param.generate_exhaustive(constraints_off=constraints_off, _stats=stats)
-                    )
-            else:
-                assert isinstance(effective_nsamples, int)
-                samples = param.generate_vectors(
-                    n=effective_nsamples,
-                    mode=vector_mode,
-                    filter_by_name=vector_name,
-                    filter_by_index=vector_index,
-                    constraints_off=constraints_off,
-                    _stats=stats,
-                )
+            rows = param._generate_rows(
+                0 if auto else int(effective_nsamples),
+                exhaustive=auto,
+                mode=vector_mode,
+                filter_by_name=vector_name,
+                filter_by_index=vector_index,
+                constraints_off=constraints_off,
+                stats=stats,
+            )
     except _ConstraintsExhausted as e:
         raise ValueError(
             f"Error generating samples for strategy '{name}': {_exhausted_message(name, e)}"
@@ -440,8 +426,10 @@ def build_parametrization(
     else:
         if filtered:
             runtime.record_vector_filter(name, True)
-        # The generators return nothing for a skipped Parameter. A vector filter
-        # that names none of its vectors keeps the empty set, as for any strategy.
+        # A skipped Parameter gives one "skipped" row, which stands in for its values
+        # below. A vector filter that names none of its vectors keeps the empty set,
+        # as for any strategy.
+        samples = [row.sample for row in rows if row.kind != "skipped"]
         skip_reason = param.skip_reason
 
     _count_rows(resolution, param, samples, vector_mode, filtered)

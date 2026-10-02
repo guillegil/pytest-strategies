@@ -10,13 +10,17 @@ import inspect
 import itertools
 import keyword
 import math
+import numbers
+import operator
 import os
+import re
 import reprlib
 import warnings
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from enum import Enum
 from types import MappingProxyType
-from typing import Any, cast
+from typing import Any, Literal, NamedTuple, cast
 
 import pytest
 
@@ -226,6 +230,320 @@ def _check_arg_name(name: Any) -> None:
     )
 
 
+# Label text taken from a str value is at most this many characters
+_LABEL_WIDTH = 40
+
+# Characters label text cannot contain: "=" and "~" are the label's own syntax
+# (ARG=TEXT~m), "[" and "]" enclose the parameters of a node ID, and whitespace
+# (str.isspace(), as \s matches it) cannot be typed in a -k expression
+_LABEL_EXCLUDED = re.compile(r"[\s=~\[\]]")
+
+# What a text two different values share stands for: neither of them
+_SHARED = object()
+
+
+class _Key(NamedTuple):
+    """The two keys of one position in an enumerated argument's sequence (_position_keys)."""
+
+    # What the test ID shows: "ch=2", "ch=1~1" for a repeated value, "ch3" by position
+    label: str
+    # What the row's random streams are keyed by: "i:2", "i:1~1", "#3"
+    token: str
+
+
+def _label_text(text: str, width: int | None = _LABEL_WIDTH) -> str | None:
+    """
+    Return ``text`` when a label can show it: non-empty, at most ``width``
+    characters (any length for None), printable, and without whitespace, ``=``,
+    ``~``, ``[`` or ``]``. Otherwise None.
+    """
+    if (
+        text
+        and (width is None or len(text) <= width)
+        and text.isprintable()
+        and _LABEL_EXCLUDED.search(text) is None
+    ):
+        return text
+    return None
+
+
+def _escaped(text: str) -> str:
+    """Double each ``~`` of a token's text, so that text never ends like a repeat (``~1``)."""
+    return text.replace("~", "~~") if "~" in text else text
+
+
+def _value_keys(value: object) -> tuple[str | None, str | None]:
+    """
+    Return the token of a value, before any repeat suffix, and its label text, in
+    D2's type order. The token is None for a value keyed by its position, and the
+    text None for a value a label cannot show.
+    """
+    # The common exact types first: none of them can be a type that comes earlier
+    exact = type(value)
+    if exact is int:
+        number: object = value
+    elif exact is str:
+        text = cast(str, value)
+        return f"s:{_escaped(text)}", _label_text(text)
+    elif value is None:
+        return "n", "None"
+    elif exact is bool:
+        return f"b:{value}", str(value)
+    # Before int and str: an IntEnum or StrEnum member is keyed as a member
+    elif isinstance(value, Enum):
+        name = value.name
+        if not isinstance(name, str):
+            # A Flag value that is no member has no name
+            return None, None
+        return f"e:{_escaped(type(value).__qualname__)}.{_escaped(name)}", _label_text(name, None)
+    elif isinstance(value, numbers.Integral):
+        try:
+            number = operator.index(value)
+        except (TypeError, ValueError):
+            return None, None
+    elif isinstance(value, numbers.Real):
+        try:
+            real = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None, None
+        return f"f:{real.hex()}", repr(real)
+    elif isinstance(value, str):
+        return f"s:{_escaped(value)}", _label_text(value)
+    elif isinstance(value, bytes):
+        return f"y:{value.hex()}", None
+    # Anything else is keyed by its position; a class or a function shows its name
+    elif isinstance(value, type) or inspect.isfunction(value) or inspect.isbuiltin(value):
+        called = getattr(value, "__name__", None)
+        return None, _label_text(called, None) if isinstance(called, str) else None
+    else:
+        return None, None
+    try:
+        digits = int.__repr__(cast(int, number))
+    except ValueError:
+        # More digits than int-to-str conversion allows
+        return None, None
+    return f"i:{digits}", digits
+
+
+def _position_keys(arg: str, sequence: Sequence[Any]) -> tuple[_Key, ...]:
+    """
+    Return the label and the token of each position of an enumerated argument's
+    sequence: the sequence it declares, after its predicate. For None, bools, Enum
+    members, numbers and strs they depend only on the value and how often it came
+    before, so a row keeps its ID and its values when a scalar is added elsewhere in
+    the sequence; other values are keyed by their position.
+
+    The type of each value is decided in this order, with isinstance: None, bool,
+    Enum member (IntEnum and StrEnum members too), int or another
+    numbers.Integral, float or another numbers.Real, str, bytes, anything else.
+
+    - The token keys the row's random streams: ``n``, ``b:True``,
+      ``e:<Enum qualname>.<member>``, ``i:42``, ``f:<float.hex()>``, ``s:fast``,
+      ``y:<bytes hex>``, and ``#<position>`` for anything else. A ``~`` in the text
+      of an ``s:`` or ``e:`` token is doubled.
+    - The label is what the test ID shows: ``ARG=TEXT``, where TEXT is ``str(v)``
+      for None and a bool, the member's name for an Enum member, ``repr()`` of the
+      int or float for a number, the ``__name__`` of a class or function, and the
+      str itself when it is non-empty, at most 40 characters, printable, and has no
+      whitespace, ``=``, ``~``, ``[`` or ``]``. A value without such text (a tuple,
+      bytes, another object or str) is labeled by its position: ``ARG<position>``
+      (``ch3``).
+    - A value already seen m times gets ``~m`` in its token and label (``i:1~1``,
+      ``ch=1~1``), so a value listed twice still keys two rows; a value keyed by its
+      position needs no suffix in its token. When two different values would get the
+      same text (``1`` and ``"1"``), every position of those values gets the
+      positional label.
+
+    Args:
+        arg: The argument's name
+        sequence: The argument's sequence of values
+
+    Returns:
+        One _Key per position, in order
+    """
+    bases = [_value_keys(value) for value in sequence]
+    # Two positions hold the same value when their tokens are equal, or, for values
+    # keyed by their position, when they hold the same object
+    seen: dict[object, int] = {}
+    repeats = []
+    # The value each text stands for, or _SHARED when two different values have it
+    meanings: dict[str, object] = {}
+    for (token, text), value in zip(bases, sequence):
+        same: object = token if token is not None else id(value)
+        repeat = seen.get(same, 0)
+        seen[same] = repeat + 1
+        repeats.append(repeat)
+        if text is not None and meanings.setdefault(text, same) != same:
+            meanings[text] = _SHARED
+    keys = []
+    for position, ((token, text), repeat) in enumerate(zip(bases, repeats)):
+        suffix = f"~{repeat}" if repeat else ""
+        if text is not None and meanings[text] is not _SHARED:
+            label = f"{arg}={text}{suffix}"
+        else:
+            label = f"{arg}{position}"
+        keys.append(_Key(label, f"{token}{suffix}" if token is not None else f"#{position}"))
+    return tuple(keys)
+
+
+def _auto_order(rng_type: SequenceLike[Any]) -> list[tuple[int, Any]]:
+    """
+    Return the values of a sequence argument in its ``--nsamples=auto`` order (a
+    Series in declaration order, an RNGSequence permuted), each with its position in
+    the declared sequence, which keys and labels its rows whatever the order.
+
+    Series and RNGSequence give the positions (``_auto_positions()``). For a
+    subclass with its own ``_get_auto_sequence()``, each value it returns is matched
+    to the first position not taken yet that holds the same object, else an equal
+    value; values that are the same object take their positions in the order they
+    come.
+
+    Raises:
+        RNGValueError: If such a ``_get_auto_sequence()`` returned a value that is
+            not in the sequence (a subclass that builds new values)
+    """
+    declared = rng_type.sequence
+    if type(rng_type)._get_auto_sequence is SequenceLike._get_auto_sequence:
+        return [(position, declared[position]) for position in rng_type._auto_positions()]
+    by_object: dict[int, deque[int]] = {}
+    for position, value in enumerate(declared):
+        by_object.setdefault(id(value), deque()).append(position)
+    taken: set[int] = set()
+    order = []
+    for value in rng_type._get_auto_sequence():
+        positions = by_object.get(id(value), deque())
+        while positions and positions[0] in taken:
+            positions.popleft()
+        found = positions.popleft() if positions else _equal_position(declared, value, taken)
+        if found is None:
+            raise RNGValueError(
+                f"{type(rng_type).__name__}._get_auto_sequence() returned {value!r}, which "
+                "is not one of its sequence's values (or more often than the sequence has it)"
+            )
+        taken.add(found)
+        order.append((found, value))
+    return order
+
+
+def _equal_position(declared: Sequence[Any], value: object, taken: set[int]) -> int | None:
+    """Return the first position not taken whose value equals ``value``, else None."""
+    for position, candidate in enumerate(declared):
+        if position in taken:
+            continue
+        try:
+            if candidate == value:
+                return position
+        except Exception:
+            # A comparison that raises (or gives an ambiguous truth value) is no match
+            continue
+    return None
+
+
+# The kinds of rows
+_RowKind = Literal["directed", "test", "random", "exhaustive", "skipped"]
+
+
+def _describe_row(kind: str, index: int | None, labels: tuple[str, ...] = ()) -> str:
+    """
+    Name a row in a message: ``random row 3``, ``random row 1 (ch=2)`` or
+    ``exhaustive row 5 (ch=2, dev=b)``; ``the row`` for a row without a number.
+    """
+    if index is None:
+        return "the row"
+    described = f"{kind} row {index}"
+    return f"{described} ({', '.join(labels)})" if labels else described
+
+
+@dataclasses.dataclass(slots=True)
+class _Row:
+    """
+    One row of a generation call, with its identity (D2).
+
+    Every generation path returns these (``Parameter._generate_rows``), so the row
+    index is defined in one place: the plugin builds the row's test ID, its random
+    streams and its metadata from the same row. Rows are not changed once built.
+
+    Attributes:
+        kind: "directed", "test", "random", "exhaustive", or "skipped" for the one
+            row of a strategy whose skip_if_empty sequence has no values
+        name: The directed or test vector's name, else None
+        index: The number the messages show: the vector's position in
+            directed_vectors (the number --vector-index takes) or test_vectors; j
+            for a random row; the row's position in the product of the enumerated
+            arguments' declared sequences, in declaration order, for an exhaustive
+            row; None for "skipped"
+        pos: The enumerated arguments as (argument name, token) pairs, sorted by
+            argument name (see _position_keys); empty when the row enumerates none.
+            A finite run enumerates the Series arguments, per_sequence_samples=True
+            the Series and RNGSequence arguments, and --nsamples=auto every Series
+            and RNGSequence argument.
+        j: The row's number within its combination of enumerated values, from 0: k
+            for the k-th plain random row; the cycle for a finite Series row (a
+            combination the constraints skip leaves a gap); the row's number for
+            per_sequence_samples=True; 0 for an exhaustive row. None for the other
+            kinds.
+        values: The row, a Vector (Nones for "skipped")
+        labels: The labels of the enumerated arguments, in declaration order
+        param: The pytest.param(...) a directed or test vector was given as, whose
+            values are ``values``; None otherwise
+    """
+
+    kind: _RowKind
+    name: str | None
+    index: int | None
+    pos: tuple[tuple[str, str], ...]
+    j: int | None
+    values: Vector
+    labels: tuple[str, ...] = ()
+    param: Any = None
+
+    @property
+    def sample(self) -> Vector:
+        """The row as generate_vectors() returns it: ``param``, or else ``values``."""
+        return cast(Vector, self.param) if self.param is not None else self.values
+
+
+class _Enumeration:
+    """
+    The enumerated arguments of a generation path and the keys of their positions.
+    A combination gives one position per argument, in declaration order.
+    """
+
+    __slots__ = ("_parts", "_by_name")
+
+    def __init__(self, names: Sequence[str], sequences: Sequence[Sequence[Any]]) -> None:
+        # A combination's index in the declaration-order product of the sequences
+        strides = [math.prod(len(s) for s in sequences[i + 1 :]) for i in range(len(names))]
+        # Per argument and position: its label, its (name, token) pair and its share
+        # of the index
+        self._parts = [
+            [(key.label, (name, key.token), position * stride) for position, key in enumerate(keys)]
+            for name, keys, stride in zip(
+                names, [_position_keys(n, s) for n, s in zip(names, sequences)], strides
+            )
+        ]
+        # pos lists the arguments sorted by name, so reordering them keeps a row's keys
+        self._by_name = sorted(range(len(names)), key=list(names).__getitem__)
+
+    def identify(
+        self, combination: Sequence[int]
+    ) -> tuple[int, tuple[str, ...], tuple[tuple[str, str], ...]]:
+        """
+        Return a combination's index (its position in the declaration-order
+        product), its labels in declaration order and its pos (the (name, token)
+        pairs sorted by name).
+        """
+        if len(self._parts) == 1:
+            label, pair, index = self._parts[0][combination[0]]
+            return index, (label,), (pair,)
+        parts = [arg_parts[p] for arg_parts, p in zip(self._parts, combination)]
+        return (
+            sum([part[2] for part in parts]),
+            tuple([part[0] for part in parts]),
+            tuple([parts[a][1] for a in self._by_name]),
+        )
+
+
 # The constraints a generation call evaluates, as (name, function) pairs in order
 _Constraints = tuple[tuple[str, Callable[[Vector], object]], ...]
 
@@ -407,7 +725,8 @@ class _ConstraintFailure:
 
     Attributes:
         label: The constraint, as the messages show it ("'ratio'")
-        row: Where it raised: "random row 3, Vector(...)" or "the row Vector(...)"
+        row: Where it raised: "random row 3, Vector(...)", "exhaustive row 5 (ch=2),
+            Vector(...)", or "the row Vector(...)" for a row without a number
         detail: The message without the note on the constraints turned off
         off_before: The constraints before it in the mapping that the generation
             call turned off (one of them may have guarded it)
@@ -419,14 +738,12 @@ class _ConstraintFailure:
     def __init__(
         self,
         label: str,
-        row: Vector,
-        index: int | None,
+        row: str,
         error: Exception,
         off_before: Sequence[str] = (),
     ) -> None:
-        where = "the row" if index is None else f"random row {index},"
         self.label = label
-        self.row = f"{where} {_short_repr(row)}"
+        self.row = row
         # Not the exception itself, which holds this object
         self.detail = f"Constraint {label} raised {type(error).__name__} on {self.row}: {error}"
         self.off_before = tuple(off_before)
@@ -789,7 +1106,9 @@ class Parameter:
         vector: Vector,
         constraints: _Constraints,
         rejections: _Rejections | None = None,
+        kind: _RowKind = "random",
         index: int | None = None,
+        labels: tuple[str, ...] = (),
     ) -> bool:
         """
         Validate a vector against the constraints, in order.
@@ -799,8 +1118,9 @@ class Parameter:
             constraints: The constraints to evaluate (``_evaluated()``)
             rejections: If given, the first constraint that rejects the vector is
                 counted in it, by name
-            index: The number of the random row being drawn, for the message of a
-                constraint that raises (None when it has no such number)
+            kind, index, labels: The row being drawn, for the message of a
+                constraint that raises (``_describe_row()``); an index of None for a
+                row without a number (generate_vector())
 
         Returns:
             True if all constraints pass, False otherwise
@@ -816,9 +1136,10 @@ class Parameter:
             except Exception as e:
                 origin = self._unnamed_origin(name)
                 label = f"{name!r} ({origin})" if origin else repr(name)
-                failure = _ConstraintFailure(
-                    label, vector, index, e, self._off_before(name, constraints)
-                )
+                # "random row 3, Vector(...)", or "the row Vector(...)" without a number
+                separator = " " if index is None else ", "
+                row = f"{_describe_row(kind, index, labels)}{separator}{_short_repr(vector)}"
+                failure = _ConstraintFailure(label, row, e, self._off_before(name, constraints))
                 failure.attach(e, "constraints_off")
                 raise
             if rejected:
@@ -1015,7 +1336,9 @@ class Parameter:
         attempts: int,
         rejections: _Rejections,
         constraints: _Constraints,
+        kind: _RowKind = "random",
         index: int | None = None,
+        labels: tuple[str, ...] = (),
     ) -> Vector | None:
         """
         Fill one row in declaration order and return it once the constraints accept it.
@@ -1031,8 +1354,8 @@ class Parameter:
             attempts: How many draws of the drawn positions to try
             rejections: Counts the first constraint that rejects each attempt
             constraints: The constraints to evaluate (``_evaluated()``)
-            index: The number of the random row, for the message of a constraint
-                that raises
+            kind, index, labels: The row being drawn, for the message of a
+                constraint that raises (an index of None for generate_vector())
 
         Returns:
             The first attempt's Vector that every constraint accepts, or None when
@@ -1044,7 +1367,7 @@ class Parameter:
                 values[i] = args[i].generate()
             # The whole row goes to the constraints, as a Vector
             row = tuple.__new__(row_type, values)
-            if self._validate_vector(row, constraints, rejections, index):
+            if self._validate_vector(row, constraints, rejections, kind, index, labels):
                 return row
         return None
 
@@ -1093,6 +1416,7 @@ class Parameter:
             self.max_retries,
             rejections,
             constraints,
+            "random",
             index,
         )
         if row is None:
@@ -1198,136 +1522,241 @@ class Parameter:
             # Get specific vector by index
             samples = param.generate_vectors(0, filter_by_index=0)
         """
-        samples: list[Vector] = []
+        rows = self._generate_rows(
+            n,
+            mode=mode,
+            filter_by_name=filter_by_name,
+            filter_by_index=filter_by_index,
+            constraints_off=constraints_off,
+            stats=_stats,
+        )
+        if rows and rows[0].kind == "skipped":
+            return []
+        return [row.values if row.param is None else row.param for row in rows]
+
+    def _generate_rows(
+        self,
+        n: int,
+        *,
+        exhaustive: bool = False,
+        mode: str = "all",
+        filter_by_name: str | None = None,
+        filter_by_index: int | None = None,
+        constraints_off: Iterable[str] = (),
+        stats: _GenerationStats | None = None,
+    ) -> list[_Row]:
+        """
+        Generate the rows of a run with their identity: the one entry point of
+        generation. generate_vectors() and generate_exhaustive() return the rows'
+        values, and the plugin builds each row's test ID and metadata from its kind,
+        name, index, pos and j.
+
+        Args:
+            n: Number of random rows (per combination with per_sequence_samples=True),
+                as generate_vectors() takes it; not used when exhaustive is set
+            exhaustive: Enumerate the Series/RNGSequence args (``--nsamples=auto``)
+                instead of drawing n random rows. Vector filters, modes and directed
+                vectors apply as they do for a count.
+            mode: The sampling mode, as for generate_vectors()
+            filter_by_name: Only the directed vector with this name
+            filter_by_index: Only the directed vector at this index
+            constraints_off: The names of constraints not to evaluate in this call
+            stats: Counts the rejections per constraint, and the combinations the
+                exhaustive rows left out
+
+        Returns:
+            The rows in order: the directed or test vectors the mode and the filters
+            select, then the random or exhaustive rows. A Parameter whose
+            skip_if_empty sequence has no values gives one "skipped" row instead.
+
+        Raises:
+            As generate_vectors(), and with exhaustive set as generate_exhaustive()
+        """
         constraints = self._evaluated(constraints_off)
 
         # Handle CLI filters first (override mode). A missing vector raises even when
         # the Parameter is skipped, so callers can still tell whether a filter matched.
+        selected: int | None = None
         if filter_by_name is not None:
-            vector = self.get_vector_by_name(filter_by_name)
-            return [] if self.skip_reason is not None else [vector]
-
-        if filter_by_index is not None:
-            vector = self.get_vector_by_index(filter_by_index)
-            return [] if self.skip_reason is not None else [vector]
+            self.get_vector_by_name(filter_by_name)
+            selected = list(self._directed_vectors).index(filter_by_name)
+        elif filter_by_index is not None:
+            self.get_vector_by_index(filter_by_index)
+            selected = filter_by_index
+        if selected is not None:
+            if self.skip_reason is not None:
+                return [self._skipped_row()]
+            return [self._vector_rows("directed")[selected]]
 
         # Validate mode
         valid_modes = ["all", "random_only", "directed_only", "mixed", "test"]
         if mode not in valid_modes:
             raise ValueError(f"Invalid mode '{mode}'. Must be one of {valid_modes}")
 
-        # Mode: test - only test vectors
-        if mode == "test":
-            return [] if self.skip_reason is not None else list(self.test_vectors.values())
-
-        # Mode: directed_only
-        if mode == "directed_only":
-            return [] if self.skip_reason is not None else list(self.directed_vectors.values())
+        # Mode: test - only test vectors; directed_only - only directed vectors
+        if mode in ("test", "directed_only"):
+            if self.skip_reason is not None:
+                return [self._skipped_row()]
+            return self._vector_rows("test" if mode == "test" else "directed")
 
         # The remaining modes generate n random samples. A non-int n would never equal
-        # the Series row count below (bool is an int subclass, so reject it explicitly).
-        if not isinstance(n, int) or isinstance(n, bool):
-            raise ValueError(f"n must be an int, got {n!r}")
-        if n < 0:
-            raise ValueError(f"n must be >= 0, got {n}")
+        # the Series row count (bool is an int subclass, so reject it explicitly).
+        if not exhaustive:
+            if not isinstance(n, int) or isinstance(n, bool):
+                raise ValueError(f"n must be an int, got {n!r}")
+            if n < 0:
+                raise ValueError(f"n must be >= 0, got {n}")
 
         # An empty skip_if_empty sequence: nothing to generate, in any mode
         if self.skip_reason is not None:
-            return []
+            return [self._skipped_row()]
 
-        # Mode: all - always include all directed vectors
+        rows: list[_Row] = []
+        # Mode: all - always include all directed vectors; random_only - none
         if mode == "all" or mode == "mixed" and self.always_include_directed:
-            samples.extend(self.directed_vectors.values())
+            rows.extend(self._vector_rows("directed"))
 
-        # Mode: random_only - skip directed vectors entirely
-        # (no action needed, samples stays empty)
+        if exhaustive:
+            rows.extend(self._exhaustive_rows(constraints, stats))
+            return rows
 
         # Every rejected draw is also counted here, for the plugin's -v summary
-        total = _stats.rejected if _stats is not None else None
-
-        # Generate samples (for all modes except directed_only)
-        if mode != "directed_only" and self.per_sequence_samples and self._sequence_indices():
-            samples.extend(self._generate_per_sequence(n, constraints, total))
-        elif mode != "directed_only":
+        total = stats.rejected if stats is not None else None
+        if self.per_sequence_samples and self._sequence_indices():
+            rows.extend(self._per_sequence_rows(n, constraints, total))
+        elif any(isinstance(arg.rng_type, Series) for arg in self.test_args):
+            rows.extend(self._series_rows(n, constraints, total))
+        else:
             row_type = self.vector_type
-            # Series-aware branch: if any arg uses Series, produce ordered/cycling rows
-            series_indices = [
-                i
-                for i, a in enumerate(self.test_args)
-                if a.rng_type and isinstance(a.rng_type, Series)
-            ]
-            if series_indices:
-                series_seqs = [self.test_args[i].rng_type.sequence for i in series_indices]
-                random_indices = [i for i in range(len(self.test_args)) if i not in series_indices]
-                # Redrawing only helps when there are non-Series positions to change
-                attempts = self.max_retries if random_indices else 1
-                num_combos = math.prod(len(seq) for seq in series_seqs)
-                series_rows = 0
-                misses = 0
-                # Combinations skipped after redrawing their random args, keyed by their
-                # index in the product (Series values need not be hashable), with the
-                # rejections of their first skipped visit
-                skipped: dict[int, tuple[tuple[Any, ...], _Rejections]] = {}
-                # The rejections of one visit, and of the visits since the last row
-                visit = _Rejections(total)
-                misses_rejections = _Rejections()
-                for k, combo in enumerate(itertools.cycle(itertools.product(*series_seqs))):
-                    if series_rows >= n:
-                        break
-                    vec: list[Any] = [None] * len(self.test_args)
-                    # Series values skip arg.generate(), so apply the arg's validator here
-                    for pos, idx in enumerate(series_indices):
-                        vec[idx] = self.test_args[idx]._validate(combo[pos])
-                    # Try fresh random values for the non-Series positions
-                    if visit.counts:
-                        visit.clear()
-                    row = self._build_row(
-                        row_type, vec, random_indices, attempts, visit, constraints
-                    )
-                    if row is not None:
-                        samples.append(row)
-                        series_rows += 1
-                        misses = 0
-                        if misses_rejections.counts:
-                            misses_rejections.clear()
-                    else:
-                        # Skip a combination the constraints reject and move on to the
-                        # next one, unless a whole cycle in a row has produced nothing
-                        misses += 1
-                        misses_rejections.merge(visit)
-                        if misses == num_combos:
-                            raise self._exhausted(
-                                "Could not generate valid vector: none of the "
-                                f"{num_combos} Series combinations satisfied the vector "
-                                f"constraints ({attempts} attempt(s) each)",
-                                misses_rejections,
-                                retries=bool(random_indices),
-                            )
-                        # With random args the rejection may just be unlucky draws of a
-                        # valid combination, so the skip must not go unnoticed
-                        if random_indices and k % num_combos not in skipped:
-                            skipped[k % num_combos] = (combo, visit.copy())
-                # Warn once per skipped combination, and only when no error was raised
-                for combo, rejected in skipped.values():
-                    values = ", ".join(
-                        f"{self.test_args[idx].name}={value!r}"
-                        for idx, value in zip(series_indices, combo)
-                    )
-                    warnings.warn(
-                        f"Series combination ({values}) skipped: the vector constraints "
-                        f"rejected max_retries={attempts} draws of the non-Series args. "
-                        f"{self._describe_rejections(rejected)} "
-                        "Raise max_retries, or relax the constraints if this combination "
-                        "should be tested.",
-                        PytestStrategiesWarning,
-                        stacklevel=2,
-                    )
-            else:
-                rejections = _Rejections(total)
-                for k in range(n):
-                    samples.append(self._random_row(row_type, rejections, constraints, k))
+            rejections = _Rejections(total)
+            for k in range(n):
+                row = self._random_row(row_type, rejections, constraints, k)
+                rows.append(_Row("random", None, k, (), k, row))
+        return rows
 
-        return samples
+    def _vector_rows(self, kind: Literal["directed", "test"]) -> list[_Row]:
+        """Return the directed or the test vectors as rows, in order."""
+        stored: Mapping[str, object] = (
+            self._directed_vectors if kind == "directed" else self._test_vectors
+        )
+        rows = []
+        for index, (name, vector) in enumerate(stored.items()):
+            if isinstance(vector, _ParameterSet):
+                # The pytest.param(...) keeps its marks; its values are the Vector
+                values = cast(Vector, vector.values)
+                rows.append(_Row(kind, name, index, (), None, values, param=vector))
+            else:
+                rows.append(_Row(kind, name, index, (), None, cast(Vector, vector)))
+        return rows
+
+    def _skipped_row(self) -> _Row:
+        """Return the one row of a Parameter whose skip_if_empty sequence has no values."""
+        values = tuple.__new__(self.vector_type, [None] * len(self.test_args))
+        return _Row("skipped", None, None, (), None, values)
+
+    def _series_rows(
+        self, n: int, constraints: _Constraints, total: Counter[str] | None = None
+    ) -> list[_Row]:
+        """
+        Generate n rows that cycle through the combinations of the Series args (the
+        finite mode of a Parameter with Series args).
+
+        The Series args are enumerated: their combinations follow declaration order
+        (the leftmost arg is the slowest counter), and the visits cycle through them
+        until n rows are made. The other args are drawn for every visit, and redrawn
+        up to max_retries times when the constraints reject the row. A row's j is the
+        cycle of its visit, so a combination the constraints skip leaves a gap.
+
+        Args:
+            n: Number of rows
+            constraints: The constraints to evaluate (``_evaluated()``)
+            total: If given, counts every rejected draw by constraint name
+
+        Raises:
+            ValueError: If a Series value fails its argument's validator
+            ValueError: If a whole cycle of combinations in a row produced no row
+
+        Warns:
+            PytestStrategiesWarning: Once for each combination skipped because its
+                random args did not satisfy the constraints within max_retries draws
+        """
+        args = self.test_args
+        row_type = self.vector_type
+        series_indices = [
+            i for i, a in enumerate(args) if a.rng_type and isinstance(a.rng_type, Series)
+        ]
+        series_seqs = [args[i].rng_type.sequence for i in series_indices]
+        random_indices = [i for i in range(len(args)) if i not in series_indices]
+        # Redrawing only helps when there are non-Series positions to change
+        attempts = self.max_retries if random_indices else 1
+        num_combos = math.prod(len(seq) for seq in series_seqs)
+        enumeration = _Enumeration([args[i].name for i in series_indices], series_seqs)
+        rows: list[_Row] = []
+        misses = 0
+        # Combinations skipped after redrawing their random args, keyed by their
+        # index in the product (Series values need not be hashable), with the
+        # rejections of their first skipped visit
+        skipped: dict[int, tuple[tuple[Any, ...], _Rejections]] = {}
+        # The rejections of one visit, and of the visits since the last row
+        visit = _Rejections(total)
+        misses_rejections = _Rejections()
+        # A combination is a tuple of positions in the Series' sequences
+        combinations = itertools.product(*(range(len(seq)) for seq in series_seqs))
+        for k, combination in enumerate(itertools.cycle(combinations)):
+            if len(rows) >= n:
+                break
+            combo = tuple(seq[p] for seq, p in zip(series_seqs, combination))
+            vec: list[Any] = [None] * len(args)
+            # Series values skip arg.generate(), so apply the arg's validator here
+            for idx, value in zip(series_indices, combo):
+                vec[idx] = args[idx]._validate(value)
+            # The visit's cycle: a skipped visit leaves its number unused
+            j = k // num_combos
+            _, labels, pos = enumeration.identify(combination)
+            # Try fresh random values for the non-Series positions
+            if visit.counts:
+                visit.clear()
+            row = self._build_row(
+                row_type, vec, random_indices, attempts, visit, constraints, "random", j, labels
+            )
+            if row is not None:
+                rows.append(_Row("random", None, j, pos, j, row, labels))
+                misses = 0
+                if misses_rejections.counts:
+                    misses_rejections.clear()
+            else:
+                # Skip a combination the constraints reject and move on to the next
+                # one, unless a whole cycle in a row has produced nothing
+                misses += 1
+                misses_rejections.merge(visit)
+                if misses == num_combos:
+                    raise self._exhausted(
+                        "Could not generate valid vector: none of the "
+                        f"{num_combos} Series combinations satisfied the vector "
+                        f"constraints ({attempts} attempt(s) each)",
+                        misses_rejections,
+                        retries=bool(random_indices),
+                    )
+                # With random args the rejection may just be unlucky draws of a valid
+                # combination, so the skip must not go unnoticed
+                if random_indices and k % num_combos not in skipped:
+                    skipped[k % num_combos] = (combo, visit.copy())
+        # Warn once per skipped combination, and only when no error was raised
+        for combo, rejected in skipped.values():
+            values = ", ".join(
+                f"{args[idx].name}={value!r}" for idx, value in zip(series_indices, combo)
+            )
+            warnings.warn(
+                f"Series combination ({values}) skipped: the vector constraints "
+                f"rejected max_retries={attempts} draws of the non-Series args. "
+                f"{self._describe_rejections(rejected)} "
+                "Raise max_retries, or relax the constraints if this combination "
+                "should be tested.",
+                PytestStrategiesWarning,
+                # The caller of generate_vectors()
+                stacklevel=4,
+            )
+        return rows
 
     def _sequence_indices(self) -> list[int]:
         """Return the positions of the Series/RNGSequence args."""
@@ -1337,15 +1766,16 @@ class Parameter:
             if a.rng_type and isinstance(a.rng_type, SequenceLike)
         ]
 
-    def _generate_per_sequence(
+    def _per_sequence_rows(
         self, n: int, constraints: _Constraints, total: Counter[str] | None = None
-    ) -> list[Vector]:
+    ) -> list[_Row]:
         """
         Generate n random rows for every combination of the sequence args.
 
         Combinations follow declaration order (leftmost arg is the slowest counter), for
         RNGSequence as well as Series. The non-sequence args are drawn fresh for every
         row and redrawn up to max_retries times when the constraints reject the vector.
+        A row's j is its number within its combination.
 
         Args:
             n: Number of rows per combination
@@ -1353,7 +1783,7 @@ class Parameter:
             total: If given, counts every rejected draw by constraint name
 
         Returns:
-            List of Vectors, grouped by combination
+            The rows, grouped by combination
 
         Raises:
             ValueError: If a sequence value fails its argument's validator
@@ -1367,42 +1797,56 @@ class Parameter:
         if n == 0:
             return []
 
+        args = self.test_args
         sequence_indices = self._sequence_indices()
-        sequences = [self.test_args[i].rng_type.sequence for i in sequence_indices]
-        random_indices = [i for i in range(len(self.test_args)) if i not in sequence_indices]
+        sequences = [args[i].rng_type.sequence for i in sequence_indices]
+        random_indices = [i for i in range(len(args)) if i not in sequence_indices]
         # Redrawing only helps when there are non-sequence positions to change
         attempts = self.max_retries if random_indices else 1
 
         row_type = self.vector_type
-        samples: list[Vector] = []
+        enumeration = _Enumeration([args[i].name for i in sequence_indices], sequences)
+        rows: list[_Row] = []
         # Combinations cut short after redrawing their random args, with their row
         # count and the rejections of the row they could not fill
         short: list[tuple[tuple[Any, ...], int, _Rejections]] = []
         # The rejections of one row, and of every row that could not be filled
         visit = _Rejections(total)
         failed = _Rejections()
-        for combo in itertools.product(*sequences):
-            vec: list[Any] = [None] * len(self.test_args)
+        for combination in itertools.product(*(range(len(seq)) for seq in sequences)):
+            combo = tuple(seq[p] for seq, p in zip(sequences, combination))
+            vec: list[Any] = [None] * len(args)
             # Sequence values skip arg.generate(), so apply the arg's validator here
             for idx, value in zip(sequence_indices, combo):
-                vec[idx] = self.test_args[idx]._validate(value)
+                vec[idx] = args[idx]._validate(value)
+            _, labels, pos = enumeration.identify(combination)
 
-            rows = 0
-            while rows < n:
+            made = 0
+            while made < n:
                 if visit.counts:
                     visit.clear()
-                row = self._build_row(row_type, vec, random_indices, attempts, visit, constraints)
+                row = self._build_row(
+                    row_type,
+                    vec,
+                    random_indices,
+                    attempts,
+                    visit,
+                    constraints,
+                    "random",
+                    made,
+                    labels,
+                )
                 if row is None:
                     # Further rows of this combination would most likely fail too
                     failed.merge(visit)
                     if random_indices:
-                        short.append((combo, rows, visit.copy()))
+                        short.append((combo, made, visit.copy()))
                     break
-                samples.append(row)
-                rows += 1
+                rows.append(_Row("random", None, made, pos, made, row, labels))
+                made += 1
 
         num_combos = math.prod(len(seq) for seq in sequences)
-        if n and num_combos and not samples:
+        if n and num_combos and not rows:
             raise self._exhausted(
                 "Could not generate valid vector: none of the "
                 f"{num_combos} sequence combinations satisfied the vector "
@@ -1411,22 +1855,22 @@ class Parameter:
                 retries=bool(random_indices),
             )
 
-        for combo, rows, rejected in short:
+        for combo, made, rejected in short:
             values = ", ".join(
-                f"{self.test_args[idx].name}={value!r}"
-                for idx, value in zip(sequence_indices, combo)
+                f"{args[idx].name}={value!r}" for idx, value in zip(sequence_indices, combo)
             )
             warnings.warn(
-                f"Sequence combination ({values}) produced {rows} of {n} rows: the vector "
+                f"Sequence combination ({values}) produced {made} of {n} rows: the vector "
                 f"constraints rejected max_retries={attempts} draws of the other args. "
                 f"{self._describe_rejections(rejected)} "
                 "Raise max_retries, or relax the constraints if this combination "
                 "should be tested.",
                 PytestStrategiesWarning,
-                stacklevel=3,
+                # The caller of generate_vectors()
+                stacklevel=4,
             )
 
-        return samples
+        return rows
 
     def generate_exhaustive(
         self, *, constraints_off: Iterable[str] = (), _stats: _GenerationStats | None = None
@@ -1461,60 +1905,92 @@ class Parameter:
         # An empty skip_if_empty sequence has no combinations to enumerate
         if self.skip_reason is not None:
             return []
+        return [row.values for row in self._exhaustive_rows(constraints, _stats)]
 
-        # Identify sequence args and their indices
+    def _exhaustive_rows(
+        self, constraints: _Constraints, stats: _GenerationStats | None = None
+    ) -> list[_Row]:
+        """
+        Generate one row for every combination of the sequence args (Cartesian
+        product), drawing the other args for each.
+
+        The combinations follow each arg's ``--nsamples=auto`` order: a Series in
+        declaration order, an RNGSequence in a random permutation. A row's index is
+        its combination's position in the declaration-order product, whatever that
+        order, and its j is 0.
+
+        Args:
+            constraints: The constraints to evaluate (``_evaluated()``)
+            stats: If given, counts the rejections per constraint and the
+                combinations left out
+
+        Raises:
+            ValueError: If no sequence arguments are present
+            ValueError: If a sequence value fails its argument's validator
+            ValueError: If the vector constraints reject every combination
+        """
+        args = self.test_args
+        # Identify sequence args and their indices, with their values in auto order
         sequence_indices = []
-        sequences = []
-
-        for i, arg in enumerate(self.test_args):
+        orders = []
+        for i, arg in enumerate(args):
             if arg.rng_type and isinstance(arg.rng_type, SequenceLike):
                 sequence_indices.append(i)
-                sequences.append(arg.rng_type._get_auto_sequence())
+                orders.append(_auto_order(arg.rng_type))
 
-        if not sequences:
-            # If no sequences, fallback to a single random sample?
-            # Or raise error? The plan implies this is for "auto" mode with sequences.
-            # If "auto" is used without sequences, maybe default to 10 random samples?
-            # For now, let's raise error or return empty, but strategy should handle fallback.
-            # Let's return a single random sample to be safe if called directly,
-            # but Strategy should probably check this.
-            # Actually, let's raise ValueError as per docstring.
+        if not orders:
             raise ValueError("No sequence arguments found for exhaustive generation")
 
-        random_indices = [i for i in range(len(self.test_args)) if i not in sequence_indices]
+        random_indices = [i for i in range(len(args)) if i not in sequence_indices]
         # Redrawing only helps when there are non-sequence positions to change
         attempts = self.max_retries if random_indices else 1
 
         # Generate Cartesian product
         row_type = self.vector_type
-        samples: list[Vector] = []
+        enumeration = _Enumeration(
+            [args[i].name for i in sequence_indices],
+            [args[i].rng_type.sequence for i in sequence_indices],
+        )
+        rows: list[_Row] = []
         # The rejections of one combination, and of the combinations left out
-        visit = _Rejections(_stats.rejected if _stats is not None else None)
+        visit = _Rejections(stats.rejected if stats is not None else None)
         dropped = _Rejections()
-        for combination in itertools.product(*sequences):
+        for combination in itertools.product(*orders):
+            positions = [position for position, _ in combination]
             # Create a mutable vector (list) to fill in
-            vector: list[Any] = [None] * len(self.test_args)
+            vector: list[Any] = [None] * len(args)
 
             # Fill in sequence values (they skip arg.generate(), so validate them here)
-            for idx, value in zip(sequence_indices, combination):
-                vector[idx] = self.test_args[idx]._validate(value)
+            for idx, (_, value) in zip(sequence_indices, combination):
+                vector[idx] = args[idx]._validate(value)
 
             # Fill in non-sequence values with random generation, redrawing them if the
             # constraints reject the vector. A combination that still fails (e.g. its
             # sequence values alone break a constraint) is dropped.
+            index, labels, pos = enumeration.identify(positions)
             if visit.counts:
                 visit.clear()
-            row = self._build_row(row_type, vector, random_indices, attempts, visit, constraints)
+            row = self._build_row(
+                row_type,
+                vector,
+                random_indices,
+                attempts,
+                visit,
+                constraints,
+                "exhaustive",
+                index,
+                labels,
+            )
             if row is not None:
-                samples.append(row)
+                rows.append(_Row("exhaustive", None, index, pos, 0, row, labels))
             else:
                 dropped.merge(visit)
 
-        # No samples from a non-empty product means the constraints rejected every
+        # No rows from a non-empty product means the constraints rejected every
         # combination. Fail like finite mode does instead of yielding an empty parameter
         # set, which pytest would silently skip.
-        num_combos = math.prod(len(seq) for seq in sequences)
-        if num_combos and not samples:
+        num_combos = math.prod(len(order) for order in orders)
+        if num_combos and not rows:
             raise self._exhausted(
                 "Could not generate valid vector: none of the "
                 f"{num_combos} sequence combinations satisfied the vector "
@@ -1522,10 +1998,10 @@ class Parameter:
                 dropped,
                 retries=bool(random_indices),
             )
-        if _stats is not None:
-            _stats.left_out += num_combos - len(samples)
+        if stats is not None:
+            stats.left_out += num_combos - len(rows)
 
-        return samples
+        return rows
 
     # ====
     # CLI Support

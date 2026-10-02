@@ -761,7 +761,7 @@ class TestRaisingConstraints:
             "no argument 'lenght'; its arguments are len"
         )
 
-    def test_a_series_row_is_named_by_its_values(self):
+    def test_a_series_row_is_named_by_its_number_and_values(self):
         param = Parameter(
             TestArg("ch", rng_type=Series([3, 0])),
             vector_constraints={"ratio": lambda v: 6 / v.ch},
@@ -770,7 +770,9 @@ class TestRaisingConstraints:
         with pytest.raises(ZeroDivisionError) as excinfo:
             param.generate_vectors(2)
 
-        assert excinfo.value.__notes__ == ["Raised by constraint 'ratio' on the row Vector(ch=0)"]
+        assert excinfo.value.__notes__ == [
+            "Raised by constraint 'ratio' on random row 0 (ch=0), Vector(ch=0)"
+        ]
 
     def test_an_exception_raised_again_keeps_one_note(self):
         """A constraint that raises one exception object again: one note, for the last row."""

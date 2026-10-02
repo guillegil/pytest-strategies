@@ -261,7 +261,7 @@ class TestVectorIndexOutOfRange:
 
     def test_index_error_without_filter_still_raises(self):
         class BrokenParameter(Parameter):
-            def generate_vectors(self, *args, **kwargs):
+            def _generate_rows(self, *args, **kwargs):
                 raise IndexError("boom")
 
         param = BrokenParameter(TestArg("w", rng_type=RNGInteger(0, 9)))

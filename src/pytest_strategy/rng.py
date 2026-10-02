@@ -682,8 +682,8 @@ class SequenceLike(RNGType[T]):
     """
     Abstract base class for sequence-based RNG types.
 
-    Subclasses differ in how they produce an ordered sequence for exhaustive
-    (auto) mode via ``_get_auto_sequence()``. In finite mode, Parameter cycles
+    Subclasses differ in the order they give the sequence's positions in exhaustive
+    (auto) mode, via ``_auto_positions()``. In finite mode, Parameter cycles
     through Series values in order, and RNGSequence draws random elements via
     ``generate()``. With ``Parameter(per_sequence_samples=True)``, both are walked
     in declaration order with n rows for each value.
@@ -739,9 +739,20 @@ class SequenceLike(RNGType[T]):
             )
 
     def _get_auto_sequence(self) -> list[T]:
-        """Return the ordered list to use for exhaustive (auto) mode.
+        """Return the ordered list to use for exhaustive (auto) mode: the values in
+        the order of ``_auto_positions()``.
 
-        Subclasses MUST override this method.
+        A subclass that overrides this instead of ``_auto_positions()`` gets each
+        value's position found in the sequence.
+        """
+        return [self.sequence[position] for position in self._auto_positions()]
+
+    def _auto_positions(self) -> list[int]:
+        """Return the positions of the sequence in exhaustive (auto) mode's order.
+
+        The rows of exhaustive mode are keyed and labeled by these positions, so a
+        value listed twice still gives two rows. Subclasses MUST override this
+        method (or ``_get_auto_sequence()``).
         """
         raise NotImplementedError
 
@@ -775,9 +786,12 @@ class RNGSequence(SequenceLike[T]):
     sequence (each value exactly once, random order).
     """
 
-    def _get_auto_sequence(self) -> list[T]:
-        """Return a random permutation of the sequence for exhaustive mode."""
-        return RNG._generator.sample(self.sequence, len(self.sequence))
+    def _auto_positions(self) -> list[int]:
+        """Return a random permutation of the sequence's positions for exhaustive mode."""
+        # sample() picks positions whatever the population holds, so this draws the
+        # permutation sample(self.sequence, ...) drew in 3.0
+        size = len(self.sequence)
+        return RNG._generator.sample(range(size), size)
 
 
 class Series(SequenceLike[T]):
@@ -791,9 +805,9 @@ class Series(SequenceLike[T]):
     itertools.product order (leftmost arg is the slowest counter).
     """
 
-    def _get_auto_sequence(self) -> list[T]:
-        """Return sequence in original order for exhaustive mode."""
-        return list(self.sequence)
+    def _auto_positions(self) -> list[int]:
+        """Return the sequence's positions in their original order for exhaustive mode."""
+        return list(range(len(self.sequence)))
 
 
 class RNGString(RNGType[str]):
