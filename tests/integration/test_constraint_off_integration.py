@@ -200,6 +200,41 @@ def test_directed_vectors_are_the_same_with_and_without_the_flag(pytester):
     assert any(params["x"] % 2 for _, params in off[3:])
 
 
+@pytest.mark.parametrize(
+    ("flags", "rows", "summary"),
+    [
+        ([], 2, r"rejected: even=2; left out: 2 combinations$"),
+        (["--strategy-constraint-off=even"], 4, r"off: even$"),
+    ],
+    ids=["on", "off"],
+)
+def test_auto_generates_the_combinations_the_constraint_left_out(pytester, flags, rows, summary):
+    pytester.makepyfile(test_co_auto="""
+        from pytest_strategy import Parameter, Series, TestArg, register, strategy
+
+        @register("co_auto")
+        def auto():
+            return Parameter(
+                TestArg("ch", rng_type=Series([0, 1, 2, 3])),
+                vector_constraints={"even": lambda v: v.ch % 2 == 0},
+            )
+
+        @strategy("co_auto")
+        def test_auto(ch):
+            pass
+        """)
+
+    result = pytester.runpytest("-v", "--nsamples=auto", *flags)
+
+    result.assert_outcomes(passed=rows)
+    result.stdout.re_match_lines(
+        [
+            rf"  co_auto \(test_co_auto\.py\): 1 test\(s\), 0 directed, {rows} random rows; "
+            rf"nsamples=auto from --nsamples; {summary}"
+        ]
+    )
+
+
 def test_a_raising_constraint_names_the_one_turned_off_before_it(pytester):
     pytester.makepyfile(test_co_ratio="""
         from pytest_strategy import Parameter, RNGInteger, TestArg, register, strategy

@@ -430,6 +430,26 @@ class TestResolver:
         assert len(parametrization.values) == 4
         assert len(calls) == 3
 
+    def test_auto_turns_them_off_too(self):
+        def factory():
+            return Parameter(
+                TestArg("ch", rng_type=Series([0, 1, 2, 3])),
+                vector_constraints={"even": lambda v: v.ch % 2 == 0},
+            )
+
+        def test_fn(ch):
+            pass
+
+        def rows(*items):
+            config = _mock_config(nsamples="auto", strategy_constraint_off=list(items))
+            parametrization = build_parametrization(
+                "co_unit_auto", factory, test_fn, config=config, pytest_fixtures=set()
+            )
+            return parametrization.values
+
+        assert rows() == [0, 2]
+        assert rows("even") == [0, 1, 2, 3]
+
     def test_names_the_parameter_does_not_have_are_ignored(self):
         calls = []
 

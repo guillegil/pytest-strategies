@@ -564,11 +564,16 @@ skipped). If no strategy has it, the run stops with a usage error.
 usage errors) and split at their last `:` into `(strategy, name)` pairs on
 `SessionOptions`. Once collection ends, an item that matches no constraint of a
 strategy the run resolved is a usage error when the run collected the whole
-suite (`config.args_source` is not `ARGS`, and no `--lf`, `--sw`, `--ignore` or
-`--ignore-glob`), and otherwise a red line after the collection report (on a
-pytest-xdist worker, sent with the `-v` summary and printed by the controller).
-It is not checked under `--list-strategies` or when no `Parameter` strategy was
-resolved.
+suite, and otherwise a red line after the collection report (on a pytest-xdist
+worker, sent with the `-v` summary and printed by the controller). A run counts
+as the whole suite (`_collects_whole_suite`) when it was given no paths or node
+IDs (`config.args_source` is not `ARGS`), started in the rootdir (pytest's own
+rule in `Config._decide_args`: a run without arguments from a folder below it
+collects only that folder), and got none of `--lf`, `--sw`, `--ignore` or
+`--ignore-glob`, and when no test module or class was skipped or failed to
+collect (`pytest_collectreport` sets `SessionState.collectors_incomplete`: the
+strategies of its tests may not have been resolved). It is not checked under
+`--list-strategies` or when no `Parameter` strategy was resolved.
 
 **Pytest Hooks:**
 - `pytest_addhooks` - Adds the `pytest_strategies_context` hook (see below)
