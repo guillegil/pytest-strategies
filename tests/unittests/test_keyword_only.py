@@ -2,8 +2,9 @@
 Unit tests for the keyword-only options and the rng_type check of 4.0.
 
 The options after TestArg's rng_type, strategy()'s validate_signature,
-export_strategies()'s format and Parameter.generate_vectors()'s options after n
-are keyword-only, so an option a 4.x release adds cannot shift a positional call.
+export_strategies()'s format, Parameter.generate_vectors()'s options after n and
+Parameter.add_constraint()'s name are keyword-only, so an option a 4.x release
+adds cannot shift a positional call.
 An rng_type that is neither an RNGType nor has a generate() method is a TypeError,
 so a later release can give other callables a meaning there without changing what
 an existing call does.
@@ -80,10 +81,18 @@ class TestSignatures:
                 ["self", "n"],
                 {"mode", "filter_by_name", "filter_by_index"},
             ),
+            (Parameter.add_constraint, ["self", "fn"], {"name"}),
             # Unchanged: 4.1 adds its options after a * as well
             (register, ["name"], set()),
         ],
-        ids=["TestArg", "strategy", "export_strategies", "generate_vectors", "register"],
+        ids=[
+            "TestArg",
+            "strategy",
+            "export_strategies",
+            "generate_vectors",
+            "add_constraint",
+            "register",
+        ],
     )
     def test_only_the_leading_parameters_are_positional(self, fn, positional, keyword_only):
         params = inspect.signature(fn).parameters.values()
@@ -126,6 +135,10 @@ class TestPositionalCalls:
         with pytest.raises(TypeError, match="takes 2 positional arguments but 4 were given"):
             _param().generate_vectors(1, "all", "zero")
 
+    def test_add_constraint_name_by_position(self):
+        with pytest.raises(TypeError, match="takes 2 positional arguments but 3 were given"):
+            _param().add_constraint(lambda v: True, "n")
+
     def test_export_format_by_position(self):
         with pytest.raises(TypeError, match=r"export_strategies\(\) takes 0 positional"):
             export_strategies("json")
@@ -160,6 +173,12 @@ class TestKeywordCalls:
         assert len(param.generate_vectors(3, mode="random_only")) == 3
         assert param.generate_vectors(3, filter_by_name="zero") == [(0,)]
         assert param.generate_vectors(3, filter_by_index=0) == [(0,)]
+
+    def test_add_constraint_name_by_keyword(self):
+        param = _param()
+
+        assert param.add_constraint(lambda v: True, name="n") == "n"
+        assert list(param.vector_constraints) == ["n"]
 
     def test_export_format_by_keyword_is_still_checked(self):
         with pytest.raises(ValueError, match="Unsupported format: xml"):

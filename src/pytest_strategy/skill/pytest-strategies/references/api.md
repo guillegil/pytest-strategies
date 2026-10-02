@@ -113,7 +113,11 @@ class Parameter:
         directed_vectors: Mapping[str, Iterable[Any]] | None = None,
         test_vectors: Mapping[str, Iterable[Any]] | None = None,
         always_include_directed: bool = True,
-        vector_constraints: Sequence[Callable[[Vector], object]] | None = None,
+        vector_constraints: (
+            Mapping[str, Callable[[Vector], object]]
+            | Iterable[Callable[[Vector], object]]
+            | None
+        ) = None,
         max_retries: int = 100,
         nsamples: int | str | None = None,
         per_sequence_samples: bool = False,
@@ -127,7 +131,7 @@ class Parameter:
 | `directed_vectors` | named rows, placed before the random rows: one value per argument in order (a tuple or list), or by name (a dict of argument names to values, or a namedtuple with those fields); names are non-empty strings |
 | `test_vectors` | named rows used only by `--vector-mode=test`, in the same forms |
 | `always_include_directed` | whether `--vector-mode=mixed` includes the directed vectors |
-| `vector_constraints` | functions taking the row as a `Vector` (`v.lo` or `v[0]`); a random row that fails one is redrawn |
+| `vector_constraints` | functions taking the row as a `Vector` (`v.lo` or `v[0]`), as a dict of names to functions or a list (named by each function's `__name__`, `constraint_<i>` for a lambda); they run in order and a random row that fails one is redrawn |
 | `max_retries` | redraws per row before giving up (int >= 1) |
 | `nsamples` | this strategy's default count: `None`, an int >= 0 or `"auto"`; an integer `--nsamples` overrides it |
 | `per_sequence_samples` | count rows per combination of the `Series`/`RNGSequence` arguments (section 7) |
@@ -144,11 +148,16 @@ class Parameter:
 - The `Parameter` stores each vector as a `Vector` (a `pytest.param` keeps its
   marks, with a `Vector` as its values). `directed_vectors` and `test_vectors`
   are read-only mappings; change them with the `add_*` and `remove_*` methods.
-- The `Parameter` copies the dicts and lists it is given.
+- The `Parameter` copies the dicts and lists it is given. `vector_constraints` is
+  a read-only mapping of names to functions (iterating gives the names). A
+  constraint name is a non-empty string without whitespace, `:`, `,` or `=`; two
+  constraints with one name (closures from one helper) fail, so name them with a
+  dict.
 - Methods: `add_directed_vector(name, values)`, `remove_directed_vector(name)`,
   `add_test_vector(name, values)`, `remove_test_vector(name)`,
   `get_directed_vector(name)`, `get_test_vector(name)`, `get_vector_by_name(name)`,
-  `get_vector_by_index(i)`, `list_vector_names()`, `add_constraint(fn)`,
+  `get_vector_by_index(i)`, `list_vector_names()`,
+  `add_constraint(fn, *, name=None)` (returns the name), `remove_constraint(name)`,
   `clear_constraints()`, `get_arg(name)`, `generate_vectors(n, mode=...)`,
   `generate_exhaustive()`, `to_dict()`.
 - Properties: `arg_names`, `arg_types`, `vector_names`, `num_args`,
@@ -460,7 +469,9 @@ extra names. IDs look like `x=1,y=2`.
 | --- | --- |
 | `Strategy 'x' not found` | Not visible from the test's folder. Check the spelling (see "did you mean"), move the strategy to a parent folder, pass the factory with `@strategy(factory)`, or fix a strategies file that failed to load (listed). |
 | usage error naming two files for one name | Two factories with one name in the same folder. Rename one, or move it to its own folder. |
-| `Could not generate valid vector` | The constraints rejected every draw within `max_retries`; the message names each constraint and its rejection count. Relax the constraint, narrow the ranges or raise `Parameter(max_retries=)`. |
+| `Could not generate random row K after max_retries=N draws` (or `Could not generate valid vector` for combinations) | The constraints rejected every draw; the message counts the rejections by the name of the first failing constraint and shows the first row each rejected. Relax the constraint, narrow the ranges or raise `Parameter(max_retries=)`. |
+| `Constraint 'x' raised ...` | A constraint raised on the row shown (its frame follows). Fix the constraint; one before it in the mapping can guard it (`{"nonzero": ..., "ratio": ...}`). |
+| `Two constraints are named 'x'` | Two functions with one name in a constraint list. Pass a dict of names to functions. |
 | `No valid value found after N attempts` | A number predicate rejected every draw. Narrow the range. |
 | `Series combination (...) skipped` warning | One combination's random arguments failed the constraints `max_retries` times. Raise `max_retries` or relax the constraint. |
 | `... would generate N rows ..., more than the limit of ...` | Too many exhaustive combinations. Reduce them or raise `max_exhaustive` / `strategies_max_exhaustive`. |

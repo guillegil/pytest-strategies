@@ -1207,7 +1207,11 @@ def _registration_count() -> int:
 
 
 def _summary_lines(resolutions: list[Any]) -> list[str]:
-    """Summarize the resolved strategies for -v: tests and rows per strategy."""
+    """
+    Summarize the resolved strategies for -v: tests and rows per strategy, and for
+    a strategy with constraints the draws each rejected (and, under
+    --nsamples=auto, the combinations left out).
+    """
     by_strategy: dict[tuple[str, str], list[Any]] = {}
     for resolution in resolutions:
         by_strategy.setdefault((resolution.strategy, resolution.where), []).append(resolution)
@@ -1223,6 +1227,17 @@ def _summary_lines(resolutions: list[Any]) -> list[str]:
         line = f"{name} ({where}): {len(entries)} test(s), {rows} rows"
         if sources:
             line += "; nsamples=" + ", ".join(sources)
+        # The draws each constraint rejected first, over the strategy's tests
+        rejected: dict[str, int] = {}
+        for e in entries:
+            for constraint in e.constraints:
+                rejected[constraint] = rejected.get(constraint, 0) + e.rejected.get(constraint, 0)
+        if rejected:
+            line += "; rejected: " + ", ".join(f"{c}={count}" for c, count in rejected.items())
+            left_out = [e.left_out for e in entries if e.left_out is not None]
+            if left_out:
+                combinations = "combination" if sum(left_out) == 1 else "combinations"
+                line += f"; left out: {sum(left_out)} {combinations}"
         lines.append(line)
     return lines
 

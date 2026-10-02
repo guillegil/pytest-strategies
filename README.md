@@ -184,12 +184,12 @@ RNGInteger(0, 100, predicate=lambda x: x % 2 == 0)
 Parameter(
     TestArg("min", rng_type=RNGInteger(0, 10)),
     TestArg("max", rng_type=RNGInteger(0, 10)),
-    vector_constraints=[
-        lambda v: v[0] < v[1]  # Ensure min < max
-    ]
+    vector_constraints={
+        "ordered": lambda v: v.min < v.max,  # Ensure min < max
+    }
 )
 ```
-A constraint receives the row as a `Vector`, a tuple whose fields are the argument names, so `lambda v: v.min < v.max` works too. A random vector that fails a constraint is drawn again, up to `max_retries` times (a `Parameter` argument, default 100). If no valid vector turns up, collecting the test fails with "Could not generate valid vector", and the message says how many draws each constraint rejected, naming the constraint functions (a lambda is named by its position), so you can tell which one is too strict.
+A constraint receives the row as a `Vector`, a tuple whose fields are the argument names, so `v.min` and `v[0]` both work. Constraints are named: by the keys of a dict, or, in a list, by each function's name (`constraint_<i>` for a lambda). They run in order, and the first falsy result rejects the row. A random vector that fails a constraint is drawn again, up to `max_retries` times (a `Parameter` argument, default 100). If no valid vector turns up, collecting the test fails with "Could not generate random row K after max_retries=N draws", and the message counts the draws each constraint rejected first, by name, with the first row each one rejected, so you can tell which one is too strict. With `-v`, the Strategy Summary lists the rejections per constraint for each strategy.
 
 ### 5. Sequence Testing & Exhaustive Generation (New in v2.0.0)
 

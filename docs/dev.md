@@ -316,10 +316,22 @@ options) take precedence over the mode and return that one directed vector, or
 raise `KeyError` / `IndexError` when it does not exist. `n` must be an int >= 0
 in the modes that generate samples.
 
-**Constraints:** a random vector that fails `vector_constraints` is redrawn up to
-`max_retries` times (default 100) before `generate_vectors` raises. The error
-counts the draws each constraint rejected, naming it by its function name (or
-`constraint #i (lambda)`). With `Series`
+**Constraints:** `vector_constraints` is a read-only mapping of names to
+functions (the private `_constraints` dict), in evaluation order; a list given
+to the constructor is named by each function's `__name__`, or `constraint_<i>`
+for lambdas, partials and callable objects (`_unnamed` keeps those names, so the
+messages add the constraint's origin). Duplicate names, a function given twice
+and names with whitespace, `:`, `,` or `=` fail when the `Parameter` is built. A
+random vector that fails a constraint is redrawn up to `max_retries` times
+(default 100) before `generate_vectors` raises `_ConstraintsExhausted`, whose
+message counts the draws by the name of the first failing constraint
+(`_Rejections`) and shows the first row each one rejected; the resolver replaces
+its last sentence with advice that names the strategy and its strictest
+constraint. A constraint that raises becomes `_ConstraintError`, chained to the
+user's exception, which the resolver chains the collection error to. The private
+`_stats` keyword of `generate_vectors()` and `generate_exhaustive()` collects the
+counts (and the combinations `--nsamples=auto` left out) for the `-v` summary.
+With `Series`
 args, `n` rows are taken by cycling through the `Series` combinations. A
 combination the constraints reject is skipped, after its random args have been
 redrawn up to `max_retries` times, and each such skip with random args emits a
@@ -878,11 +890,12 @@ A predicate on an RNG type rejected 100 draws in a row. Either:
 - Move the rule to `vector_constraints`, whose redraws `Parameter(max_retries=...)` controls
 - Use directed vectors instead
 
-### "Could not generate valid vector ..."
+### "Could not generate random row K ..." or "Could not generate valid vector ..."
 
 The `vector_constraints` rejected every draw (or, with `Series`/`RNGSequence`
-args, every combination). The message counts the draws each constraint
-rejected, so you can see which one is too strict. Relax it, or raise
+args, every combination). The message counts the draws by the name of the first
+constraint that rejected each one, and shows the first row each rejected, so you
+can see which one is too strict. Relax it, or raise
 `Parameter(max_retries=...)`.
 The related `PytestStrategiesWarning` "Series combination (...) skipped" means
 one combination was skipped after `max_retries` redraws of its random args.

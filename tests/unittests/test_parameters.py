@@ -175,7 +175,7 @@ class TestParameterVectorGeneration:
         arg = TestArg("x", rng_type=RNGInteger(0, 10))
         param = Parameter(arg, vector_constraints=[lambda v: v[0] > 100])  # Impossible
 
-        with pytest.raises(ValueError, match="Could not generate valid vector"):
+        with pytest.raises(ValueError, match="Could not generate a random row"):
             param.generate_vector()
 
     def test_generate_vector_honors_custom_max_retries(self):
@@ -188,7 +188,7 @@ class TestParameterVectorGeneration:
         )
 
         assert param.max_retries == 7
-        with pytest.raises(ValueError, match="after 7 attempts"):
+        with pytest.raises(ValueError, match="after max_retries=7 draws"):
             param.generate_vector()
 
 

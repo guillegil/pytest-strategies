@@ -25,7 +25,13 @@ from ._introspection import detect_dataclass_param, validate_signature
 from ._registry import _describe_factory, display_path, factory_source
 from ._runtime import Resolution, runtime
 from ._warnings import PytestStrategiesWarning
-from .parameters import Parameter, _ParameterSet
+from .parameters import (
+    Parameter,
+    _ConstraintError,
+    _ConstraintsExhausted,
+    _GenerationStats,
+    _ParameterSet,
+)
 from .rng import RNG, SequenceLike
 
 # Default for the strategies_max_exhaustive ini option
@@ -191,6 +197,26 @@ def _check_size(
     )
 
 
+def _exhausted_message(name: str, error: _ConstraintsExhausted) -> str:
+    """
+    Return the message of constraints that rejected every draw, ending with advice
+    that turns the strictest constraint off for this strategy.
+    """
+    if error.retries:
+        advice = "Raise Parameter(max_retries=...), relax a constraint"
+    else:
+        advice = "Relax a constraint"
+    if error.strictest is None:
+        return f"{error.detail} {advice}."
+    # --strategy-constraint-off splits items on ",", so a strategy whose name has
+    # one cannot be targeted: the bare name turns the constraint off everywhere
+    item = error.strictest if "," in name else f"{name}:{error.strictest}"
+    return (
+        f"{error.detail} {advice}, or turn one off for this run with "
+        f"--strategy-constraint-off={item}."
+    )
+
+
 def check_factory_result(name: str, factory: Callable[..., Any], result: Any) -> Parameter:
     """
     Return what a strategy factory returned, which must be a :class:`Parameter`.
@@ -307,6 +333,9 @@ def build_parametrization(
 
     # Generate samples using Parameter's generate_vectors with CLI options
     samples: list[Any]
+    # The rejections per constraint (and the combinations "auto" left out), for -v
+    stats = _GenerationStats()
+    exhaustive = False
     try:
         # Warnings raised while generating name the strategy and the test
         with _attributed_warnings(name, test_fn):
@@ -318,9 +347,11 @@ def build_parametrization(
                     mode=vector_mode,
                     filter_by_name=vector_name,
                     filter_by_index=vector_index,
+                    _stats=stats,
                 )
                 if not filtered and vector_mode not in ("test", "directed_only"):
-                    samples.extend(param.generate_exhaustive())
+                    exhaustive = True
+                    samples.extend(param.generate_exhaustive(_stats=stats))
             else:
                 assert isinstance(effective_nsamples, int)
                 samples = param.generate_vectors(
@@ -328,7 +359,15 @@ def build_parametrization(
                     mode=vector_mode,
                     filter_by_name=vector_name,
                     filter_by_index=vector_index,
+                    _stats=stats,
                 )
+    except _ConstraintsExhausted as e:
+        raise ValueError(
+            f"Error generating samples for strategy '{name}': {_exhausted_message(name, e)}"
+        ) from e
+    except _ConstraintError as e:
+        # Chained to the constraint's own exception, so the error shows the user's frame
+        raise ValueError(f"Error generating samples for strategy '{name}': {e}") from e.__cause__
     except (KeyError, IndexError) as e:
         # If filtering by name (KeyError) or index (IndexError) and the vector
         # doesn't exist, return empty samples
@@ -349,6 +388,10 @@ def build_parametrization(
         skip_reason = param.skip_reason
 
     _count_rows(resolution, param, samples, vector_mode, filtered)
+    resolution.constraints = tuple(param.vector_constraints)
+    resolution.rejected = dict(stats.rejected)
+    if exhaustive:
+        resolution.left_out = stats.left_out
 
     argnames = param.arg_names
 

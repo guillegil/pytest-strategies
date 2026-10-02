@@ -1,5 +1,7 @@
 """Unit tests for the 3.0.0 public API and error messages."""
 
+import re
+
 import pytest
 
 import pytest_strategy
@@ -125,6 +127,8 @@ class TestErrorMessages:
             Parameter(TestArg("x", value=1), TestArg("x", value=2))
 
     def test_exhausted_retries_name_each_constraint(self):
+        """Since 4.0 the counts are by constraint name, with the first row each rejected."""
+
         def below_zero(vector):
             return vector[0] < 0
 
@@ -139,9 +143,18 @@ class TestErrorMessages:
             param.generate_vector()
 
         message = str(excinfo.value)
-        assert "Could not generate valid vector after 40 attempts" in message
-        lambda_count = int(message.split("constraint #0 (lambda) rejected ")[1].split(",")[0])
-        named_count = int(message.split("below_zero (constraint #1) rejected ")[1].rstrip("."))
+        line = param.vector_constraints["constraint_0"].__code__.co_firstlineno
+        parsed = re.fullmatch(
+            r"Could not generate a random row after max_retries=40 draws\. "
+            r"Rejected by \(first failing constraint per draw\): "
+            r"constraint_0=(\d+), below_zero=(\d+)\. "
+            rf"First rows rejected: constraint_0 \(lambda at test_v3_features\.py:{line}\): "
+            r"Vector\(x=[0-4]\); below_zero: Vector\(x=[5-9]\)\. "
+            r"Raise Parameter\(max_retries=\.\.\.\) or relax a constraint\.",
+            message,
+        )
+        assert parsed is not None, message
+        lambda_count, named_count = map(int, parsed.groups())
         assert lambda_count + named_count == 40
         assert lambda_count > 0 and named_count > 0
 

@@ -1,8 +1,9 @@
 """
 The decorators keep the decorated function's type, the keyword-only options are
 keyword-only for type checkers too, StrategyOptions is typed as frozen, a
-Vector's fields type-check by name, and vectors given by name type-check next to
-tuples while the vector mappings are read-only.
+Vector's fields type-check by name, vectors given by name type-check next to
+tuples while the vector mappings are read-only, and constraints type-check by
+name too.
 
 CI also type-checks this file with ``mypy --strict``: ``assert_type`` fails the
 check if a decorator loses the type (a call on ``Callable[..., Any]`` returns
@@ -12,7 +13,7 @@ fails it too. At runtime it only runs the code.
 """
 
 import dataclasses
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Literal, assert_type
 
 import pytest
@@ -78,6 +79,8 @@ def test_mypy_rejects_positional_options() -> None:
         param.generate_vectors(1, "all")  # type: ignore[call-arg]
     with pytest.raises(TypeError):
         export_strategies("json")  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        param.add_constraint(aligned, "n")  # type: ignore[call-arg]
 
 
 def test_mypy_accepts_the_keyword_forms() -> None:
@@ -107,7 +110,7 @@ def test_vector_fields_type_check() -> None:
         TestArg("len", rng_type=RNGInteger(1, 16)),
         vector_constraints=[aligned, first_small, lambda v: v.len > 0],
     )
-    param.add_constraint(aligned)
+    assert assert_type(param.add_constraint(lambda v: bool(v.len < 64), name="short"), str)
 
     row = assert_type(param.generate_vector(), Vector)
     assert_type(param.vector_type, type[Vector])
@@ -123,6 +126,24 @@ def test_constraint_lists_typed_for_tuples_still_type_check() -> None:
     param = Parameter(TestArg("addr", rng_type=RNGInteger(0, 9)), vector_constraints=constraints)
 
     assert len(param.generate_vectors(2, mode="random_only")) == 2
+
+
+def test_named_constraints_type_check() -> None:
+    """Each ignore below is needed: mypy reports the line as an error, as Python does."""
+    constraints: dict[str, Callable[[Vector], bool]] = {"aligned": aligned}
+    param = Parameter(
+        TestArg("addr", rng_type=RNGInteger(0, 63)),
+        TestArg("len", rng_type=RNGInteger(1, 16)),
+        vector_constraints={"aligned": aligned, "short": lambda v: v.len < 16},
+    )
+    typed = Parameter(TestArg("addr", rng_type=RNGInteger(0, 63)), vector_constraints=constraints)
+
+    names = assert_type(param.vector_constraints, Mapping[str, Callable[[Vector], object]])
+    assert list(names) == ["aligned", "short"] and list(typed.vector_constraints) == ["aligned"]
+    assert assert_type(param.add_constraint(first_small, name="first"), str) == "first"
+    param.remove_constraint("first")
+    with pytest.raises(TypeError):
+        param.vector_constraints["x"] = aligned  # type: ignore[index]
 
 
 def test_vectors_by_name_type_check() -> None:

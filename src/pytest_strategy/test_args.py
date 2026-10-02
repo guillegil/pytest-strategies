@@ -4,7 +4,7 @@ import builtins
 from collections.abc import Callable
 from typing import Any
 
-from .rng import RNGType
+from .rng import RNGType, RNGValueError, _NoValidValue
 
 
 class TestArg:
@@ -94,13 +94,20 @@ class TestArg:
 
         Raises:
             ValueError: If generated value fails validation
+            RNGValueError: If the rng_type's predicate rejected every draw; the
+                message names this argument
         """
         # If static value, return it
         if self._value is not None:
             return self._validate(self._value)
 
         # Generate and validate
-        value = self._rng_type.generate()
+        try:
+            value = self._rng_type.generate()
+        except _NoValidValue as e:
+            raise RNGValueError(
+                f"Argument {self._name!r} could not draw a value its predicate accepts: {e}"
+            ) from e
         return self._validate(value)
 
     def to_dict(self) -> dict[str, Any]:

@@ -16,6 +16,10 @@ class RNGValueError(ValueError):
     """Exception raised when an invalid value is provided to RNG operations."""
 
 
+class _NoValidValue(RNGValueError):
+    """A predicate rejected every draw. TestArg.generate re-raises it naming the argument."""
+
+
 class RNG:
     """
     Core RNG singleton managing the seed and the random state.
@@ -107,7 +111,7 @@ class RNG:
             if predicate(value):
                 return value
 
-        raise RNGValueError(f"No valid value found after {RNG._max_retries} attempts")
+        raise _NoValidValue(f"No valid value found after {RNG._max_retries} attempts")
 
     @staticmethod
     def _string_args_error(
@@ -635,7 +639,7 @@ class RNGEnum(RNGType[E]):
 
         if sum(weights) <= 0:
             which = "weighted member with a positive weight" if self.weights else "member"
-            raise RNGValueError(
+            raise _NoValidValue(
                 f"No valid value found: no {which} of {self.enum_class.__name__} "
                 "satisfies the predicate"
             )

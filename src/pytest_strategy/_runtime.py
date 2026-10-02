@@ -20,7 +20,7 @@ later sibling sessions.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType, TracebackType
 from typing import TYPE_CHECKING, Any
@@ -46,6 +46,11 @@ class Resolution:
     # The count the factory's random rows were generated with, and where it came from
     nsamples: int | str | None = None
     source: str = ""
+    # The Parameter's constraint names, in order, and the draws each rejected
+    constraints: tuple[str, ...] = ()
+    rejected: dict[str, int] = field(default_factory=dict)
+    # Under --nsamples=auto: the combinations the constraints left out
+    left_out: int | None = None
 
 
 class SessionState:
