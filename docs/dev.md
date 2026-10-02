@@ -318,6 +318,38 @@ options) take precedence over the mode and return that one directed vector, or
 raise `KeyError` / `IndexError` when it does not exist. `n` must be an int >= 0
 in the modes that generate samples.
 
+**Rows:** every generation path goes through one entry point,
+`Parameter._generate_rows(n, *, exhaustive=False, mode=..., filter_by_name=...,
+filter_by_index=..., constraints_off=..., stats=None)`, which returns the rows as
+`_Row`s in their 3.0 order: `kind` (`directed`, `test`, `random`, `exhaustive`,
+or `skipped` for the one row of an empty `skip_if_empty` sequence), `name` (the
+vector's name, else None), `index` (the number `VectorInfo.index` and the
+messages show: the vector's position, `j` for a random row, the position in the
+declaration-order product of the enumerated sequences for an exhaustive row,
+None for `skipped`), `pos` (the enumerated arguments as `(name, token)` pairs,
+sorted by name), `j` (the row's number within its combination: k for a plain
+random row, the cycle for a finite Series row, so a combination the constraints
+skip leaves a gap, the row's number with `per_sequence_samples`, 0 for an
+exhaustive row), `values` (a `Vector`), `labels` (the enumerated arguments'
+labels, in declaration order) and `param` (the `pytest.param` a vector was given
+as). `generate_vectors()` and `generate_exhaustive()` return the rows' values.
+The resolver calls `_generate_rows()` itself, with `exhaustive=True` under
+`--nsamples=auto`, and builds each row's test ID (`names_id()`) and `VectorInfo`
+from the same `_Row`, so the row index is defined once; a subclass that
+overrides `generate_vectors()` does not change a test's rows.
+`_position_keys(arg, sequence)` gives each position of an enumerated argument's
+sequence (after its predicate) a `_Key(label, token)`: the label the ID shows
+(`ch=2`, `ch=1~1` for a repeat, `ch3` by position) and a typed token (`n`,
+`b:True`, `e:<qualname>.<member>`, `i:42`, `f:<float.hex()>`, `s:fast`,
+`y:<hex>`, `#<position>`). `_value_keys()` decides a value's type in the order
+None, bool, Enum member, `numbers.Integral`, `numbers.Real`, str, bytes,
+anything else, and keys a value it cannot convert (a Flag value that is no
+member, an int with too many digits for `str()`) by its position. `_auto_order()`
+gives a sequence's `--nsamples=auto` order as positions
+(`SequenceLike._auto_positions()`), and matches the values of a subclass that
+overrides `_get_auto_sequence()` back to their positions (`RNGValueError` for a
+value its sequence does not have).
+
 **Constraints:** `vector_constraints` is a read-only mapping of names to
 functions (the private `_constraints` dict), in evaluation order; a list given
 to the constructor is named by each function's `__name__`, or `constraint_<i>`
@@ -341,9 +373,11 @@ dataclass or attrs exception is not replaced by a `FrozenInstanceError` (an
 exception that rejects even that gets no note, and its failure waits in
 `_unattached` until the resolver reports it); for the same reason the resolver's
 `_attributed_warnings` is a class, since a `contextlib.contextmanager` assigns
-the exception's `__traceback__` on the way out. The private
-`_stats` keyword of `generate_vectors()` and `generate_exhaustive()` collects the
-counts (and the combinations `--nsamples=auto` left out) for the `-v` summary.
+the exception's `__traceback__` on the way out. The resolver collects the
+counts (and the combinations `--nsamples=auto` left out) for the `-v` summary in
+a `_GenerationStats` it passes as the `stats` keyword of `_generate_rows()`; the
+private `_stats` keyword of `generate_vectors()` and `generate_exhaustive()`
+passes one on.
 Their keyword-only `constraints_off` names constraints the call does not
 evaluate (`_evaluated()` builds the list once per call); the `Parameter` keeps
 them, so a cached factory's `Parameter` is never changed. The resolver passes
@@ -358,7 +392,7 @@ args, `n` rows are taken by cycling through the `Series` combinations. A
 combination the constraints reject is skipped, after its random args have been
 redrawn up to `max_retries` times, and each such skip with random args emits a
 `PytestStrategiesWarning`. The call raises only when a whole cycle yields no
-vector. `generate_exhaustive()` (used for `--nsamples=auto`) builds the
+vector. `generate_exhaustive()` (the rows of `--nsamples=auto`) builds the
 Cartesian product of the `Series`/`RNGSequence` args, drops combinations the
 constraints reject after the same redraws, and raises when it drops all of them.
 
@@ -559,6 +593,7 @@ Provides pytest hooks and CLI options.
 
 ```ini
 strategies_max_exhaustive = 100000  # Most rows --nsamples=auto (or per_sequence_samples) may generate per strategy
+strategies_ids = names              # Test IDs of strategy rows: names, or values (the 3.0 format)
 ```
 
 `--nsamples` is checked when the command line is parsed: anything other than an
@@ -589,9 +624,10 @@ strategies of its tests may not have been resolved). It is not checked under
 **Pytest Hooks:**
 - `pytest_addhooks` - Adds the `pytest_strategies_context` hook (see below)
 - `pytest_addoption` - Adds CLI options
-- `pytest_configure` - Opens the session's state and sets the run's seed,
-  restarting the plugin's generator from it; a pytest-xdist worker without
-  `--rng-seed` takes the controller's seed
+- `pytest_configure` - Checks the `strategies_ids` ini option (any value but
+  `names` or `values` is a `UsageError`, exit code 4), opens the session's state
+  and sets the run's seed, restarting the plugin's generator from it; a
+  pytest-xdist worker without `--rng-seed` takes the controller's seed
 - `pytest_configure_node` - (pytest-xdist only) sends the controller's seed to
   each worker
 - `pytest_collectstart` - Before a test module is imported, loads the strategy
@@ -600,6 +636,10 @@ strategies of its tests may not have been resolved). It is not checked under
   `parametrize` markers. A second, module-level implementation runs last: it
   fails a test written for record mode whose fixtures take every argument by
   name when no fixture or parametrization gives its record parameter a value
+- `pytest_itemcollected` - (tryfirst) Stores the `VectorInfo` of each strategy
+  row an item runs, read from the row's `strategy` mark: the first in node-ID
+  order under `VECTOR_KEY`, all of them under `VECTORS_KEY`, before any
+  `pytest_collection_modifyitems` hook
 - `pytest_collectreport` - Notes a test module or class that was skipped or
   failed to collect: its strategies may be unresolved, so the run counts as
   narrowed for `--strategy-constraint-off`
