@@ -109,7 +109,13 @@ def math_strategy(nsamples: int):
     )
 ```
 
-The factory is called once for each test that uses the strategy, when pytest collects that test. It receives the run's sample count as `nsamples`: an integer (the `--nsamples` value, or 10 when the option is not given), or the string `"auto"` under `--nsamples=auto`. The factory may take it as a keyword or positional parameter, or take no parameters at all; the plugin reads the signature to decide how to call it. A factory that returns a `Parameter` does not need to use `nsamples`, because the plugin generates the vectors itself.
+The factory is called once for each test that uses the strategy, when pytest collects that test. Like a test with fixtures, it receives by name the inputs its parameters ask for, in any order, and nothing else:
+- `nsamples`: the run's sample count, an integer (the `--nsamples` value, or 10 when the option is not given), or the string `"auto"` under `--nsamples=auto`. A factory that returns a `Parameter` does not need it, because the plugin generates the vectors itself.
+- `ctx`: the testbench context (see [Configuration-Dependent Strategies](#11-configuration-dependent-strategies-new-in-v200)).
+- `rng`: the plugin's `random.Random` (`RNG.generator()`), for draws the RNG types do not cover.
+- `options`: a frozen `StrategyOptions` with this strategy's name and the run's `--nsamples`, `--vector-mode`, `--vector-name` and `--vector-index` values.
+
+Any other parameter needs a default, which it keeps; `*args` and `**kwargs` receive nothing. A parameter without a default that is not one of these names fails collection with a message naming it (since 4.0 `def factory(n)` no longer receives `nsamples` by position), and `base`, `config` and `request` are reserved names. A factory decorated without `functools.wraps` is called with no arguments, and `mock.patch` mocks must be the first parameters.
 
 A factory must return a `Parameter`. Returning an `(argnames, samples)` tuple, the 1.x form deprecated in 3.0, fails the collection of the tests that use the strategy since 4.0: give the `Parameter` one `TestArg` per argument and the fixed rows as `directed_vectors`.
 

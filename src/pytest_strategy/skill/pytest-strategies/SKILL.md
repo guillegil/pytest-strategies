@@ -77,9 +77,12 @@ same module object the plugin loaded.
 
 - Once for each test that uses it, while pytest collects that test (in
   `pytest_generate_tests`), not when the file is imported.
-- It may declare `nsamples` (an int, or `"auto"` under `--nsamples=auto`) and
-  `ctx` (the result of the context hook, see below). Both are optional. It rarely
-  needs `nsamples`: return a `Parameter` and the plugin generates the rows.
+- It receives by name, in any order, the inputs it declares: `nsamples` (an int,
+  or `"auto"` under `--nsamples=auto`), `ctx` (the result of the context hook, see
+  below), `rng` (`RNG.generator()`) and `options` (a frozen `StrategyOptions`).
+  All are optional. It rarely needs `nsamples`: return a `Parameter` and the
+  plugin generates the rows. Any other parameter needs a default (`def f(n)`
+  fails), and `base`, `config` and `request` are reserved.
 - It returns a `Parameter`. Returning an `(argnames, samples)` tuple fails since 4.0.
 - The test must take every `TestArg` name as a parameter (checked at collection;
   `@strategy(..., validate_signature=False)` turns the check off). Its other

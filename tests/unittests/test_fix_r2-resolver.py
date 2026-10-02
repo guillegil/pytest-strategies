@@ -25,11 +25,12 @@ from unittest.mock import MagicMock
 import pytest
 
 import pytest_strategy
-from pytest_strategy import RNG, RNGInteger, Strategy, _resolver
+from pytest_strategy import RNG, RNGInteger, Strategy, StrategyOptions, _resolver
 from pytest_strategy._dataclass import convert_to_dataclass
+from pytest_strategy._factory import FactoryInputs, call_factory
 from pytest_strategy._ids import generate_dataclass_ids, generate_test_ids
 from pytest_strategy._introspection import detect_dataclass_param
-from pytest_strategy._resolver import call_factory, resolve_and_parametrize
+from pytest_strategy._resolver import resolve_and_parametrize
 from pytest_strategy.parameters import Parameter
 from pytest_strategy.rng import Series
 from pytest_strategy.strategy import PytestStrategiesWarning
@@ -173,6 +174,16 @@ class TestParameterNsamplesAuto:
 # ---------------------------------------------------------------------------
 
 
+def _call_factory(factory, nsamples=3):
+    """Call ``factory`` as the resolver does, with ``nsamples`` as the run's count."""
+    inputs = FactoryInputs(
+        options=StrategyOptions(strategy="s", nsamples=nsamples),
+        rng=RNG.generator(),
+        ctx=lambda: None,
+    )
+    return call_factory("s", factory, inputs)
+
+
 def _inject_rng(fn):
     """A functools.wraps decorator that injects an extra argument."""
 
@@ -213,37 +224,43 @@ def _wraps_passthrough(fn):
 
 
 class TestDecoratedFactories:
-    """The signature of the wrapper that is called decides how nsamples is passed."""
+    """The signature of the wrapper that is called decides what a decorated factory gets."""
 
     def test_wraps_decorator_injecting_an_argument(self):
         @_inject_rng
         def make(nsamples, rng):
             return nsamples, rng
 
-        assert call_factory("s", make, 3) == (3, "rng")
+        assert _call_factory(make) == (3, "rng")
 
     def test_mock_patch_decorator(self):
+        # mock.patch passes its mocks to the first parameters
         @mock.patch("os.getcwd", return_value="/fake")
-        def make(nsamples, getcwd):
+        def make(getcwd, nsamples):
             return nsamples, os.getcwd()
 
-        assert call_factory("s", make, 3) == (3, "/fake")
+        assert _call_factory(make) == (3, "/fake")
 
     def test_wraps_adapter_around_zero_argument_function(self):
         @_adapt_zero_arg
         def make():
             return "called"
 
-        assert call_factory("s", make, 3) == "called"
+        assert _call_factory(make) == "called"
 
-    def test_var_args_wrapper_without_wraps_around_positional_factory(self):
+    def test_var_args_wrapper_without_wraps_around_zero_argument_factory(self):
+        calls = []
+
         @_passthrough
-        def make(n):
-            return n
+        def make():
+            calls.append("made")
+            return "made"
 
-        assert call_factory("s", make, 3) == 3
+        assert _call_factory(make) == "made"
+        assert calls == ["made"]
 
-    def test_var_args_wrapper_without_wraps_around_keyword_factory(self):
+    def test_var_args_wrapper_without_wraps_around_nsamples_factory(self):
+        """The wrapper hides the signature, so the factory is called with no arguments."""
         calls = []
 
         @_passthrough
@@ -251,15 +268,17 @@ class TestDecoratedFactories:
             calls.append(nsamples)
             return nsamples
 
-        assert call_factory("s", make, 3) == 3
-        assert calls == [3]
+        with pytest.raises(ValueError, match="@functools.wraps") as exc_info:
+            _call_factory(make)
+        assert "missing 1 required positional argument: 'nsamples'" in str(exc_info.value)
+        assert calls == []
 
     def test_wraps_var_args_wrapper(self):
         @_wraps_passthrough
-        def make(n):
-            return n
+        def make(nsamples):
+            return nsamples
 
-        assert call_factory("s", make, 3) == 3
+        assert _call_factory(make) == 3
 
     def test_opaque_wrapper_reports_the_original_error(self):
         @_passthrough
@@ -267,22 +286,23 @@ class TestDecoratedFactories:
             return a, b
 
         with pytest.raises(ValueError, match="Error calling strategy factory 's'") as exc_info:
-            call_factory("s", make, 3)
+            _call_factory(make)
 
-        assert "unexpected keyword argument 'nsamples'" in str(exc_info.value)
+        assert "missing 2 required positional arguments: 'a' and 'b'" in str(exc_info.value)
         assert isinstance(exc_info.value.__cause__, TypeError)
 
     def test_opaque_wrapper_non_type_error_is_not_retried(self):
         calls = []
 
         @_passthrough
-        def make(nsamples):
-            calls.append(nsamples)
+        def make():
+            calls.append("made")
             raise RuntimeError("boom")
 
-        with pytest.raises(ValueError, match="RuntimeError: boom"):
-            call_factory("s", make, 3)
-        assert calls == [3]
+        with pytest.raises(ValueError, match="RuntimeError: boom") as exc_info:
+            _call_factory(make)
+        assert "functools.wraps" not in str(exc_info.value)
+        assert calls == ["made"]
 
     def test_informative_wrapper_is_still_called_once(self):
         """A wrapper that names nsamples keeps the single-call guarantee."""
@@ -293,7 +313,7 @@ class TestDecoratedFactories:
             return None + 1
 
         with pytest.raises(ValueError, match="unsupported operand"):
-            call_factory("s", _inject_rng(make), 3)
+            _call_factory(_inject_rng(make))
         assert calls == [3]
 
     def test_resolver_uses_decorated_factory(self):
@@ -314,7 +334,7 @@ class TestDecoratedFactories:
 
         @Strategy.register("fix_r2_patched")
         @mock.patch("os.getcwd", return_value="/fake")
-        def patched(nsamples, getcwd):
+        def patched(getcwd, nsamples):
             return Parameter(TestArg("x", value=os.getcwd()), nsamples=1)
 
         @Strategy.register("fix_r2_adapted")
@@ -324,8 +344,8 @@ class TestDecoratedFactories:
 
         @Strategy.register("fix_r2_opaque")
         @_passthrough
-        def opaque(n):
-            return Parameter(TestArg("x", value=n), nsamples=1)
+        def opaque():
+            return Parameter(TestArg("x", value=1), nsamples=1)
 
         data = json.loads(Strategy.export_strategies())
 

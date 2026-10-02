@@ -19,8 +19,9 @@ from typing import Any, NamedTuple, cast
 import pytest
 
 from ._dataclass import convert_to_dataclass
+from ._factory import FactoryInputs, call_factory
 from ._ids import generate_dataclass_ids, generate_test_ids, make_unique_ids
-from ._introspection import detect_dataclass_param, lazy_signature, validate_signature
+from ._introspection import detect_dataclass_param, validate_signature
 from ._registry import _describe_factory, display_path, factory_source
 from ._runtime import Resolution, runtime
 from ._warnings import PytestStrategiesWarning
@@ -132,179 +133,6 @@ def _test_location(test_fn: Callable[..., Any], config: pytest.Config | None) ->
         except (TypeError, ValueError):
             pass
     return test_fn.__module__
-
-
-def _accepts(sig: inspect.Signature, *args: Any, **kwargs: Any) -> bool:
-    """Return True if a callable with signature ``sig`` can be called with these arguments."""
-    try:
-        sig.bind(*args, **kwargs)
-    except TypeError:
-        return False
-    return True
-
-
-def _only_var_args(sig: inspect.Signature) -> bool:
-    """Return True if ``sig`` has parameters, all of them ``*args``/``**kwargs``.
-
-    Such a signature (e.g. a decorator without ``functools.wraps``, or
-    ``unittest.mock.patch``) does not say how to pass ``nsamples``.
-    """
-    params = sig.parameters.values()
-    return bool(params) and all(
-        p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD) for p in params
-    )
-
-
-def _factory_error(name: str, nsamples: int | str, error: Exception) -> ValueError:
-    """Return the error reported when a strategy factory raises ``error``."""
-    return ValueError(
-        f"Error calling strategy factory '{name}' (nsamples={nsamples!r}): "
-        f"{type(error).__name__}: {error}"
-    )
-
-
-def _declares_ctx(sig: inspect.Signature | None) -> bool:
-    """Return True if a signature has a ``ctx`` parameter that can be passed by keyword."""
-    if sig is None:
-        return False
-    param = sig.parameters.get("ctx")
-    return param is not None and param.kind in (
-        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        inspect.Parameter.KEYWORD_ONLY,
-    )
-
-
-def _ctx_kwargs(name: str, sig: inspect.Signature | None) -> dict[str, Any]:
-    """
-    Return ``{"ctx": <the session's pytest_strategies_context result>}`` for a
-    factory with a ``ctx`` parameter, and ``{}`` for any other.
-
-    When no hook implementation answers and ``ctx`` has a default (including a
-    value bound by ``functools.partial``), ``{}`` too, so the factory keeps it.
-    """
-    if not _declares_ctx(sig):
-        return {}
-    try:
-        ctx = runtime.strategy_context()
-    except Exception as e:
-        raise ValueError(
-            f"Strategy factory '{name}' has a 'ctx' parameter, but the "
-            f"pytest_strategies_context hook raised {type(e).__name__}: {e}"
-        ) from e
-    assert sig is not None
-    if ctx is None and sig.parameters["ctx"].default is not inspect.Parameter.empty:
-        return {}
-    return {"ctx": ctx}
-
-
-def call_factory(name: str, factory: Callable[..., Any], nsamples: int | str) -> Any:
-    """
-    Call a strategy factory, passing ``nsamples`` the way it accepts it.
-
-    The calling convention is chosen from the signature of the callable that is
-    actually called (a decorator's wrapper, not the function it wraps), never by
-    retrying after a failure, so the factory is called exactly once:
-    ``factory(nsamples=...)`` when it accepts that keyword (a named parameter or
-    ``**kwargs``), ``factory(nsamples)`` when it has a positional parameter, and
-    ``factory()`` when it takes no arguments.
-
-    The exception is a signature with only ``*args``/``**kwargs`` (e.g. a
-    ``functools.wraps`` decorator's wrapper), or none at all (``functools.cache``),
-    which does not say how to pass ``nsamples``. Then the signature of the
-    function it wraps decides, the same way. When that does not tell either (a
-    decorator without ``functools.wraps``, ``unittest.mock.patch``), the factory
-    is called as ``factory(nsamples=...)`` and, if that raises ``TypeError``, once
-    more as ``factory(nsamples)``.
-
-    A factory with a ``ctx`` parameter also gets ``ctx=`` the session's
-    ``pytest_strategies_context`` result. When no implementation answers, ``ctx``
-    keeps its default, or is ``None`` without one. For a wrapper with only
-    ``*args``/``**kwargs``, the function it wraps decides.
-
-    Args:
-        name: Name of the strategy (for error messages)
-        factory: The registered factory function
-        nsamples: Value to pass as the factory's ``nsamples``
-
-    Returns:
-        Whatever the factory returns
-
-    Raises:
-        ValueError: If the signature cannot accept any of these calls, if the
-            factory itself raises (chained to the original exception), or if the
-            pytest_strategies_context hook raised for a factory that needs ``ctx``
-    """
-    args: tuple[Any, ...] = ()
-    try:
-        # follow_wrapped=False: a wraps() decorator's __wrapped__ describes the inner
-        # function, not the wrapper that is called
-        sig: inspect.Signature | None = lazy_signature(factory, follow_wrapped=False)
-    except (TypeError, ValueError):
-        # No introspectable signature (e.g. some builtins)
-        sig = None
-
-    if sig is None or _only_var_args(sig):
-        # The wrapper does not say whether ctx is wanted; the wrapped function does
-        try:
-            wrapped: inspect.Signature | None = lazy_signature(factory)
-        except (TypeError, ValueError):
-            wrapped = None
-        extra = _ctx_kwargs(name, wrapped)
-        # mock.patch passes its mocks as extra arguments the wrapped signature lists
-        if (
-            wrapped is not None
-            and not _only_var_args(wrapped)
-            and not hasattr(factory, "patchings")
-        ):
-            # Checked with a ctx, so nsamples is never bound to it positionally
-            bind_extra = {"ctx": None} if _declares_ctx(wrapped) else {}
-            calls: tuple[tuple[tuple[Any, ...], dict[str, Any]], ...] = (
-                ((), {"nsamples": nsamples}),
-                ((nsamples,), {}),
-                ((), {}),
-            )
-            for call_args, call_kwargs in calls:
-                if _accepts(wrapped, *call_args, **call_kwargs, **bind_extra) and (
-                    sig is None or _accepts(sig, *call_args, **call_kwargs, **extra)
-                ):
-                    try:
-                        return factory(*call_args, **call_kwargs, **extra)
-                    except Exception as e:
-                        raise _factory_error(name, nsamples, e) from e
-        try:
-            return factory(nsamples=nsamples, **extra)
-        except TypeError as e:
-            # The keyword may not be accepted: retry positionally, and report the
-            # original error if that fails too
-            try:
-                return factory(nsamples, **extra)
-            except Exception as retry_error:
-                raise _factory_error(name, nsamples, e) from retry_error
-        except Exception as e:
-            raise _factory_error(name, nsamples, e) from e
-
-    extra = {"ctx": None} if _declares_ctx(sig) else {}
-    kwargs: dict[str, Any] = {"nsamples": nsamples, **extra}
-    if not _accepts(sig, nsamples=nsamples, **extra):
-        if _accepts(sig, nsamples, **extra):
-            args, kwargs = (nsamples,), dict(extra)
-        elif _accepts(sig, **extra):
-            kwargs = dict(extra)
-        else:
-            raise ValueError(
-                f"Strategy factory '{name}' cannot be called with its signature {sig}. "
-                f"Factory should accept an 'nsamples' parameter (or no parameters), "
-                f"and optionally 'ctx'."
-            )
-    if extra:
-        # Only now: a factory whose signature is rejected never triggers the hook
-        del kwargs["ctx"]
-        kwargs.update(_ctx_kwargs(name, sig))
-
-    try:
-        return factory(*args, **kwargs)
-    except Exception as e:
-        raise _factory_error(name, nsamples, e) from e
 
 
 def _max_exhaustive(param: Parameter, config: pytest.Config | None) -> int:
@@ -421,11 +249,13 @@ def build_parametrization(
     # Restart the RNG generator on this strategy and test's own stream
     RNG.refresh_seed(key=f"{name}:{_test_location(test_fn, config)}::{test_fn.__qualname__}")
 
-    # Call the factory function the way its signature accepts nsamples. It receives
-    # the --nsamples value, "auto", or 10 without the option, never None (FR-8).
-    # The count the rows use is resolved below, once the Parameter's own nsamples
-    # is known.
-    param = check_factory_result(name, factory, call_factory(name, factory, options.nsamples))
+    # Call the factory with the inputs it declares by name. Its nsamples is the
+    # --nsamples value, "auto", or 10 without the option, never None (FR-8). The
+    # count the rows use is resolved below, once the Parameter's own nsamples is
+    # known.
+    inputs = FactoryInputs(options=options, rng=RNG.generator(), ctx=runtime.strategy_context)
+    result = call_factory(name, factory, inputs, rootpath=_rootpath(config))
+    param = check_factory_result(name, factory, result)
 
     resolution = Resolution(strategy=name, where=_where(factory, config))
 
@@ -601,13 +431,17 @@ def build_parametrization(
         return Parametrization(argstr, samples, ids)
 
 
+def _rootpath(config: pytest.Config | None) -> Path | None:
+    """Return the config's rootdir, or None without a config."""
+    return getattr(config, "rootpath", None) if config is not None else None
+
+
 def _where(factory: Callable[..., Any], config: pytest.Config | None) -> str:
     """Return the factory's file, relative to the rootdir when inside it, for the summary."""
     filename = factory_source(factory)[0]
     if filename is None:
         return "<unknown>"
-    rootpath = getattr(config, "rootpath", None) if config is not None else None
-    return display_path(filename, rootpath)
+    return display_path(filename, _rootpath(config))
 
 
 def _count_rows(

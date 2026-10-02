@@ -13,8 +13,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pytest_strategy import RNGInteger, Strategy
-from pytest_strategy._resolver import call_factory, resolve_and_parametrize
+from pytest_strategy import RNG, RNGInteger, Strategy, StrategyOptions
+from pytest_strategy._factory import FactoryInputs, call_factory
+from pytest_strategy._resolver import resolve_and_parametrize
 from pytest_strategy.parameters import Parameter
 from pytest_strategy.rng import RNGChoice, Series
 from pytest_strategy.strategy import PytestStrategiesWarning
@@ -32,6 +33,16 @@ def _make_config(**options):
     config = MagicMock()
     config.getoption.side_effect = lambda opt, default=None: values.get(opt, default)
     return config
+
+
+def _call_factory(name, factory, nsamples):
+    """Call ``factory`` as the resolver does, with ``nsamples`` as the run's count."""
+    inputs = FactoryInputs(
+        options=StrategyOptions(strategy=name, nsamples=nsamples),
+        rng=RNG.generator(),
+        ctx=lambda: None,
+    )
+    return call_factory(name, factory, inputs)
 
 
 def _make_test_fn(argnames):
@@ -271,43 +282,47 @@ def restore_registry():
 
 
 class TestCallFactory:
-    """call_factory passes nsamples the way the factory's signature accepts it."""
+    """call_factory passes the inputs a factory declares, by name (the 4.0 contract)."""
 
     def test_keyword_only_parameter(self):
         def factory(*, nsamples):
             return nsamples
 
-        assert call_factory("s", factory, 3) == 3
+        assert _call_factory("s", factory, 3) == 3
 
-    def test_var_keyword(self):
+    def test_var_keyword_receives_nothing(self):
         def factory(**kwargs):
             return kwargs
 
-        assert call_factory("s", factory, 3) == {"nsamples": 3}
+        assert _call_factory("s", factory, 3) == {}
 
-    def test_positional_parameter_with_another_name(self):
+    def test_positional_parameter_with_another_name_fails(self):
+        calls = []
+
         def factory(n):
-            return n
+            calls.append(n)
 
-        assert call_factory("s", factory, 3) == 3
+        with pytest.raises(ValueError, match="parameter 'n'.*Did you mean 'nsamples'"):
+            _call_factory("s", factory, 3)
+        assert calls == []
 
     def test_positional_only_parameter(self):
         def factory(nsamples, /):
             return nsamples
 
-        assert call_factory("s", factory, 3) == 3
+        assert _call_factory("s", factory, 3) == 3
 
-    def test_var_positional(self):
+    def test_var_positional_receives_nothing(self):
         def factory(*args):
             return args
 
-        assert call_factory("s", factory, 3) == (3,)
+        assert _call_factory("s", factory, 3) == ()
 
     def test_zero_argument_factory(self):
         def factory():
             return "called"
 
-        assert call_factory("s", factory, 3) == "called"
+        assert _call_factory("s", factory, 3) == "called"
 
     def test_unsupported_signature_is_not_called(self):
         calls = []
@@ -315,8 +330,8 @@ class TestCallFactory:
         def factory(a, b):
             calls.append((a, b))
 
-        with pytest.raises(ValueError, match="Strategy factory 's'.*nsamples"):
-            call_factory("s", factory, 3)
+        with pytest.raises(ValueError, match="Strategy factory 's' .* parameter 'a'"):
+            _call_factory("s", factory, 3)
         assert calls == []
 
     def test_type_error_in_body_is_reported_once(self):
@@ -327,14 +342,14 @@ class TestCallFactory:
             return None + 1
 
         with pytest.raises(ValueError) as exc_info:
-            call_factory("buggy", factory, 10)
+            _call_factory("buggy", factory, 10)
 
         assert calls == [10]
         message = str(exc_info.value)
         assert "'buggy'" in message
         assert "TypeError" in message
         assert "unsupported operand" in message
-        assert "should accept" not in message
+        assert "does not provide" not in message
         assert isinstance(exc_info.value.__cause__, TypeError)
 
     def test_transient_error_is_not_retried(self):
@@ -347,7 +362,7 @@ class TestCallFactory:
             return "second call"
 
         with pytest.raises(ValueError, match="transient"):
-            call_factory("s", factory, 10)
+            _call_factory("s", factory, 10)
         assert calls == [10]
 
 
@@ -366,7 +381,7 @@ class TestResolverFactoryCalling:
 
         assert calls == [10]
         assert "TypeError" in str(exc_info.value)
-        assert "should accept" not in str(exc_info.value)
+        assert "does not provide" not in str(exc_info.value)
 
     def test_zero_argument_factory(self):
         def factory():
@@ -393,7 +408,7 @@ class TestResolverFactoryCalling:
         message = str(exc_info.value)
         assert "nsamples='auto'" in message
         assert "TypeError" in message
-        assert "should accept" not in message
+        assert "does not provide" not in message
 
 
 class TestExportStrategiesFactoryCalling:

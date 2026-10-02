@@ -111,18 +111,28 @@ def export_strategies(*, format: str = "json") -> str:
     """
     import json
 
-    from ._resolver import call_factory, check_factory_result
+    from ._factory import FactoryInputs, call_factory
+    from ._options import StrategyOptions
+    from ._resolver import check_factory_result
+    from .rng import RNG
 
     if format != "json":
         raise ValueError(f"Unsupported format: {format}")
 
     runtime.load_all_strategy_files()
+    config = runtime.current.config if runtime.current is not None else None
     strategies_data = {}
     for name in registry.names():
         factory = registry.registrations(name)[-1].factory
         try:
             # Instantiate parameter with dummy count to get metadata
-            param = check_factory_result(name, factory, call_factory(name, factory, 1))
+            inputs = FactoryInputs(
+                options=StrategyOptions(strategy=name, nsamples=1),
+                rng=RNG.generator(),
+                ctx=runtime.strategy_context,
+            )
+            result = call_factory(name, factory, inputs, rootpath=getattr(config, "rootpath", None))
+            param = check_factory_result(name, factory, result)
             strategies_data[name] = param.to_dict()
         except Exception as e:
             strategies_data[name] = {"error": f"Failed to inspect strategy: {str(e)}"}

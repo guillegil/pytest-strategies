@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from pytest_strategy import RNG, Parameter, RNGInteger, TestArg
-from pytest_strategy._resolver import call_factory
+from pytest_strategy import RNG, Parameter, RNGInteger, StrategyOptions, TestArg
+from pytest_strategy._factory import FactoryInputs, call_factory
 from pytest_strategy._runtime import StrategyRuntime, runtime
 
 
@@ -43,6 +43,16 @@ def _parameter():
     return Parameter(TestArg("x", rng_type=RNGInteger(0, 1)))
 
 
+def _call(factory, nsamples=3, name="s"):
+    """Call ``factory`` as the resolver does: ctx comes from the session's hook."""
+    inputs = FactoryInputs(
+        options=StrategyOptions(strategy=name, nsamples=nsamples),
+        rng=RNG.generator(),
+        ctx=runtime.strategy_context,
+    )
+    return call_factory(name, factory, inputs)
+
+
 class TestFactoriesWithCtx:
     def test_ctx_is_passed_by_keyword(self, hook):
         seen = {}
@@ -50,7 +60,7 @@ class TestFactoriesWithCtx:
         def factory(nsamples, ctx):
             seen.update(nsamples=nsamples, ctx=ctx)
 
-        call_factory("s", factory, 3)
+        _call(factory)
 
         assert seen == {"nsamples": 3, "ctx": {"channels": [3, 5]}}
 
@@ -58,25 +68,25 @@ class TestFactoriesWithCtx:
         def factory(nsamples, *, ctx):
             return ctx
 
-        assert call_factory("s", factory, 3) == {"channels": [3, 5]}
+        assert _call(factory) == {"channels": [3, 5]}
 
     def test_ctx_without_nsamples(self, hook):
         def factory(ctx):
             return ctx
 
-        assert call_factory("s", factory, 3) == {"channels": [3, 5]}
+        assert _call(factory) == {"channels": [3, 5]}
 
     def test_positional_only_nsamples(self, hook):
-        def factory(n, /, ctx):
-            return n, ctx
+        def factory(nsamples, /, ctx):
+            return nsamples, ctx
 
-        assert call_factory("s", factory, 3) == (3, {"channels": [3, 5]})
+        assert _call(factory) == (3, {"channels": [3, 5]})
 
     def test_ctx_with_a_default(self, hook):
         def factory(nsamples, ctx=None):
             return ctx
 
-        assert call_factory("s", factory, 3) == {"channels": [3, 5]}
+        assert _call(factory) == {"channels": [3, 5]}
 
     def test_wrapper_without_signature_passes_ctx_to_the_wrapped_function(self, hook):
         def factory(nsamples, ctx):
@@ -86,11 +96,11 @@ class TestFactoriesWithCtx:
         def wrapper(*args, **kwargs):
             return factory(*args, **kwargs)
 
-        assert call_factory("s", wrapper, 3) == (3, {"channels": [3, 5]})
+        assert _call(wrapper) == (3, {"channels": [3, 5]})
 
     def test_hook_is_called_once_per_session(self, hook):
         for _ in range(3):
-            call_factory("s", lambda nsamples, ctx: _parameter(), 3)
+            _call(lambda nsamples, ctx: _parameter())
 
         assert hook.calls == 1
 
@@ -100,22 +110,22 @@ class TestFactoriesWithoutCtx:
         def factory(nsamples):
             return nsamples
 
-        assert call_factory("s", factory, 3) == 3
+        assert _call(factory) == 3
         assert hook.calls == 0
 
     def test_kwargs_factory_does_not_get_ctx(self, hook):
         def factory(**kwargs):
             return kwargs
 
-        assert call_factory("s", factory, 3) == {"nsamples": 3}
+        assert _call(factory) == {}
         assert hook.calls == 0
 
     def test_rejected_signature_does_not_call_the_hook(self, hook):
         def factory(a, b, ctx):
             pass
 
-        with pytest.raises(ValueError, match="optionally 'ctx'"):
-            call_factory("s", factory, 3)
+        with pytest.raises(ValueError, match="has a parameter 'a'"):
+            _call(factory)
         assert hook.calls == 0
 
 
@@ -135,13 +145,13 @@ class TestWithoutHookResult:
         def factory(nsamples, ctx="default bench"):
             return ctx
 
-        assert call_factory("s", factory, 3) == "default bench"
+        assert _call(factory) == "default bench"
 
     def test_ctx_bound_by_partial_is_kept(self, no_answer):
         def factory(nsamples, ctx):
             return ctx
 
-        assert call_factory("s", functools.partial(factory, ctx="bench A"), 3) == "bench A"
+        assert _call(functools.partial(factory, ctx="bench A")) == "bench A"
 
     def test_args_only_wrapper_around_a_default_ctx(self, no_answer):
         def factory(nsamples, ctx=None):
@@ -151,10 +161,10 @@ class TestWithoutHookResult:
         def wrapper(*args):
             return factory(*args)
 
-        assert call_factory("s", wrapper, 3) == (3, None)
+        assert _call(wrapper) == (3, None)
 
     def test_without_a_default_ctx_is_none(self, no_answer):
-        assert call_factory("s", lambda nsamples, ctx: ctx, 3) is None
+        assert _call(lambda nsamples, ctx: ctx) is None
 
     def test_ctx_is_none_without_a_session(self):
         assert StrategyRuntime().strategy_context() is None
@@ -163,8 +173,8 @@ class TestWithoutHookResult:
         calls = HookCalls(result=None)
         runtime.push(calls.config)
         try:
-            assert call_factory("s", lambda nsamples, ctx: ctx, 3) is None
-            assert call_factory("s", lambda nsamples, ctx: ctx, 3) is None
+            assert _call(lambda nsamples, ctx: ctx) is None
+            assert _call(lambda nsamples, ctx: ctx) is None
         finally:
             runtime.pop()
         assert calls.calls == 1
@@ -174,13 +184,13 @@ class TestWithoutHookResult:
         inner = HookCalls(result="inner")
         runtime.push(outer.config)
         try:
-            assert call_factory("s", lambda ctx: ctx, 1) == "outer"
+            assert _call(lambda ctx: ctx, 1) == "outer"
             runtime.push(inner.config)
             try:
-                assert call_factory("s", lambda ctx: ctx, 1) == "inner"
+                assert _call(lambda ctx: ctx, 1) == "inner"
             finally:
                 runtime.pop()
-            assert call_factory("s", lambda ctx: ctx, 1) == "outer"
+            assert _call(lambda ctx: ctx, 1) == "outer"
         finally:
             runtime.pop()
         assert (outer.calls, inner.calls) == (1, 1)
@@ -196,7 +206,7 @@ class TestHookRandomStream:
         try:
             RNG.generator().seed("caller stream")
             expected = random.Random("caller stream").random()
-            ctx = call_factory("s", lambda ctx: ctx, 3)
+            ctx = _call(lambda ctx: ctx)
             assert RNG.generator().random() == expected
         finally:
             runtime.pop()
@@ -212,7 +222,7 @@ class TestHookErrors:
         try:
             for name in ("first", "second"):
                 with pytest.raises(ValueError) as excinfo:
-                    call_factory(name, lambda nsamples, ctx: ctx, 3)
+                    _call(lambda nsamples, ctx: ctx, name=name)
                 assert str(excinfo.value) == (
                     f"Strategy factory '{name}' has a 'ctx' parameter, but the "
                     "pytest_strategies_context hook raised FileNotFoundError: tb.yaml"
@@ -228,7 +238,7 @@ class TestHookErrors:
         try:
             for _ in range(2):
                 with pytest.raises(pytest.skip.Exception, match="no testbench"):
-                    call_factory("s", lambda ctx: ctx, 3)
+                    _call(lambda ctx: ctx)
         finally:
             runtime.pop()
         assert calls.calls == 1
@@ -240,7 +250,7 @@ class TestHookErrors:
             depths = []
             for _ in range(3):
                 with pytest.raises(ValueError) as excinfo:
-                    call_factory("s", lambda ctx: ctx, 3)
+                    _call(lambda ctx: ctx)
                 tb, depth = excinfo.value.__cause__.__traceback__, 0
                 while tb is not None:
                     tb, depth = tb.tb_next, depth + 1

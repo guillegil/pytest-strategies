@@ -29,9 +29,10 @@ from pytest_strategy import (
     RNGWeightedFloat,
     RNGWeightedInteger,
     Strategy,
+    StrategyOptions,
     TestArg,
 )
-from pytest_strategy._resolver import call_factory
+from pytest_strategy._factory import FactoryInputs, call_factory
 from pytest_strategy._runtime import runtime
 from pytest_strategy.plugin import PytestStrategyPlugin
 from pytest_strategy.rng import RNGEnum, RNGValueError
@@ -230,6 +231,16 @@ class TestEmptyVectorName:
 # ---------------------------------------------------------------------------
 
 
+def _call_factory(factory, nsamples):
+    """Call ``factory`` as the resolver does: ctx comes from the session's hook."""
+    inputs = FactoryInputs(
+        options=StrategyOptions(strategy="s", nsamples=nsamples),
+        rng=RNG.generator(),
+        ctx=lambda: runtime.strategy_context(),
+    )
+    return call_factory("s", factory, inputs)
+
+
 def _logged(fn):
     """A functools.wraps decorator whose wrapper only has *args/**kwargs."""
 
@@ -248,21 +259,21 @@ class TestDecoratedFactories:
         def factory():
             return "made"
 
-        assert call_factory("s", factory, 10) == "made"
+        assert _call_factory(factory, 10) == "made"
 
     def test_wrapped_zero_argument_factory(self):
         @_logged
         def factory():
             return "made"
 
-        assert call_factory("s", factory, 10) == "made"
+        assert _call_factory(factory, 10) == "made"
 
     def test_wrapped_positional_only_factory(self):
         @_logged
-        def factory(n, /):
-            return n
+        def factory(nsamples, /):
+            return nsamples
 
-        assert call_factory("s", factory, 10) == 10
+        assert _call_factory(factory, 10) == 10
 
     def test_wrapped_ctx_only_factory_gets_the_hook_result(self, monkeypatch):
         monkeypatch.setattr(runtime, "strategy_context", lambda: {"channels": [1, 2]})
@@ -271,7 +282,7 @@ class TestDecoratedFactories:
         def factory(ctx):
             return ctx
 
-        assert call_factory("s", factory, 10) == {"channels": [1, 2]}
+        assert _call_factory(factory, 10) == {"channels": [1, 2]}
 
     def test_nsamples_is_not_passed_as_a_ctx_that_keeps_its_default(self, monkeypatch):
         monkeypatch.setattr(runtime, "strategy_context", lambda: None)
@@ -280,7 +291,7 @@ class TestDecoratedFactories:
         def factory(ctx="default"):
             return ctx
 
-        assert call_factory("s", factory, 10) == "default"
+        assert _call_factory(factory, 10) == "default"
 
     def test_type_error_inside_a_wrapped_factory_calls_it_once(self):
         calls = []
@@ -291,7 +302,7 @@ class TestDecoratedFactories:
             raise TypeError("inside the factory")
 
         with pytest.raises(ValueError, match="TypeError: inside the factory"):
-            call_factory("s", factory, 10)
+            _call_factory(factory, 10)
         assert calls == [10]
 
     def test_args_only_wrapper_is_called_positionally(self):
@@ -306,16 +317,17 @@ class TestDecoratedFactories:
         def factory(nsamples):
             return nsamples
 
-        assert call_factory("s", factory, 3) == 3
+        assert _call_factory(factory, 3) == 3
 
     def test_mock_patch_still_gets_its_mock(self):
         from unittest import mock
 
+        # mock.patch passes its mocks to the first parameters
         @mock.patch("os.getcwd", return_value="/patched")
-        def factory(nsamples, getcwd=None):
+        def factory(getcwd, nsamples):
             return nsamples, os.getcwd()
 
-        assert call_factory("s", factory, 4) == (4, "/patched")
+        assert _call_factory(factory, 4) == (4, "/patched")
 
 
 # ---------------------------------------------------------------------------

@@ -19,8 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-# Factories are user functions called as factory(nsamples=...) that return a
-# Parameter
+# Factories are user callables that return a Parameter. They receive the inputs
+# they declare by name (nsamples, ctx, rng, options; see _factory.py)
 Factory = Callable[..., Any]
 
 Origin = tuple[str | None, str | None, int | None]
@@ -100,10 +100,21 @@ def display_path(filename: str | os.PathLike[str], rootpath: str | os.PathLike[s
     return real
 
 
-def _describe_factory(fn: Callable[..., Any]) -> str:
-    """Return a readable 'file:line:qualname' description of a factory for messages."""
+def _describe_factory(
+    fn: Callable[..., Any], *, rootpath: str | os.PathLike[str] | None = None
+) -> str:
+    """
+    Return a readable 'file:line:qualname' description of a factory for messages.
+
+    With ``rootpath``, a file inside it is shown relative to it (see :func:`display_path`).
+    """
     filename, qualname, line = factory_source(fn)
-    where = os.path.realpath(filename) if filename else "<unknown>"
+    if not filename:
+        where = "<unknown>"
+    elif rootpath is not None:
+        where = display_path(filename, rootpath)
+    else:
+        where = os.path.realpath(filename)
     if line is not None:
         where = f"{where}:{line}"
     return f"{where}:{qualname or repr(fn)}"

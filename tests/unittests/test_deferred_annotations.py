@@ -13,10 +13,10 @@ from dataclasses import dataclass
 
 import pytest
 
-from pytest_strategy import Parameter, RNGInteger, TestArg
+from pytest_strategy import RNG, Parameter, RNGInteger, StrategyOptions, TestArg
 from pytest_strategy._dataclass import convert_to_dataclass
+from pytest_strategy._factory import FactoryInputs, call_factory
 from pytest_strategy._introspection import detect_dataclass_param, validate_signature
-from pytest_strategy._resolver import call_factory
 
 pytestmark = pytest.mark.skipif(
     sys.version_info < (3, 14), reason="annotations are evaluated at def time before 3.14"
@@ -54,7 +54,10 @@ def test_factory_with_undefined_return_annotation_is_called():
     def factory(nsamples: int) -> NotDefinedYet:  # noqa: F821
         return Parameter(TestArg("x", rng_type=RNGInteger(0, 1)))
 
-    assert isinstance(call_factory("s", factory, 3), Parameter)
+    inputs = FactoryInputs(
+        options=StrategyOptions(strategy="s", nsamples=3), rng=RNG.generator(), ctx=lambda: None
+    )
+    assert isinstance(call_factory("s", factory, inputs), Parameter)
 
 
 def test_dataclass_with_undefined_field_annotation_is_converted():

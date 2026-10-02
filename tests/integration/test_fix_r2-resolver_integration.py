@@ -75,9 +75,10 @@ class TestDecoratedFactories:
             def injected(nsamples, rng):
                 return Parameter(TestArg("x", value=(nsamples, rng)))
 
+            # mock.patch passes its mocks to the first parameters
             @Strategy.register("r2_patched")
             @mock.patch("os.getcwd", return_value="/fake")
-            def patched(nsamples, getcwd):
+            def patched(getcwd, nsamples):
                 return Parameter(TestArg("x", value=(nsamples, os.getcwd())))
 
             @Strategy.register("r2_adapted")
@@ -85,10 +86,11 @@ class TestDecoratedFactories:
             def adapted():
                 return Parameter(TestArg("x", rng_type=RNGChoice([1, 2])))
 
+            # A wrapper without functools.wraps hides the signature: no arguments
             @Strategy.register("r2_logged")
             @logged
-            def logged_factory(n):
-                return Parameter(TestArg("x", value=n))
+            def logged_factory():
+                return Parameter(TestArg("x", value="logged"))
             """)
         pytester.makepyfile(test_deco="""
             from pytest_strategy import Strategy
@@ -107,7 +109,7 @@ class TestDecoratedFactories:
 
             @Strategy.strategy("r2_logged")
             def test_logged(x):
-                assert x == 3
+                assert x == "logged"
             """)
 
         result = pytester.runpytest_inprocess("--nsamples=3")

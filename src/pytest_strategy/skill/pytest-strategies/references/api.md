@@ -70,17 +70,30 @@ def strategy(name_or_factory, *, validate_signature=True): ...  # decorator for 
 
 ```python
 @register("name")
-def factory(nsamples, ctx):   # both parameters optional, any order, keyword or positional
+def factory(nsamples, ctx, rng, options):   # each one optional, any order, by name
     return Parameter(...)
 ```
 
 - Called once per test that uses it, at collection, with `metafunc.config` available.
-- `nsamples`: the `--nsamples` integer, 10 when the option is not given, or the string
-  `"auto"` under `--nsamples=auto`. A factory returning a `Parameter` can ignore it;
-  the plugin applies the count.
-- `ctx`: the result of the `pytest_strategies_context` hook (section 12). Only
-  factories that declare a `ctx` parameter trigger the hook.
-- A `functools.partial`, a decorated function or a callable object works as a factory.
+- It receives by name exactly the inputs it declares, like fixtures:
+  - `nsamples`: the `--nsamples` integer, 10 when the option is not given, or the
+    string `"auto"` under `--nsamples=auto`. A factory returning a `Parameter` can
+    ignore it; the plugin applies the count.
+  - `ctx`: the result of the `pytest_strategies_context` hook (section 12). Only
+    factories that declare a `ctx` parameter trigger the hook.
+  - `rng`: the plugin's `random.Random`; `rng is RNG.generator()` during the call.
+  - `options`: a frozen `StrategyOptions` (keyword-only fields `strategy`, `nsamples`,
+    `nsamples_source`, `mode`, `vector_name`, `vector_index`, `constraints_off`, and
+    the `filtered` property).
+- Any other parameter must have a default, which it keeps, and `*args`/`**kwargs`
+  receive nothing. `def factory(n)` or `def factory(n, /)` fails collection with
+  `has a parameter 'n', which the plugin does not provide ... Did you mean 'nsamples'?`.
+  `base`, `config` and `request` are reserved, even with a default.
+- A `functools.partial`, a bound method, a classmethod, a staticmethod, a class, a
+  callable object or a `functools.wraps` decorated function works as a factory. A
+  decorator without `functools.wraps` hides the signature, so the factory is called
+  with no arguments. `mock.patch` mocks must be the first parameters. An `async def`
+  factory fails.
 - Return a `Parameter`. Since 4.0 an `(argnames, samples)` tuple fails the
   collection of the tests that use it.
 - An exception in the factory fails the collection of the tests that use it, with
@@ -439,7 +452,8 @@ extra names. IDs look like `x=1,y=2`.
 | signature mismatch at collection | The test does not take every argument name (and dataclass mode does not apply). Add the parameters or a matching dataclass. |
 | `got empty parameter set` skip | `--vector-name`/`--vector-index` selected a vector this strategy lacks, or `--vector-mode=directed_only`/`test` ran a strategy with no directed/test vectors. |
 | `RNGValueError` when building a type | Bad RNG arguments (section 6). |
-| `Factory should accept an 'nsamples' parameter (or no parameters)` | The factory's signature cannot receive `nsamples`. Accept `nsamples`, `**kwargs` or nothing. |
+| `Strategy factory 'x' (...) has a parameter 'n', which the plugin does not provide` | Factories receive `nsamples`, `ctx`, `rng` and `options` by name. Rename the parameter, or give it a default. |
+| `has a parameter 'config', a name the plugin reserves` | `base`, `config` and `request` are reserved. Rename the parameter; pass settings through `ctx`. |
 
 ## 16. Deprecations and upgrading from 2.x
 

@@ -95,7 +95,7 @@ src/pytest_strategy/
 ├── skill/               # The agent skill that pytest-strategies skill install copies
 ├── py.typed             # PEP 561 marker: type checkers use the package's annotations
 └── _*.py                # Other internal helpers (introspection, test IDs, dataclasses,
-                         # StrategyOptions, runtime state, warning categories)
+                         # StrategyOptions, factory calls, runtime state, warning categories)
 ```
 
 ## Core Components
@@ -422,8 +422,9 @@ def test_coordinates(x, y):
    factory passed directly is used as it is.
 4. `build_parametrization()` restarts the generator on the strategy and test's
    own stream (see [Reproducibility](#reproducibility)), then calls the factory
-   once. It passes `nsamples` by keyword, positionally, or not at all, depending
-   on the factory's signature, and `ctx` when the factory has that parameter.
+   once through `_factory.call_factory()`. The factory gets, by name, the inputs
+   it declares: `nsamples`, `ctx`, `rng` and `options` (see "Factory inputs"
+   below).
 5. It generates the vectors from the returned `Parameter` according to the CLI
    options, with readable test IDs. The plugin inserts a
    `pytest.mark.parametrize` marker right after the `strategy` marker, so
@@ -434,6 +435,23 @@ Errors while resolving (an unknown name, a signature mismatch, a factory that
 raises `ValueError`) fail the test's collection like pytest's own parametrize
 errors: `In test_x: <message>`, with the factory's own frames and without the
 plugin's. `--full-trace` shows the full traceback.
+
+**Factory inputs:** `_factory.analyse()` reads the factory's signature into a
+`CallPlan` without calling anything, and `call_factory()` follows it. The
+signature of the callable that is called decides; when it has none or only
+`*args`/`**kwargs`, the `__wrapped__` signature decides, and without one the
+factory is called with no arguments. Each parameter named `nsamples`, `ctx`,
+`rng` or `options` gets that input (positional-only ones by position, the
+others by keyword, or all by position for a `functools.wraps` wrapper that has
+`*args` but no `**kwargs`); any other parameter keeps its default, `*args` and
+`**kwargs` receive nothing, and `mock.patch`'s mocks take the first parameters.
+A parameter without a default that is not an input, a reserved name (`base`,
+`config`, `request`) and an `async def` factory fail with a `ValueError` before
+the factory or the context hook runs. `ctx` is computed only for a factory that
+declares it, and is left out when it is None and the parameter has a default.
+The rule for 4.x: a new factory input arrives as a new `StrategyOptions` field
+with a default, or under a reserved name. The plugin never starts passing a
+value to a name that 4.0 accepted.
 
 A test parameter that is not one of the strategy's argument names is left to
 pytest as a fixture. A test can also take the vector as one dataclass instance:
@@ -541,13 +559,12 @@ together with the files matching a pattern that mention `register` but have no
 registration decorator (so were not imported).
 
 **`pytest_strategies_context(config)`:** a `firstresult` hook the plugin adds.
-A factory with a `ctx` parameter gets its result as `ctx=` (when no
+A factory with a `ctx` parameter gets its result as `ctx` (when no
 implementation returns a value, `ctx` keeps its default, or a value bound with
-`functools.partial`, and is `None` without one); other factories are called as
-before.
-`call_factory` calls it through `runtime.strategy_context()` the first time a
-factory needs it, and the session keeps the result, or the exception it raised,
-for every later factory. Each (nested) session and each pytest-xdist worker
+`functools.partial`, and is `None` without one); other factories never trigger
+it. `_factory.call_factory` calls it through `runtime.strategy_context()` the
+first time a factory needs it, and the session keeps the result, or the
+exception it raised, for every later factory. Each (nested) session and each pytest-xdist worker
 calls it once. See the README for an example.
 
 ---
