@@ -68,6 +68,7 @@ The APIs deprecated in 3.0, without warnings left behind:
 - A dict directed or test vector is a named vector (see Added). 3.0 turned it into the tuple of its keys and passed the argument names to the test as values.
 - A `pytest.param(*values, marks=...)` directed or test vector is checked by the number of its values instead of the length of the `pytest.param` itself, which is always 3. Marked rows such as `pytest.param(1, 2, marks=pytest.mark.xfail)` now work in a strategy with two arguments (or one) and keep their marks, `pytest.param(1, 2)` in a strategy with three arguments fails when the `Parameter` is built, naming the vector, instead of with pytest's parametrize error, and `export_strategies()` lists the vector's values.
 - A dataclass parameter next to other fixtures with `validate_signature=False` failed collection (`function uses no argument 'x'`), because 3.0 then passed the arguments by name. It now receives the row as a record.
+- A constraint that raised a frozen dataclass exception failed the collection with `FrozenInstanceError: cannot assign to field '__traceback__'`, which named neither the constraint nor its exception. The error now names the constraint and the row and shows the constraint's own exception, as for any other exception.
 
 ## [3.0.0] - 2026-09-30
 

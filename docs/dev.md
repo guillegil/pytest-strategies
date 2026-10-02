@@ -333,7 +333,13 @@ and the row and a `_ConstraintFailure` in its `_CONSTRAINT_FAILURE` attribute
 (`_ConstraintFailure.attach()`, which replaces the note of an earlier failure on
 the same exception object, so a re-raised instance keeps one note); the resolver
 attaches it again so the note names `--strategy-constraint-off`, builds the
-collection error from it and chains it to the user's exception. The private
+collection error from it and chains it to the user's exception. `attach()`
+writes the note and the attribute with `object.__setattr__`, so a frozen
+dataclass or attrs exception is not replaced by a `FrozenInstanceError` (an
+exception that rejects even that gets no note, and its failure waits in
+`_unattached` until the resolver reports it); for the same reason the resolver's
+`_attributed_warnings` is a class, since a `contextlib.contextmanager` assigns
+the exception's `__traceback__` on the way out. The private
 `_stats` keyword of `generate_vectors()` and `generate_exhaustive()` collects the
 counts (and the combinations `--nsamples=auto` left out) for the `-v` summary.
 Their keyword-only `constraints_off` names constraints the call does not

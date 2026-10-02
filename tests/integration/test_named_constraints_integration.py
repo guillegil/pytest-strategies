@@ -180,6 +180,43 @@ def test_a_constraint_that_raises_a_key_error_is_named_too(pytester):
     )
 
 
+def test_a_frozen_exception_is_named_too(pytester):
+    """A frozen dataclass exception rejects setattr(): the error still names the row."""
+    pytester.makepyfile(test_nc_frozen="""
+        import dataclasses
+
+        from pytest_strategy import Parameter, TestArg, register, strategy
+
+        @dataclasses.dataclass(frozen=True)
+        class RowError(Exception):
+            reason: str
+
+        def known(v):
+            raise RowError("no such channel")
+
+        @register("nc_frozen")
+        def factory():
+            return Parameter(TestArg("ch", value=3), vector_constraints=[known])
+
+        @strategy("nc_frozen")
+        def test_frozen(ch):
+            pass
+        """)
+
+    result = pytester.runpytest()
+
+    result.assert_outcomes(errors=1)
+    result.stdout.fnmatch_lines(
+        [
+            "In test_frozen: Error generating samples for strategy 'nc_frozen': Constraint "
+            "'known' raised RowError on random row 0, Vector(ch=3): no such channel",
+            '*test_nc_frozen.py", line 10, in known',
+            "RowError: no such channel",
+        ]
+    )
+    result.stdout.no_fnmatch_line("*FrozenInstanceError*")
+
+
 def test_a_predicate_that_runs_out_names_its_argument(pytester):
     pytester.makepyfile(test_nc_predicate="""
         from pytest_strategy import Parameter, RNGInteger, TestArg, register, strategy

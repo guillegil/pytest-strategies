@@ -11,6 +11,7 @@ count them too. A constraint that raises is named with the row, and a predicate
 that runs out of draws names its argument.
 """
 
+import dataclasses
 import functools
 import re
 import warnings
@@ -29,7 +30,12 @@ from pytest_strategy import (
     TestArg,
 )
 from pytest_strategy._resolver import _exhausted_message
-from pytest_strategy.parameters import _constraint_failure, _GenerationStats
+from pytest_strategy.parameters import (
+    _CONSTRAINT_FAILURE,
+    _constraint_failure,
+    _forget_constraint_failure,
+    _GenerationStats,
+)
 
 FIRST_FAILING = "Rejected by (first failing constraint per draw): "
 
@@ -671,6 +677,74 @@ class TestRaisingConstraints:
         assert type(excinfo.value) is KeyError
         assert excinfo.value.__notes__[0].startswith("Raised by constraint 'known' on ")
 
+    @pytest.mark.parametrize(
+        "generate",
+        [
+            lambda p: p.generate_vector(),
+            lambda p: p.generate_vectors(5, mode="random_only"),
+            lambda p: p.generate_exhaustive(),
+        ],
+        ids=["generate_vector", "generate_vectors", "generate_exhaustive"],
+    )
+    def test_a_frozen_exception_is_not_replaced(self, generate):
+        """A frozen dataclass exception rejects setattr(): its note goes past that."""
+
+        @dataclasses.dataclass(frozen=True)
+        class RowError(Exception):
+            reason: str
+
+        def known(v):
+            raise RowError("no such channel")
+
+        param = Parameter(TestArg("x", rng_type=RNGSequence([0])), vector_constraints=[known])
+
+        with pytest.raises(RowError) as excinfo:
+            generate(param)
+
+        assert type(excinfo.value) is RowError
+        assert excinfo.value.__notes__[0].startswith("Raised by constraint 'known' on ")
+        message = _constraint_failure(excinfo.value).message("-")
+        assert message.startswith("Constraint 'known' raised RowError on ")
+
+    def test_an_exception_that_takes_no_attribute_keeps_its_failure_aside(self):
+        """An exception that rejects even object.__setattr__ goes up unchanged, with no note."""
+
+        class Sealed(Exception):
+            __notes__ = property(lambda self: None)
+
+        setattr(Sealed, _CONSTRAINT_FAILURE, property(lambda self: None))
+
+        def sealed(v):
+            raise Sealed("sealed")
+
+        param = Parameter(TestArg("x", value=1), vector_constraints=[sealed])
+        with pytest.raises(Sealed) as excinfo:
+            param.generate_vector()
+
+        error = excinfo.value
+        assert type(error) is Sealed
+        assert error.__notes__ is None
+        assert _constraint_failure(error).message("-") == (
+            "Constraint 'sealed' raised Sealed on the row Vector(x=1): sealed"
+        )
+        # The resolver drops it once reported
+        _forget_constraint_failure(error)
+        assert _constraint_failure(error) is None
+
+    def test_notes_that_are_not_a_list_are_left_alone(self):
+        error = LookupError("no such mode")
+        error.__notes__ = ("mine",)
+
+        def lookup(v):
+            raise error
+
+        param = Parameter(TestArg("x", value=1), vector_constraints=[lookup])
+        with pytest.raises(LookupError):
+            param.generate_vector()
+
+        assert error.__notes__ == ("mine",)
+        assert _constraint_failure(error).label == "'lookup'"
+
     def test_an_unnamed_constraint_shows_where_it_comes_from(self):
         param = Parameter(TestArg("len", value=0), vector_constraints=[lambda v: v.lenght > 0])
 
@@ -812,3 +886,24 @@ class TestStats:
 
         # Rows 0, 1, 2 at ch=0, with ch=1 skipped twice in between
         assert stats.rejected == {"ch1_needs_big_x": 6}
+
+    def test_a_per_sequence_run_counts_every_redraw(self):
+        draws = []
+
+        def every_other(v):
+            draws.append(v)
+            return len(draws) % 2 == 0
+
+        stats = _GenerationStats()
+        param = Parameter(
+            TestArg("ch", rng_type=RNGSequence([0, 1])),
+            TestArg("x", rng_type=RNGInteger(0, 9)),
+            vector_constraints={"always": lambda v: True, "every_other": every_other},
+            per_sequence_samples=True,
+        )
+
+        rows = param.generate_vectors(3, _stats=stats)
+
+        # Three rows per channel, each drawn twice
+        assert [row.ch for row in rows] == [0, 0, 0, 1, 1, 1]
+        assert stats.rejected == {"every_other": 6}

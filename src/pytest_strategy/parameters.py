@@ -389,15 +389,21 @@ class _ConstraintsExhausted(ValueError):
 # The attribute of a constraint's exception that holds its _ConstraintFailure
 _CONSTRAINT_FAILURE = "_pytest_strategies_constraint_failure"
 
+# The last exception a constraint raised that takes no attribute, with its
+# _ConstraintFailure (one entry at most): _constraint_failure() finds the failure
+# here, and the resolver drops it once reported (_forget_constraint_failure())
+_unattached: list[tuple[BaseException, _ConstraintFailure]] = []
+
 
 class _ConstraintFailure:
     """
     Which constraint raised, and on which row.
 
     The generators re-raise the constraint's own exception, so a caller that
-    catches its type keeps working, with this attached to it (``_CONSTRAINT_FAILURE``)
-    and described in a note. The resolver builds the collection error from it,
-    chained to that exception, so the user's frame is shown.
+    catches its type keeps working, with this attached to it (``_CONSTRAINT_FAILURE``,
+    or ``_unattached`` for an exception that takes no attribute) and described in a
+    note. The resolver builds the collection error from it, chained to that
+    exception, so the user's frame is shown.
 
     Attributes:
         label: The constraint, as the messages show it ("'ratio'")
@@ -440,21 +446,33 @@ class _ConstraintFailure:
         resolver attaches the failure again to name ``--strategy-constraint-off``
         instead of ``constraints_off``, and a constraint may raise one exception
         object again (a module-level instance), so the notes do not pile up.
+
+        It never replaces the exception: the note and the failure are written with
+        ``object.__setattr__``, past the ``__setattr__`` of a frozen dataclass or
+        attrs exception. An exception that rejects even that gets no note (nor does
+        one whose ``__notes__`` is not a list), and its failure goes to
+        ``_unattached``.
         """
         note = self.note(turned_off_by)
         previous = _constraint_failure(error)
+        replaced = previous.added_note if previous is not None else None
         notes = getattr(error, "__notes__", None)
-        if (
-            previous is not None
-            and previous.added_note is not None
-            and isinstance(notes, list)
-            and previous.added_note in notes
-        ):
-            notes[notes.index(previous.added_note)] = note
-        else:
-            error.add_note(note)
-        self.added_note = note
-        setattr(error, _CONSTRAINT_FAILURE, self)
+        self.added_note = None
+        with contextlib.suppress(AttributeError, TypeError):
+            if isinstance(notes, list):
+                if replaced is not None and replaced in notes:
+                    notes[notes.index(replaced)] = note
+                else:
+                    notes.append(note)
+                self.added_note = note
+            elif notes is None:
+                object.__setattr__(error, "__notes__", [note])
+                self.added_note = note
+            # else: __notes__ that is not a list, which add_note() rejects too
+        try:
+            object.__setattr__(error, _CONSTRAINT_FAILURE, self)
+        except (AttributeError, TypeError):
+            _unattached[:] = [(error, self)]
 
     def message(self, turned_off_by: str) -> str:
         """
@@ -480,7 +498,14 @@ class _ConstraintFailure:
 def _constraint_failure(error: BaseException) -> _ConstraintFailure | None:
     """Return the _ConstraintFailure of an exception a constraint raised, else None."""
     failure = getattr(error, _CONSTRAINT_FAILURE, None)
-    return failure if isinstance(failure, _ConstraintFailure) else None
+    if isinstance(failure, _ConstraintFailure):
+        return failure
+    return next((kept for raised, kept in _unattached if raised is error), None)
+
+
+def _forget_constraint_failure(error: BaseException) -> None:
+    """Drop the failure ``_unattached`` keeps for ``error``, if any."""
+    _unattached[:] = [entry for entry in _unattached if entry[0] is not error]
 
 
 class Parameter:

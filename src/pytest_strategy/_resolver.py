@@ -8,12 +8,12 @@ for either record (dataclass) or named-parameter mode.
 
 from __future__ import annotations
 
-import contextlib
 import inspect
 import os
 import warnings
-from collections.abc import Callable, Collection, Iterator, Mapping
+from collections.abc import Callable, Collection, Mapping
 from pathlib import Path
+from types import TracebackType
 from typing import Any, NamedTuple, cast
 
 import pytest
@@ -36,6 +36,7 @@ from .parameters import (
     Parameter,
     _constraint_failure,
     _ConstraintsExhausted,
+    _forget_constraint_failure,
     _GenerationStats,
     _ParameterSet,
 )
@@ -71,32 +72,57 @@ def _skipped_param(reason: str, width: int) -> Any:
     return pytest.param(*([None] * width), marks=pytest.mark.skip(reason=reason), id="skipped")
 
 
-@contextlib.contextmanager
-def _attributed_warnings(name: str, test_fn: Callable[..., Any]) -> Iterator[None]:
+class _attributed_warnings:
     """
     Re-emit the PytestStrategiesWarnings raised in the block at the test function,
     prefixed with the strategy and the test.
 
     Raised during vector generation, they would otherwise point into this module and
-    not say which strategy or test they are about. Other warnings pass unchanged.
+    not say which strategy or test they are about. Other warnings pass unchanged. An
+    exception raised in the block goes up unchanged, and the warnings are dropped.
+
+    A class (named like warnings.catch_warnings): a contextlib.contextmanager assigns
+    the exception's ``__traceback__`` on the way out, which a frozen dataclass
+    exception rejects, so a constraint's exception would become a FrozenInstanceError.
     """
-    with warnings.catch_warnings(record=True) as caught:
+
+    def __init__(self, name: str, test_fn: Callable[..., Any]) -> None:
+        self._name = name
+        self._test_fn = test_fn
+        self._catcher = warnings.catch_warnings(record=True)
+        self._caught: list[warnings.WarningMessage] = []
+
+    def __enter__(self) -> None:
+        self._caught = self._catcher.__enter__()
         warnings.simplefilter("always", PytestStrategiesWarning)
-        yield
-    fn = inspect.unwrap(test_fn)
-    code = getattr(fn, "__code__", None)
-    for w in caught:
-        if issubclass(w.category, PytestStrategiesWarning) and code is not None:
-            # co_filename can be stale (pytest's rewritten pyc after a checkout moved)
-            filename: str = getattr(fn, "__globals__", {}).get("__file__") or code.co_filename
-            warnings.warn_explicit(
-                f"Strategy '{name}' ({test_fn.__qualname__}): {w.message}",
-                w.category,
-                filename,
-                code.co_firstlineno,
-            )
-        else:
-            warnings.warn_explicit(w.message, w.category, w.filename, w.lineno, source=w.source)
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self._catcher.__exit__(exc_type, exc, tb)
+        if exc is None:
+            self._reemit()
+
+    def _reemit(self) -> None:
+        """Re-emit the warnings caught in the block, in order."""
+        name, test_fn = self._name, self._test_fn
+        fn = inspect.unwrap(test_fn)
+        code = getattr(fn, "__code__", None)
+        for w in self._caught:
+            if issubclass(w.category, PytestStrategiesWarning) and code is not None:
+                # co_filename can be stale (pytest's rewritten pyc after a checkout moved)
+                filename: str = getattr(fn, "__globals__", {}).get("__file__") or code.co_filename
+                warnings.warn_explicit(
+                    f"Strategy '{name}' ({test_fn.__qualname__}): {w.message}",
+                    w.category,
+                    filename,
+                    code.co_firstlineno,
+                )
+            else:
+                warnings.warn_explicit(w.message, w.category, w.filename, w.lineno, source=w.source)
 
 
 def _unique_ids(
@@ -399,6 +425,7 @@ def build_parametrization(
             # A constraint raised (a KeyError too): chained to its own exception, so
             # the error shows the user's frame, whose note names the option too
             failure.attach(e, "--strategy-constraint-off")
+            _forget_constraint_failure(e)
             raise ValueError(
                 f"Error generating samples for strategy '{name}': "
                 f"{failure.message('--strategy-constraint-off')}"
