@@ -1,12 +1,19 @@
 # parameter.py
 
+from __future__ import annotations
+
+import contextlib
+import dataclasses
+import difflib
 import itertools
 import keyword
 import math
+import reprlib
 import warnings
 from collections import Counter
-from collections.abc import Callable, Sequence
-from typing import Any
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -16,28 +23,170 @@ from ._warnings import PytestStrategiesWarning
 from .rng import RNGValueError, SequenceLike, Series
 from .test_args import TestArg
 
+if TYPE_CHECKING:
+    from _pytest.mark.structures import ParameterSet
+
 # pytest.param() returns a ParameterSet (a NamedTuple), which pytest does not export
 _ParameterSet = type(pytest.param())
 
 
-def _as_vector(values: Any) -> tuple[Any, ...]:
+def _normalize_vector(
+    kind: str, name: object, raw: object, arg_names: tuple[str, ...]
+) -> Vector | ParameterSet:
     """
-    Store a directed or test vector as a tuple.
+    Turn a directed or test vector, as given, into the row it stands for.
 
-    A list (e.g. loaded from JSON or YAML) becomes a tuple, so a single-argument
-    strategy gets its element rather than the list. A tuple, including a
-    pytest.param(...), is kept as it is.
+    The rules, in order:
+
+    - a ``pytest.param(...)`` keeps its marks and id, and its values become the
+      Vector: when its only value is a Mapping, that Mapping is a named vector,
+      otherwise its values are taken by position;
+    - a Mapping is a named vector: its keys are the argument names, in any order;
+    - a namedtuple (a Vector too) is placed by its field names, which must be the
+      argument names;
+    - a dataclass or pydantic model instance fails: records as vectors are not
+      supported yet (a pydantic model is iterable, so this comes before the
+      iterable rule);
+    - a str, bytes, bytearray or a value that is not iterable fails, with a hint
+      for one-argument strategies;
+    - any other iterable (tuple, list, range) is taken by position.
+
+    Args:
+        kind: "directed" or "test", for the messages
+        name: The vector's name, which must be a non-empty str
+        raw: The vector as given
+        arg_names: The strategy's argument names, in declaration order
+
+    Returns:
+        A Vector with the values in declaration order, or for a pytest.param(...)
+        vector the ParameterSet with that Vector as its values
+
+    Raises:
+        RNGValueError: If the name is not a non-empty str, or the vector does not
+            give exactly one value per argument
     """
-    return values if isinstance(values, tuple) else tuple(values)
+    label = f"{kind.capitalize()} vector"
+    if not isinstance(name, str) or not name:
+        raise RNGValueError(f"{label} names must be non-empty strings, got {name!r}")
+    where = f"{label} {name!r}"
+    row_type = _vector_type(arg_names)
+
+    if isinstance(raw, _ParameterSet):
+        # A ParameterSet is itself a namedtuple of (values, marks, id), so it comes first
+        given = raw.values
+        if len(given) == 1 and isinstance(given[0], Mapping):
+            row = _vector_by_name(where, given[0], "dict", arg_names, row_type)
+        else:
+            row = _vector_by_position(where, given, row_type)
+        return raw._replace(values=row)
+
+    if isinstance(raw, Mapping):
+        return _vector_by_name(where, raw, "dict", arg_names, row_type)
+
+    fields = getattr(type(raw), "_fields", None)
+    if isinstance(raw, tuple) and isinstance(fields, tuple):
+        if type(raw) is row_type:
+            return raw
+        # 3.0 placed a namedtuple by position; its fields say which value is which
+        where = f"{where} ({type(raw).__name__}, a namedtuple placed by its field names)"
+        return _vector_by_name(where, dict(zip(fields, raw)), "namedtuple", arg_names, row_type)
+
+    record = _record_kind(raw)
+    if record is not None:
+        example = ", ".join(f"{arg!r}: ..." for arg in arg_names)
+        raise RNGValueError(
+            f"{where} is an instance of {type(raw).__name__}, {record}: record instances "
+            f"as vectors are not supported yet; use a dict, such as {{{example}}}"
+        )
+
+    # A string is iterable, but it is one value: 3.0 split "a" into ("a",) and
+    # b"\x00" into (0,)
+    values: Iterable[Any] | None = None
+    if not isinstance(raw, (str, bytes, bytearray)):
+        with contextlib.suppress(TypeError):
+            values = iter(raw)  # type: ignore[call-overload]
+    if values is None:
+        shown = reprlib.repr(raw)
+        if len(arg_names) == 1:
+            hint = f"For a one-argument strategy write ({shown},) or {{{arg_names[0]!r}: {shown}}}"
+        else:
+            hint = (
+                f"Give one value per argument ({', '.join(arg_names)}), as a tuple or a "
+                "dict of argument names to values"
+            )
+        raise RNGValueError(
+            f"{where} is {shown} ({type(raw).__name__}), not a tuple of values. {hint}"
+        )
+    return _vector_by_position(where, tuple(values), row_type)
 
 
-def _vector_values(vector: Sequence[Any]) -> Sequence[Any]:
+def _record_kind(value: object) -> str | None:
+    """Say which kind of record instance ``value`` is, or None when it is not one."""
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return "a dataclass"
+    # pydantic v2 is recognized without importing it. model_fields is read from the
+    # class: pydantic 2.11 deprecates reading it from an instance.
+    if not isinstance(value, type) and isinstance(getattr(type(value), "model_fields", None), dict):
+        return "a pydantic model"
+    return None
+
+
+def _vector_by_position(where: str, values: Sequence[Any], row_type: type[Vector]) -> Vector:
+    """Build the row of a vector whose values are given in declaration order."""
+    expected = len(row_type._fields)
+    if len(values) != expected:
+        raise RNGValueError(f"{where} has {len(values)} values, expected {expected}")
+    return tuple.__new__(row_type, values)
+
+
+def _vector_by_name(
+    where: str,
+    values: Mapping[Any, Any],
+    what: str,
+    arg_names: tuple[str, ...],
+    row_type: type[Vector],
+) -> Vector:
     """
-    Return the values of a directed or test vector.
+    Build the row of a vector whose values are given by argument name.
 
-    A pytest.param(*values, marks=..., id=...) vector is a ParameterSet, a tuple of
-    (values, marks, id), so its length and items are those of its values.
+    Args:
+        where: The vector, for the messages ("Directed vector 'zeros'")
+        values: The values by argument name, in any order
+        what: "dict" or "namedtuple", for the messages
+        arg_names: The strategy's argument names, in declaration order
+        row_type: The class of the row
     """
+    part = "keys" if what == "dict" else "fields"
+    expected = f"The {part} of a {what} vector are the strategy's arguments: {', '.join(arg_names)}"
+    if what == "dict" and len(arg_names) == 1:
+        # A dict is always a named vector, also for a one-argument strategy
+        shown = reprlib.repr(dict(values))
+        expected += (
+            f". A dict value for the one argument is written ({shown},) or "
+            f"{{{arg_names[0]!r}: {shown}}}"
+        )
+    for key in values:
+        if not isinstance(key, str):
+            raise RNGValueError(f"{where} has the key {key!r}, which is not a str. {expected}")
+    unknown = [key for key in values if key not in arg_names]
+    missing = [arg for arg in arg_names if arg not in values]
+    problems = []
+    if unknown:
+        described = []
+        for key in unknown:
+            close = difflib.get_close_matches(key, missing, n=1)
+            described.append(f"{key!r} (did you mean {close[0]!r}?)" if close else repr(key))
+        plural = "s" if len(unknown) > 1 else ""
+        problems.append(f"has unknown argument{plural} {', '.join(described)}")
+    if missing:
+        problems.append("is missing " + ", ".join(repr(arg) for arg in missing))
+    if problems:
+        raise RNGValueError(f"{where} {' and '.join(problems)}. {expected}")
+    return tuple.__new__(row_type, [values[arg] for arg in arg_names])
+
+
+def _vector_values(vector: Vector | ParameterSet) -> Sequence[Any]:
+    """Return the values of a stored directed or test vector (a pytest.param's values)."""
     return vector.values if isinstance(vector, _ParameterSet) else vector
 
 
@@ -79,8 +228,8 @@ class Parameter:
     def __init__(
         self,
         *test_args: TestArg,
-        directed_vectors: dict[str, tuple[Any, ...]] | None = None,
-        test_vectors: dict[str, tuple[Any, ...]] | None = None,
+        directed_vectors: Mapping[str, Iterable[Any]] | None = None,
+        test_vectors: Mapping[str, Iterable[Any]] | None = None,
         always_include_directed: bool = True,
         vector_constraints: Sequence[Callable[[Vector], object]] | None = None,
         max_retries: int = 100,
@@ -93,11 +242,15 @@ class Parameter:
 
         Args:
             *test_args: Variable number of TestArg instances
-            directed_vectors: Dictionary mapping vector names to value tuples. A
-                pytest.param(*values, marks=...) vector keeps its marks (and id) on
-                its row, and its values are counted against the test args.
-            test_vectors: Dictionary mapping test vector names to value tuples (for test
-                mode), or pytest.param(*values, marks=...) as for directed_vectors
+            directed_vectors: Mapping of vector names (non-empty strings) to vectors.
+                A vector gives one value per argument: a tuple or list in declaration
+                order, a dict of argument names to values in any order, or a
+                namedtuple whose fields are the argument names. A
+                pytest.param(*values, marks=...) of one of these keeps its marks (and
+                id) on its row. Each is stored as a Vector; a dict value for a
+                one-argument strategy is written ({"a": 1},) or {"cfg": {"a": 1}}.
+            test_vectors: Mapping of test vector names to vectors (for test mode), in
+                the forms directed_vectors takes
             always_include_directed: If True, directed vectors are included in "mixed" mode
             vector_constraints: List of functions that validate entire parameter vectors.
                 Each receives the row as a Vector (``v.addr`` or ``v[0]``), and a falsy
@@ -120,11 +273,14 @@ class Parameter:
                 option (100,000 by default).
 
         Raises:
-            ValueError: If directed vectors don't match the number of test args
             ValueError: If nsamples, max_retries or max_exhaustive is not a valid count,
                 or per_sequence_samples is not a bool
             RNGValueError: If two test args have the same name, or a name is not an
                 identifier, is a keyword or starts with "_"
+            RNGValueError: If a directed or test vector's name is not a non-empty str,
+                or the vector does not give exactly one value per argument (a str,
+                bytes or scalar vector, a dict with missing or unknown names, a
+                dataclass or pydantic model instance)
 
         Examples:
             # Simple parameter with 2 args
@@ -133,13 +289,13 @@ class Parameter:
                 TestArg("y", rng_type=RNGInteger(0, 10))
             )
 
-            # With directed vectors
+            # With directed vectors, by position or by name
             param = Parameter(
                 TestArg("x", rng_type=RNGInteger(0, 10)),
                 TestArg("y", rng_type=RNGInteger(0, 10)),
                 directed_vectors={
                     "origin": (0, 0),
-                    "max": (10, 10),
+                    "max": {"y": 10, "x": 10},
                 }
             )
         """
@@ -170,8 +326,14 @@ class Parameter:
 
         # Copy the caller's containers so add_*/remove_* never mutate shared objects
         self.test_args = list(test_args)
-        self.directed_vectors = {k: _as_vector(v) for k, v in (directed_vectors or {}).items()}
-        self.test_vectors = {k: _as_vector(v) for k, v in (test_vectors or {}).items()}
+        arg_names = self.arg_names
+        self._directed_vectors = {
+            k: _normalize_vector("directed", k, v, arg_names)
+            for k, v in (directed_vectors or {}).items()
+        }
+        self._test_vectors = {
+            k: _normalize_vector("test", k, v, arg_names) for k, v in (test_vectors or {}).items()
+        }
         self.always_include_directed = always_include_directed
         self.vector_constraints = list(vector_constraints or [])
         self.max_retries = max_retries
@@ -179,39 +341,24 @@ class Parameter:
         self.per_sequence_samples = per_sequence_samples
         self.max_exhaustive = max_exhaustive
 
-        # Validate directed vectors on initialization
-        self._validate_directed_vectors()
-        self._validate_test_vectors()
-
-    def _validate_directed_vectors(self) -> None:
+    @property
+    def directed_vectors(self) -> Mapping[str, Vector | ParameterSet]:
         """
-        Ensure all directed vectors match the number of test args.
+        The directed vectors by name, as Vectors (a pytest.param(...) vector keeps its
+        marks, with a Vector as its values).
 
-        Raises:
-            ValueError: If any directed vector has wrong number of values
+        Read-only: add_directed_vector() and remove_directed_vector() change it.
         """
-        expected_len = len(self.test_args)
-        for name, vector in self.directed_vectors.items():
-            count = len(_vector_values(vector))
-            if count != expected_len:
-                raise ValueError(
-                    f"Directed vector '{name}' has {count} values, expected {expected_len}"
-                )
+        return MappingProxyType(self._directed_vectors)
 
-    def _validate_test_vectors(self) -> None:
+    @property
+    def test_vectors(self) -> Mapping[str, Vector | ParameterSet]:
         """
-        Ensure all test vectors match the number of test args.
+        The test vectors by name, as for directed_vectors.
 
-        Raises:
-            ValueError: If any test vector has wrong number of values
+        Read-only: add_test_vector() and remove_test_vector() change it.
         """
-        expected_len = len(self.test_args)
-        for name, vector in self.test_vectors.items():
-            count = len(_vector_values(vector))
-            if count != expected_len:
-                raise ValueError(
-                    f"Test vector '{name}' has {count} values, " f"expected {expected_len}"
-                )
+        return MappingProxyType(self._test_vectors)
 
     def _validate_vector(self, vector: Vector, rejections: Counter[int] | None = None) -> bool:
         """
@@ -252,25 +399,26 @@ class Parameter:
     # Vector Management
     # ====
 
-    def add_directed_vector(self, name: str, values: tuple[Any, ...]) -> None:
+    def add_directed_vector(self, name: str, values: Iterable[Any]) -> None:
         """
-        Add a named directed test vector.
+        Add a named directed test vector, or replace the one with that name.
 
         Args:
-            name: Unique name for the vector
-            values: Tuple of values matching test_args length, or a
-                pytest.param(*values, marks=...) whose values match it
+            name: Unique name for the vector, a non-empty str
+            values: The vector, in any form directed_vectors takes: one value per
+                argument as a tuple or list, a dict of argument names to values, a
+                namedtuple with the argument names as fields, or a
+                pytest.param(...) of one of these
 
         Raises:
-            ValueError: If vector length doesn't match test_args
+            RNGValueError: If the name is not a non-empty str, or the vector does
+                not give exactly one value per argument
 
         Example:
             param.add_directed_vector("edge_case", (0, 100, "fast"))
+            param.add_directed_vector("zeros", {"addr": 0, "len": 0})
         """
-        count = len(_vector_values(values))
-        if count != len(self.test_args):
-            raise ValueError(f"Vector must have {len(self.test_args)} values, got {count}")
-        self.directed_vectors[name] = _as_vector(values)
+        self._directed_vectors[name] = _normalize_vector("directed", name, values, self.arg_names)
 
     def remove_directed_vector(self, name: str) -> None:
         """
@@ -282,29 +430,26 @@ class Parameter:
         Raises:
             KeyError: If vector name doesn't exist
         """
-        if name not in self.directed_vectors:
+        if name not in self._directed_vectors:
             raise KeyError(f"No directed vector named '{name}'")
-        del self.directed_vectors[name]
+        del self._directed_vectors[name]
 
-    def add_test_vector(self, name: str, values: tuple[Any, ...]) -> None:
+    def add_test_vector(self, name: str, values: Iterable[Any]) -> None:
         """
-        Add a named test vector.
+        Add a named test vector, or replace the one with that name.
 
         Args:
-            name: Unique name for the vector
-            values: Tuple of values matching test_args length, or a
-                pytest.param(*values, marks=...) whose values match it
+            name: Unique name for the vector, a non-empty str
+            values: The vector, in any form add_directed_vector() takes
 
         Raises:
-            ValueError: If vector length doesn't match test_args
+            RNGValueError: If the name is not a non-empty str, or the vector does
+                not give exactly one value per argument
 
         Example:
             param.add_test_vector("test_case_1", (0, 100, "fast"))
         """
-        count = len(_vector_values(values))
-        if count != len(self.test_args):
-            raise ValueError(f"Vector must have {len(self.test_args)} values, got {count}")
-        self.test_vectors[name] = _as_vector(values)
+        self._test_vectors[name] = _normalize_vector("test", name, values, self.arg_names)
 
     def remove_test_vector(self, name: str) -> None:
         """
@@ -316,11 +461,11 @@ class Parameter:
         Raises:
             KeyError: If vector name doesn't exist
         """
-        if name not in self.test_vectors:
+        if name not in self._test_vectors:
             raise KeyError(f"No test vector named '{name}'")
-        del self.test_vectors[name]
+        del self._test_vectors[name]
 
-    def get_test_vector(self, name: str) -> tuple[Any, ...]:
+    def get_test_vector(self, name: str) -> Vector | ParameterSet:
         """
         Get a specific test vector by name.
 
@@ -328,16 +473,16 @@ class Parameter:
             name: Name of the vector
 
         Returns:
-            The test vector tuple
+            The test vector: a Vector, or the pytest.param(...) whose values are one
 
         Raises:
             KeyError: If vector name doesn't exist
         """
-        if name not in self.test_vectors:
+        if name not in self._test_vectors:
             raise KeyError(f"No test vector named '{name}'")
-        return self.test_vectors[name]
+        return self._test_vectors[name]
 
-    def get_directed_vector(self, name: str) -> tuple[Any, ...]:
+    def get_directed_vector(self, name: str) -> Vector | ParameterSet:
         """
         Get a specific directed vector by name.
 
@@ -345,14 +490,14 @@ class Parameter:
             name: Name of the vector
 
         Returns:
-            The directed vector tuple
+            The directed vector: a Vector, or the pytest.param(...) whose values are one
 
         Raises:
             KeyError: If vector name doesn't exist
         """
-        if name not in self.directed_vectors:
+        if name not in self._directed_vectors:
             raise KeyError(f"No directed vector named '{name}'")
-        return self.directed_vectors[name]
+        return self._directed_vectors[name]
 
     # ====
     # Sample Generation
@@ -472,7 +617,7 @@ class Parameter:
         mode: str = "all",
         filter_by_name: str | None = None,
         filter_by_index: int | None = None,
-    ) -> list[tuple[Any, ...]]:
+    ) -> list[Vector | ParameterSet]:
         """
         Generate parameter vectors.
 
@@ -492,8 +637,9 @@ class Parameter:
         The arguments after n are keyword-only.
 
         Returns:
-            List of parameter vectors: the directed or test vectors as they were given,
-            and the generated rows as Vectors. Empty when skip_reason is set.
+            List of parameter vectors, each a Vector, or for a pytest.param(...)
+            directed or test vector the ParameterSet whose values are a Vector. Empty
+            when skip_reason is set.
 
         Raises:
             KeyError / IndexError: If filter_by_name / filter_by_index names no
@@ -522,7 +668,7 @@ class Parameter:
             # Get specific vector by index
             samples = param.generate_vectors(0, filter_by_index=0)
         """
-        samples: list[tuple[Any, ...]] = []
+        samples: list[Vector | ParameterSet] = []
 
         # Handle CLI filters first (override mode). A missing vector raises even when
         # the Parameter is skipped, so callers can still tell whether a filter matched.
@@ -800,7 +946,7 @@ class Parameter:
     # CLI Support
     # ====
 
-    def get_vector_by_name(self, name: str) -> tuple[Any, ...]:
+    def get_vector_by_name(self, name: str) -> Vector | ParameterSet:
         """
         Get directed vector by name (for -vn CLI argument).
 
@@ -808,7 +954,7 @@ class Parameter:
             name: Name of the directed vector
 
         Returns:
-            The directed vector tuple
+            The directed vector: a Vector, or the pytest.param(...) whose values are one
 
         Raises:
             KeyError: If vector name doesn't exist
@@ -818,7 +964,7 @@ class Parameter:
             raise KeyError(f"No directed vector named '{name}'. " f"Available: {available}")
         return self.directed_vectors[name]
 
-    def get_vector_by_index(self, index: int) -> tuple[Any, ...]:
+    def get_vector_by_index(self, index: int) -> Vector | ParameterSet:
         """
         Get directed vector by index (for -vi CLI argument).
 
@@ -826,7 +972,7 @@ class Parameter:
             index: Index of the directed vector (0-based)
 
         Returns:
-            The directed vector tuple
+            The directed vector: a Vector, or the pytest.param(...) whose values are one
 
         Raises:
             IndexError: If index is out of range

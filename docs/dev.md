@@ -360,7 +360,13 @@ and a non-callable `predicate` (such as a reason passed positionally) raises.
 
 The `Parameter` copies the `directed_vectors`, `test_vectors` and
 `vector_constraints` it is given, so `add_*`/`remove_*` never change the
-caller's dicts and lists.
+caller's dicts and lists. Every directed and test vector goes through
+`_normalize_vector()` (in `__init__` and the `add_*` methods), which stores it
+as a `Vector` in declaration order: a dict or a namedtuple by name, a tuple, list
+or other iterable by position, and a `pytest.param` rebuilt around the `Vector`
+with its marks and id. Strings, bytes, scalars and record instances fail there,
+and so do names that are not non-empty strings. `directed_vectors` and
+`test_vectors` are read-only `MappingProxyType` views of the private dicts.
 
 **Key Features:**
 - Vector management (add, remove, get)

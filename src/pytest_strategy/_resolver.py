@@ -306,6 +306,7 @@ def build_parametrization(
             )
 
     # Generate samples using Parameter's generate_vectors with CLI options
+    samples: list[Any]
     try:
         # Warnings raised while generating name the strategy and the test
         with _attributed_warnings(name, test_fn):

@@ -31,6 +31,7 @@ from pytest_strategy import (
     Strategy,
     StrategyOptions,
     TestArg,
+    Vector,
 )
 from pytest_strategy._factory import FactoryInputs, call_factory
 from pytest_strategy._runtime import runtime
@@ -169,7 +170,7 @@ class TestWeightTotals:
 
 
 class TestListVectors:
-    """A vector given as a list (e.g. from JSON or YAML) is stored as a tuple."""
+    """A vector given as a list (e.g. from JSON or YAML) is stored as a tuple (a Vector)."""
 
     def _single(self, **kwargs):
         return Parameter(TestArg("x", rng_type=RNGInteger(0, 10)), **kwargs)
@@ -192,8 +193,8 @@ class TestListVectors:
         assert param.directed_vectors == {"a": (1,)}
         assert param.test_vectors == {"b": (2,)}
 
-    def test_pytest_param_vector_is_kept(self):
-        """A tuple is not rebuilt, so a pytest.param keeps its marks and id."""
+    def test_pytest_param_vector_keeps_its_marks_and_id(self):
+        """4.0 rebuilds a pytest.param around a Vector of its values, with its marks and id."""
         vector = pytest.param(1, 2, 3, marks=pytest.mark.xfail, id="pp")
         param = Parameter(
             TestArg("x", rng_type=RNGInteger(0, 10)),
@@ -202,11 +203,18 @@ class TestListVectors:
             directed_vectors={"pp": vector},
         )
 
-        assert param.get_vector_by_name("pp") is vector
+        stored = param.get_vector_by_name("pp")
+
+        assert stored is not vector
+        assert stored == vector
+        assert isinstance(stored.values, Vector)
+        assert stored.values._fields == ("x", "y", "z")
+        assert stored.marks == vector.marks
+        assert stored.id == "pp"
 
 
 class TestEmptyVectorName:
-    """Only None means "no filter"; an empty name is a name like any other."""
+    """Only None means "no filter"; an empty name is not a vector's name."""
 
     def test_empty_name_that_no_vector_has_raises(self):
         param = Parameter(
@@ -217,13 +225,13 @@ class TestEmptyVectorName:
         with pytest.raises(KeyError):
             param.generate_vectors(10, filter_by_name="")
 
-    def test_vector_named_empty_can_be_selected(self):
-        param = Parameter(
-            TestArg("x", rng_type=RNGInteger(0, 100)),
-            directed_vectors={"": (7,), "max": (100,)},
-        )
-
-        assert param.generate_vectors(10, filter_by_name="") == [(7,)]
+    def test_vector_named_empty_is_rejected(self):
+        """4.0: a vector's name selects it and becomes its ID, so "" is not a name."""
+        with pytest.raises(RNGValueError, match="^Directed vector names must be non-empty"):
+            Parameter(
+                TestArg("x", rng_type=RNGInteger(0, 100)),
+                directed_vectors={"": (7,), "max": (100,)},
+            )
 
 
 # ---------------------------------------------------------------------------

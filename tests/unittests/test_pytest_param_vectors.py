@@ -62,18 +62,21 @@ class TestLengthIsTheNumberOfValues:
             Parameter(*_args("a", "b"), **{kind: {"long": pytest.param(1, 2, 3, marks=XFAIL)}})
 
     @pytest.mark.parametrize(
-        ("add", "kind"),
-        [("add_directed_vector", "directed_vectors"), ("add_test_vector", "test_vectors")],
+        ("add", "kind", "label"),
+        [
+            ("add_directed_vector", "directed_vectors", "Directed"),
+            ("add_test_vector", "test_vectors", "Test"),
+        ],
     )
-    def test_add_checks_the_values(self, add, kind):
+    def test_add_checks_the_values(self, add, kind, label):
         param = Parameter(*_args("a", "b"))
         vector = pytest.param(1, 2, marks=XFAIL)
 
         getattr(param, add)("bad", vector)
 
-        with pytest.raises(ValueError, match="Vector must have 2 values, got 3"):
+        with pytest.raises(ValueError, match=f"^{label} vector 'long' has 3 values, expected 2$"):
             getattr(param, add)("long", pytest.param(1, 2, 3))
-        with pytest.raises(ValueError, match="Vector must have 2 values, got 1"):
+        with pytest.raises(ValueError, match=f"^{label} vector 'short' has 1 values, expected 2$"):
             getattr(param, add)("short", pytest.param(1))
         assert getattr(param, kind) == {"bad": vector}
 

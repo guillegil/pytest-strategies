@@ -110,8 +110,8 @@ class Parameter:
     def __init__(
         self,
         *test_args: TestArg,
-        directed_vectors: dict[str, tuple] | None = None,
-        test_vectors: dict[str, tuple] | None = None,
+        directed_vectors: Mapping[str, Iterable[Any]] | None = None,
+        test_vectors: Mapping[str, Iterable[Any]] | None = None,
         always_include_directed: bool = True,
         vector_constraints: Sequence[Callable[[Vector], object]] | None = None,
         max_retries: int = 100,
@@ -124,8 +124,8 @@ class Parameter:
 | Argument | Meaning |
 | --- | --- |
 | `*test_args` | the arguments, in order; names must be unique identifiers that are not keywords and do not start with `_` (`RNGValueError` otherwise) |
-| `directed_vectors` | named rows, one value per argument in order (a tuple or list), placed before the random rows |
-| `test_vectors` | named rows used only by `--vector-mode=test` |
+| `directed_vectors` | named rows, placed before the random rows: one value per argument in order (a tuple or list), or by name (a dict of argument names to values, or a namedtuple with those fields); names are non-empty strings |
+| `test_vectors` | named rows used only by `--vector-mode=test`, in the same forms |
 | `always_include_directed` | whether `--vector-mode=mixed` includes the directed vectors |
 | `vector_constraints` | functions taking the row as a `Vector` (`v.lo` or `v[0]`); a random row that fails one is redrawn |
 | `max_retries` | redraws per row before giving up (int >= 1) |
@@ -133,8 +133,17 @@ class Parameter:
 | `per_sequence_samples` | count rows per combination of the `Series`/`RNGSequence` arguments (section 7) |
 | `max_exhaustive` | this strategy's limit on exhaustive combinations (section 7) |
 
-- Directed and test vectors must have one value per argument (`ValueError`
-  otherwise). They are not checked by predicates, constraints or validators.
+- Directed and test vectors must give one value per argument (`RNGValueError`
+  otherwise, naming the vector: a wrong length, a missing or unknown dict key,
+  with "did you mean"). A str, bytes or scalar vector fails with
+  `For a one-argument strategy write ('a',) or {'x': 'a'}`, and a dict value for
+  one argument is written `({"a": 1},)` or `{"cfg": {"a": 1}}`. Dataclass and
+  pydantic model instances are not supported as vectors yet; use a dict.
+  `pytest.param(..., marks=...)` wraps any of these forms. Vectors are not
+  checked by predicates, constraints or validators.
+- The `Parameter` stores each vector as a `Vector` (a `pytest.param` keeps its
+  marks, with a `Vector` as its values). `directed_vectors` and `test_vectors`
+  are read-only mappings; change them with the `add_*` and `remove_*` methods.
 - The `Parameter` copies the dicts and lists it is given.
 - Methods: `add_directed_vector(name, values)`, `remove_directed_vector(name)`,
   `add_test_vector(name, values)`, `remove_test_vector(name)`,

@@ -67,7 +67,7 @@ class TestParameterWithTestVectors:
         param = Parameter(
             TestArg("x", rng_type=RNGInteger(0, 10)), TestArg("y", rng_type=RNGInteger(0, 10))
         )
-        with pytest.raises(ValueError, match="Vector must have 2 values, got 1"):
+        with pytest.raises(ValueError, match="Test vector 'bad' has 1 values, expected 2"):
             param.add_test_vector("bad", (5,))
 
     def test_remove_test_vector(self):

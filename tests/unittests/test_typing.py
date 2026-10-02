@@ -1,7 +1,8 @@
 """
 The decorators keep the decorated function's type, the keyword-only options are
-keyword-only for type checkers too, StrategyOptions is typed as frozen, and a
-Vector's fields type-check by name.
+keyword-only for type checkers too, StrategyOptions is typed as frozen, a
+Vector's fields type-check by name, and vectors given by name type-check next to
+tuples while the vector mappings are read-only.
 
 CI also type-checks this file with ``mypy --strict``: ``assert_type`` fails the
 check if a decorator loses the type (a call on ``Callable[..., Any]`` returns
@@ -122,3 +123,24 @@ def test_constraint_lists_typed_for_tuples_still_type_check() -> None:
     param = Parameter(TestArg("addr", rng_type=RNGInteger(0, 9)), vector_constraints=constraints)
 
     assert len(param.generate_vectors(2, mode="random_only")) == 2
+
+
+def test_vectors_by_name_type_check() -> None:
+    """Each ignore below is needed: mypy reports the line as an error, as Python does."""
+    vectors = {"zeros": (0, 0), "max": {"len": 16, "addr": 63}, "list": [1, 2]}
+    param = Parameter(
+        TestArg("addr", rng_type=RNGInteger(0, 63)),
+        TestArg("len", rng_type=RNGInteger(1, 16)),
+        directed_vectors=vectors,
+        test_vectors={"marked": pytest.param({"addr": 4, "len": 1}, marks=pytest.mark.xfail)},
+    )
+    param.add_directed_vector("one", {"addr": 1, "len": 1})
+    param.add_test_vector("row", param.vector_type(addr=2, len=2))
+
+    vector = param.get_directed_vector("max")
+    assert isinstance(vector, Vector) and vector.len == 16
+    assert param.get_test_vector("marked").values == (4, 1)
+    with pytest.raises(TypeError):
+        param.directed_vectors["x"] = (1, 1)  # type: ignore[index]
+    with pytest.raises(AttributeError):
+        param.test_vectors = {}  # type: ignore[misc]

@@ -103,7 +103,7 @@ class TestParameterDirectedVectors:
         arg = TestArg("x", rng_type=RNGInteger(0, 10))
         param = Parameter(arg)
 
-        with pytest.raises(ValueError, match="must have 1 values, got 2"):
+        with pytest.raises(ValueError, match="Directed vector 'invalid' has 2 values, expected 1"):
             param.add_directed_vector("invalid", (1, 2))
 
     def test_remove_directed_vector(self):
