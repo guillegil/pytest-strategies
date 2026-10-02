@@ -187,3 +187,37 @@ class TestExamples:
                 if role is module.UserRole.GUEST and method is not module.RequestMethod.GET
             )
         assert bad == []
+
+    @pytest.mark.parametrize("seed", [2, 4, 5])
+    def test_values_example_passes_with_its_constraint_turned_off(self, pytester, seed):
+        """CI runs test_values_example.py with --strategy-constraint-off=date_range_test:ordered.
+
+        No path is given, so a name that matched no constraint would stop the run
+        with a usage error.
+        """
+        example = REPO_ROOT / "examples" / "test_values_example.py"
+        pytester.makepyfile(test_test_values_example=example.read_text(encoding="utf-8"))
+
+        result = pytester.runpytest(
+            f"--rng-seed={seed}", "--strategy-constraint-off=date_range_test:ordered", "-v"
+        )
+
+        assert result.ret == pytest.ExitCode.OK, result.stdout.str()
+        result.stdout.fnmatch_lines(["  date_range_test (*): *; off: ordered"])
+
+    def test_values_example_rejects_the_ranges_its_constraint_keeps_out(self, monkeypatch):
+        """With 'ordered' off, date_range_test draws ranges that end before they
+        start, and test_date_ranges expects days_in_range to reject them."""
+        module, factories = _load_example_factories(
+            REPO_ROOT / "examples" / "test_values_example.py", monkeypatch
+        )
+        param = factories["date_range_test"](nsamples=10)
+        assert list(param.vector_constraints) == ["ordered"]
+
+        RNG.seed(1)
+        assert all(row.start_day <= row.end_day for row in param.generate_vectors(50))
+        rows = param.generate_vectors(50, constraints_off=("ordered",))
+        reversed_rows = [row for row in rows if row.start_day > row.end_day]
+        assert reversed_rows
+        for row in reversed_rows:
+            module.test_date_ranges(*row)

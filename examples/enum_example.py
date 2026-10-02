@@ -160,7 +160,7 @@ def create_role_based_strategy(nsamples: int) -> Parameter:
         )),
         vector_constraints=[
             # Guests can only read
-            lambda v: v[0] != UserRole.GUEST or v[1] == RequestMethod.GET,
+            lambda v: v.role != UserRole.GUEST or v.method == RequestMethod.GET,
         ],
         directed_vectors={
             "guest_read": (UserRole.GUEST, RequestMethod.GET),
@@ -202,9 +202,9 @@ def create_api_test_strategy(nsamples: int) -> Parameter:
         TestArg("retry_count", rng_type=RNGInteger(0, 5)),
         vector_constraints=[
             # GET requests should mostly succeed
-            lambda v: v[0] != RequestMethod.GET or v[1].value < 500,
+            lambda v: v.method != RequestMethod.GET or v.status_code.value < 500,
             # Guests can't get server errors
-            lambda v: v[2] != UserRole.GUEST or v[1].value != 500,
+            lambda v: v.role != UserRole.GUEST or v.status_code.value != 500,
         ],
         directed_vectors={
             "guest_get_ok": (RequestMethod.GET, HttpStatus.OK, UserRole.GUEST, 0),

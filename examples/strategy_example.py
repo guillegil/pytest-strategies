@@ -63,7 +63,7 @@ def create_range_strategy(nsamples):
         TestArg("min_val", rng_type=RNGInteger(0, 50)),
         TestArg("max_val", rng_type=RNGInteger(50, 100)),
         vector_constraints=[
-            lambda v: v[0] < v[1]  # min < max
+            lambda v: v.min_val < v.max_val  # The row is a Vector: v.min_val is v[0]
         ],
         directed_vectors={
             "edge_case": (0, 100),

@@ -54,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A parameter with a default (`def test_p(p: Point = None)`) is not a record parameter. 3.0 chose it, and pytest then refused to parametrize an argument with a default.
   - Dataclass-mode test IDs leave out `init=False` fields.
   - The signature error says why no parameter receives the row as a record, when a parameter's annotation cannot be resolved (such as a class defined inside a test class, under `from __future__ import annotations`), is a union, or has a default. Its missing parameters are listed in argument order.
+- The examples' constraints read the row's arguments by name (`v.min_val < v.max_val`), and `examples/test_values_example.py` names its date range constraint `ordered`: `pytest examples/test_values_example.py --strategy-constraint-off=date_range_test:ordered` also draws ranges that end before they start, which its test expects the code to reject. CI runs the example that way.
 
 ### Removed
 The APIs deprecated in 3.0, without warnings left behind:

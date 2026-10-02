@@ -98,6 +98,12 @@ jobs:
       - name: Test vectors only (--vector-mode=test)
         run: python -m pytest examples/test_values_example.py --vector-mode=test
 
+      # No path on the command line, so the run counts as the whole suite: a name
+      # that matches no constraint stops it with a usage error instead of a red line.
+      - name: An example with its named constraint turned off (--strategy-constraint-off)
+        working-directory: examples
+        run: python -m pytest -o python_files=test_values_example.py --strategy-constraint-off=date_range_test:ordered
+
       - name: Examples on two xdist workers, without a seed
         run: python -m pytest examples/*.py -n 2
 

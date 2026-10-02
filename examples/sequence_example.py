@@ -75,7 +75,7 @@ def constrained_sequence_strategy(nsamples):
         TestArg("a", rng_type=RNGSequence([1, 2, 3, 4])),
         TestArg("b", rng_type=RNGSequence([1, 2, 3, 4])),
         # Only test pairs where a < b
-        vector_constraints=[lambda v: v[0] < v[1]]
+        vector_constraints=[lambda v: v.a < v.b]
     )
 
 @strategy("constrained_sequence")
