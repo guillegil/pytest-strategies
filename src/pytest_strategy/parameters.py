@@ -24,8 +24,9 @@ from typing import Any, Literal, NamedTuple, cast
 
 import pytest
 
+from ._ids import ID_FORMATS
 from ._vector import RowKind as _RowKind
-from ._vector import Vector
+from ._vector import Vector, VectorInfo
 from ._vector import vector_type as _vector_type
 from ._warnings import PytestStrategiesWarning
 from .rng import RNGValueError, SequenceLike, Series
@@ -34,6 +35,23 @@ from .test_args import TestArg
 # pytest.param() returns a ParameterSet (a NamedTuple), which pytest does not export
 _ParameterSet = type(pytest.param())
 
+# What Parameter(ids=...) takes: None for the strategies_ids ini option, one of its
+# formats, or a function that returns a row's test ID (None for the default)
+_Ids = Literal["names", "values"] | Callable[[VectorInfo], str | None] | None
+
+
+def _check_ids(ids: object) -> None:
+    """
+    Check a value of ``Parameter(ids=...)``.
+
+    Raises:
+        ValueError: For anything but None, "names", "values" or a callable
+    """
+    if ids is None or callable(ids) or (isinstance(ids, str) and ids in ID_FORMATS):
+        return
+    formats = ", ".join(f'"{f}"' for f in ID_FORMATS)
+    raise ValueError(f"ids must be None, {formats} or a callable, got {ids!r}")
+
 
 def _normalize_vector(kind: str, name: object, raw: object, arg_names: tuple[str, ...]) -> Vector:
     """
@@ -41,9 +59,10 @@ def _normalize_vector(kind: str, name: object, raw: object, arg_names: tuple[str
 
     The rules, in order:
 
-    - a ``pytest.param(...)`` keeps its marks and id, and its values become the
-      Vector: when its only value is a Mapping, that Mapping is a named vector,
-      otherwise its values are taken by position;
+    - a ``pytest.param(...)`` keeps its marks, and its values become the Vector:
+      when its only value is a Mapping, that Mapping is a named vector, otherwise
+      its values are taken by position. An ``id=`` fails: the vector's name is its
+      test ID;
     - a Mapping is a named vector: its keys are the argument names, in any order;
     - a namedtuple (a Vector too) is placed by its field names, which must be the
       argument names;
@@ -80,7 +99,7 @@ def _normalize_vector(kind: str, name: object, raw: object, arg_names: tuple[str
             raise RNGValueError(
                 f"{where} is a pytest.param with id={raw.id!r}, but the vector's name is "
                 f"its ID ({kind}-{name}). Remove id=, and name the vector after the ID it "
-                "should have"
+                "should have, or build IDs with Parameter(ids=...)"
             )
         given = raw.values
         if len(given) == 1 and isinstance(given[0], Mapping):
@@ -852,6 +871,7 @@ class Parameter:
         nsamples: int | str | None = None,
         per_sequence_samples: bool = False,
         max_exhaustive: int | None = None,
+        ids: _Ids = None,
     ) -> None:
         """
         Initialize a Parameter container.
@@ -862,10 +882,11 @@ class Parameter:
                 A vector gives one value per argument: a tuple or list in declaration
                 order, a dict of argument names to values in any order, or a
                 namedtuple whose fields are the argument names. A
-                pytest.param(*values, marks=...) of one of these keeps its marks (and
-                id) on its row. Each is stored as a Vector; a dict value for a
-                one-argument strategy is written ({"a": 1},) or {"cfg": {"a": 1}}, and
-                in a pytest.param only pytest.param({"cfg": {"a": 1}}, marks=...).
+                pytest.param(*values, marks=...) of one of these keeps its marks on its
+                row; it cannot have an id=, because the vector's name is its test ID.
+                Each is stored as a Vector; a dict value for a one-argument strategy is
+                written ({"a": 1},) or {"cfg": {"a": 1}}, and in a pytest.param only
+                pytest.param({"cfg": {"a": 1}}, marks=...).
             test_vectors: Mapping of test vector names to vectors (for test mode), in
                 the forms directed_vectors takes
             always_include_directed: If True, directed vectors are included in "mixed" mode
@@ -892,10 +913,19 @@ class Parameter:
                 may generate for this strategy; the plugin fails the test's collection
                 above it, before generating. None uses the strategies_max_exhaustive ini
                 option (100,000 by default).
+            ids: The test IDs of this strategy's rows. None follows the
+                strategies_ids ini option; "names" (directed-zeros, rand-3, ch=2-rand-1)
+                or "values" (the 3.0 IDs, built from the values) overrides it for this
+                strategy. A callable is called with each row's VectorInfo while the
+                tests are collected (not for the skipped row of an empty skip_if_empty
+                sequence), whose id is the row's ID in the ini option's format: it
+                returns the ID to use, or None to keep that one. IDs that come out
+                the same are suffixed as pytest suffixes them (odd0, odd1).
 
         Raises:
             ValueError: If nsamples, max_retries or max_exhaustive is not a valid count,
-                or per_sequence_samples is not a bool
+                per_sequence_samples is not a bool, or ids is not None, "names",
+                "values" or a callable
             RNGValueError: If two test args have the same name, or a name is not an
                 identifier, is a keyword or starts with "_"
             RNGValueError: If a directed or test vector's name is not a non-empty str,
@@ -942,6 +972,7 @@ class Parameter:
             or max_exhaustive < 1
         ):
             raise ValueError(f"max_exhaustive must be None or an int >= 1, got {max_exhaustive!r}")
+        _check_ids(ids)
         seen: set[str] = set()
         for arg in test_args:
             _check_arg_name(arg.name)
@@ -969,6 +1000,7 @@ class Parameter:
         self.nsamples = nsamples
         self.per_sequence_samples = per_sequence_samples
         self.max_exhaustive = max_exhaustive
+        self.ids: _Ids = ids
 
     @property
     def directed_vectors(self) -> Mapping[str, Vector]:

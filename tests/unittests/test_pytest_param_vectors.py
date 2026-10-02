@@ -93,7 +93,7 @@ class TestAnIdFails:
         assert str(excinfo.value) == (
             f"{label} vector 'five' is a pytest.param with id='x', but the vector's name is "
             f"its ID ({prefix}-five). Remove id=, and name the vector after the ID it should "
-            "have"
+            "have, or build IDs with Parameter(ids=...)"
         )
 
     @pytest.mark.parametrize("add", ["add_directed_vector", "add_test_vector"])

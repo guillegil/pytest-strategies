@@ -3,8 +3,9 @@ The decorators keep the decorated function's type, the keyword-only options are
 keyword-only for type checkers too, StrategyOptions is typed as frozen, a
 Vector's fields type-check by name, vectors given by name type-check next to
 tuples while the vector mappings are read-only, constraints type-check by name
-too, and can be turned off per generation call, and the stash keys of the per-test
-metadata are typed with VectorInfo.
+too, and can be turned off per generation call, the stash keys of the per-test
+metadata are typed with VectorInfo, and Parameter(ids=...) takes a format or a
+function of a VectorInfo.
 
 CI also type-checks this file with ``mypy --strict``: ``assert_type`` fails the
 check if a decorator loses the type (a call on ``Callable[..., Any]`` returns
@@ -58,6 +59,10 @@ def aligned(v: Vector) -> bool:
 
 def first_small(v: tuple[int, int]) -> bool:
     return v[0] < 64
+
+
+def row_id(info: VectorInfo) -> str | None:
+    return None if info.kind == "skipped" else f"{info.kind}{info.index}"
 
 
 def test_register_keeps_the_factory_type() -> None:
@@ -246,3 +251,19 @@ def test_vector_info_types() -> None:
         info.index = 1  # type: ignore[misc]
     with pytest.raises(TypeError):
         VectorInfo("s")  # type: ignore[call-arg]
+
+
+def test_ids_type_check() -> None:
+    """Each ignore below is needed: mypy reports the line as an error, as Python does."""
+    by_function = Parameter(TestArg("addr", value=4), ids=row_id)
+    by_lambda = Parameter(TestArg("addr", value=4), ids=lambda info: f"a{info.values.addr}")
+    by_format = Parameter(TestArg("addr", value=4), ids="values")
+
+    assert_type(
+        by_format.ids, Literal["names", "values"] | Callable[[VectorInfo], str | None] | None
+    )
+    assert by_function.ids is row_id and callable(by_lambda.ids) and by_format.ids == "values"
+    with pytest.raises(ValueError):
+        Parameter(TestArg("addr", value=4), ids="foo")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        Parameter(TestArg("addr", value=4), ids=42)  # type: ignore[arg-type]

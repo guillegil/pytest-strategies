@@ -91,6 +91,8 @@ same module object the plugin loaded.
   name the row, the same for every seed: `test_charge[directed-zeros]`,
   `test_charge[rand-3]`, and `ch=2-rand-1` when a `Series` value is enumerated.
   Select a directed vector with `-k zeros` or `--vector-name=zeros`.
+  `Parameter(ids="values")` gives one strategy the 3.0 IDs built from the values,
+  and `ids=fn` builds them from each row's `VectorInfo` (return None to keep one).
 
 ## Where strategies live
 

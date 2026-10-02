@@ -148,7 +148,7 @@ RNG types check their arguments when they are constructed. A misconfigured strat
 - A `set` or `frozenset` passed to `Series` or `RNGSequence`. Their iteration order is not reproducible, so pass `sorted(...)` or a list instead.
 - An empty `Series` or `RNGSequence`, or one whose predicate rejects every value, unless it has `skip_if_empty` (see [Skipping when a sequence is empty](#skipping-when-a-sequence-is-empty)).
 
-`Parameter` raises `ValueError` when `nsamples` is not `None`, `"auto"` or an integer >= 0, when `max_retries` is not an integer >= 1, when `max_exhaustive` is not `None` or an integer >= 1, when `per_sequence_samples` is not a bool, or when two of its arguments have the same name.
+`Parameter` raises `ValueError` when `nsamples` is not `None`, `"auto"` or an integer >= 0, when `max_retries` is not an integer >= 1, when `max_exhaustive` is not `None` or an integer >= 1, when `per_sequence_samples` is not a bool, when `ids` is not `None`, `"names"`, `"values"` or a callable, or when two of its arguments have the same name.
 
 ### 3. Enums & Weighted Generation
 The `RNGEnum` class supports standard Python Enums, including weighted selection and predicates.
@@ -516,6 +516,22 @@ Control test generation directly from the command line:
 The ini option `strategies_max_exhaustive` (default `100000`) sets the most rows `--nsamples=auto` or `per_sequence_samples=True` may generate for one strategy.
 
 The ini option `strategies_ids` sets the test IDs of strategy rows. `names`, the default, names each row, and the IDs are the same for every seed: `directed-zeros` and `test-max` for directed and test vectors, `rand-3` for a random row, `ch=2-rand-1` when the row enumerates a `Series` value, `ch=0-dev=b` for a row of `--nsamples=auto`, and `skipped` for a `skip_if_empty` row. `-k zeros` selects the directed vector `zeros`, and `pytest "test_x.py::test_x[rand-3]" --rng-seed=S` reruns one row. `values` gives the 3.0 IDs, built from the values (`addr=0,len=1`); a run can switch with `-o strategies_ids=values`. Any other value is a usage error. A `pytest.param` vector cannot have an `id=`, because the vector's name is its ID.
+
+`Parameter(ids=...)` sets the test IDs of one strategy: `"names"` or `"values"` overrides the ini option, and a function builds them. The function is called once per row while the tests are collected, with the row's `VectorInfo` (exported from `pytest_strategy`: the row's `kind`, `name`, `index` and `values`, and more), whose `id` is the row's ID in the ini option's format. It returns the ID to use, or `None` to keep that one:
+
+```python
+def by_size(info):
+    return f"len={info.values.len}" if info.kind == "random" else None
+
+Parameter(
+    TestArg("addr", rng_type=RNGInteger(0, 4095)),
+    TestArg("len", rng_type=RNGInteger(1, 64)),
+    directed_vectors={"zeros": (0, 1)},
+    ids=by_size,  # test_write[directed-zeros], test_write[len=17], ...
+)
+```
+
+Rows that get the same ID are suffixed the way pytest suffixes duplicate IDs (`len=17_0` and `len=17_1`, `odd0` and `odd1`), so they also pass under pytest's `strict_parametrization_ids`, and `item.stash[VECTOR_KEY].id` is the suffixed ID. Anything but a non-empty `str` or `None`, or an exception, fails the collection of the test: `In test_write: Strategy 'burst': ids= returned 42 for row rand-3; return a str or None`. The skipped row of an empty `skip_if_empty` sequence keeps `skipped` without a call. `ids=` and `strategies_ids` change only the IDs, never the values.
 
 `--vector-name` and `--vector-index` take precedence over `--vector-mode` and `--nsamples`. A strategy without the requested directed vector yields no vectors, so the tests that use it are skipped ("got empty parameter set"). If no strategy in the run has the vector, for example because of a typo or an index that is out of range everywhere, pytest stops with a usage error that lists each strategy's directed vectors. It does not skip every test.
 

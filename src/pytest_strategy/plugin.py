@@ -1563,7 +1563,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "strategies_ids",
         "Test IDs of strategy rows: names (the default: directed-zeros, rand-3, "
         "ch=2-rand-1, the same for every seed) or values (the 3.0 format, built from "
-        "the row's values)",
+        "the row's values); Parameter(ids=...) overrides it",
         type="string",
         default="names",
     )

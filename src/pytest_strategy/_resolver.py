@@ -8,8 +8,10 @@ for either record (dataclass) or named-parameter mode.
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import os
+import reprlib
 import warnings
 from collections import Counter
 from collections.abc import Callable, Collection, Mapping, Sequence
@@ -42,6 +44,7 @@ from ._vector import VectorInfo
 from ._warnings import PytestStrategiesWarning
 from .parameters import (
     Parameter,
+    _check_ids,
     _constraint_failure,
     _ConstraintsExhausted,
     _forget_constraint_failure,
@@ -154,8 +157,9 @@ def _unique_ids(ids: list[str], config: pytest.Config | None) -> list[str]:
     Return the test IDs to parametrize with, each duplicate suffixed.
 
     The rows of one strategy have unique IDs in the names format, but the values
-    format repeats the ID of a repeated row, and pytest's strict_parametrization_ids
-    makes duplicate IDs a collection error instead of suffixing them.
+    format repeats the ID of a repeated row, an ids= callable may give several rows
+    one ID, and pytest's strict_parametrization_ids makes duplicate IDs a collection
+    error instead of suffixing them.
     """
     escape = config is None or not config.getini(
         "disable_test_id_escaping_and_forfeit_all_rights_to_community_support"
@@ -199,6 +203,47 @@ def check_ids_format(config: pytest.Config) -> None:
 def _row_ids(rows: list[_Row]) -> list[str]:
     """Return the rows' test IDs in the names format."""
     return [names_id(row.kind, row.name, row.j, row.labels) for row in rows]
+
+
+def _custom_ids(
+    name: str, ids: Callable[[VectorInfo], object], infos: Sequence[VectorInfo]
+) -> list[str]:
+    """
+    Return the rows' test IDs from a ``Parameter(ids=...)`` callable, before
+    duplicates are suffixed.
+
+    The callable is called once per row with the row's VectorInfo, whose id is the
+    row's ID in the effective format, and returns the ID to use, or None to keep
+    that one. The skipped row of an empty skip_if_empty sequence keeps its ID
+    without a call.
+
+    Raises:
+        ValueError: When the callable raises (chained to its exception, so the
+            error shows the callable's frames), or returns anything but a
+            non-empty str or None
+    """
+    result = []
+    for info in infos:
+        if info.kind == "skipped":
+            result.append(info.id)
+            continue
+        try:
+            row_id = ids(info)
+        except Exception as e:
+            raise ValueError(
+                f"Strategy '{name}': ids= raised {type(e).__name__} for row {info.id}: {e}"
+            ) from e
+        if row_id is None:
+            result.append(info.id)
+        elif isinstance(row_id, str) and row_id:
+            result.append(row_id)
+        else:
+            expected = "a non-empty str" if isinstance(row_id, str) else "a str"
+            raise ValueError(
+                f"Strategy '{name}': ids= returned {reprlib.repr(row_id)} for row {info.id}; "
+                f"return {expected} or None"
+            )
+    return result
 
 
 def _vector_infos(
@@ -390,9 +435,8 @@ def build_parametrization(
         ValueError: With a message naming the strategy when the factory, the
             generation or the signature check fails
     """
-    # The CLI options, read once per session, and the format of the test IDs
+    # The CLI options, read once per session
     options = runtime.strategy_options(name, config)
-    id_format = ids_format(config)
     vector_mode = options.mode
     vector_name = options.vector_name
     vector_index = options.vector_index
@@ -415,6 +459,15 @@ def build_parametrization(
     constraint_names = tuple(param.vector_constraints)
     runtime.record_constraints(name, constraint_names)
     constraints_off = tuple(c for c in constraint_names if c in options.constraints_off)
+
+    # The format of the test IDs: Parameter(ids="names" or "values"), else the ini
+    # option, which a callable ids= starts from too
+    try:
+        _check_ids(param.ids)
+    except ValueError as e:
+        raise ValueError(f"Strategy '{name}': {e}") from None
+    ids_option = param.ids
+    id_format = ids_option if isinstance(ids_option, str) else ids_format(config)
 
     resolution = Resolution(
         strategy=name, where=_where(factory, config), constraints_off=constraints_off
@@ -526,7 +579,7 @@ def build_parametrization(
     runtime.record_resolution(resolution)
 
     def row_infos(ids: list[str]) -> tuple[VectorInfo, ...]:
-        """The rows' VectorInfos, given their final IDs."""
+        """The rows' VectorInfos, given their IDs."""
         return _vector_infos(
             rows,
             ids,
@@ -534,6 +587,23 @@ def build_parametrization(
             origin=_origin(factory, config),
             arg_names=argnames,
             constraints_off=constraints_off,
+        )
+
+    def final_ids(ids: list[str]) -> tuple[list[str], tuple[VectorInfo, ...]]:
+        """
+        Return the rows' final test IDs and their VectorInfos, given their IDs in
+        the effective format: a callable ids= replaces them first, then each
+        duplicate is suffixed. The VectorInfos carry the final IDs.
+        """
+        if not callable(ids_option):
+            ids = _unique_ids(ids, config)
+            return ids, row_infos(ids)
+        # The callable sees each row's VectorInfo with its ID in the effective format
+        infos = row_infos(ids)
+        ids = _unique_ids(_custom_ids(name, ids_option, infos), config)
+        return ids, tuple(
+            info if info.id == row_id else dataclasses.replace(info, id=row_id)
+            for info, row_id in zip(infos, ids, strict=True)
         )
 
     # Record mode: the test receives the row as one record when neither the test nor
@@ -562,10 +632,8 @@ def build_parametrization(
                 raise ValueError(
                     f"Error converting samples to dataclass for strategy '{name}': {e}"
                 ) from e
-            ids = ["skipped"]
-            return Parametrization(
-                dc_param, [_skipped_param(skip_reason, 1)], ids, infos=row_infos(ids)
-            )
+            ids, infos = final_ids(["skipped"])
+            return Parametrization(dc_param, [_skipped_param(skip_reason, 1)], ids, infos=infos)
         try:
             dataclass_samples = convert_to_dataclass(
                 [row.values for row in rows], argnames, dc_type
@@ -588,8 +656,8 @@ def build_parametrization(
         ]
 
         # Parametrize the dataclass parameter chosen by detection
-        ids = _unique_ids(ids, config)
-        return Parametrization(dc_param, params, ids, infos=row_infos(ids))
+        ids, infos = final_ids(ids)
+        return Parametrization(dc_param, params, ids, infos=infos)
 
     else:
         # NAMED PARAMETERS MODE: Standard behavior
@@ -649,8 +717,8 @@ def build_parametrization(
             else:
                 samples = [row.sample for row in rows]
 
-        ids = _unique_ids(ids, config)
-        return Parametrization(argstr, samples, ids, unfilled, row_infos(ids))
+        ids, infos = final_ids(ids)
+        return Parametrization(argstr, samples, ids, unfilled, infos)
 
 
 def _unfilled_message(name: str, record: RecordParam, hints: list[str]) -> str:

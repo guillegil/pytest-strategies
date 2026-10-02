@@ -531,6 +531,11 @@ parametrized, so a fixture asking for an argument would find nothing.
   its type name, and set elements are sorted (also inside tuples, lists,
   dicts, and dataclass and namedtuple values that keep their generated repr),
   so IDs are the same on every run and on every xdist worker.
+  `Parameter(ids="names" | "values")` overrides the ini option for one strategy,
+  and a callable `ids=` (`_custom_ids()`) receives each row's `VectorInfo` with
+  the ID of the effective format and returns a str or None (keep it); the
+  skipped row gets no call. `_unique_ids()` then suffixes duplicates, and the
+  `VectorInfo` of each row carries the final ID.
 
 ---
 

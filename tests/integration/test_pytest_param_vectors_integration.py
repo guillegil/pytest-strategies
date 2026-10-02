@@ -98,7 +98,7 @@ class TestMarkedVectors:
             [
                 "*In test_ab: *Directed vector 'named' is a pytest.param with id='x', but the "
                 "vector's name is its ID (directed-named). Remove id=, and name the vector "
-                "after the ID it should have*"
+                "after the ID it should have, or build IDs with Parameter(ids=...)*"
             ]
         )
 

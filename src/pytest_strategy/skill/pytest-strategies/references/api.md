@@ -124,6 +124,9 @@ class Parameter:
         nsamples: int | str | None = None,
         per_sequence_samples: bool = False,
         max_exhaustive: int | None = None,
+        ids: (
+            Literal["names", "values"] | Callable[[VectorInfo], str | None] | None
+        ) = None,
     ): ...
 ```
 
@@ -138,6 +141,7 @@ class Parameter:
 | `nsamples` | this strategy's default count: `None`, an int >= 0 or `"auto"`; an integer `--nsamples` overrides it |
 | `per_sequence_samples` | count rows per combination of the `Series`/`RNGSequence` arguments (section 7) |
 | `max_exhaustive` | this strategy's limit on exhaustive combinations (section 7) |
+| `ids` | this strategy's test IDs: `None` follows the `strategies_ids` ini option, `"names"` or `"values"` overrides it, and a function receives each row's `VectorInfo` (its `id` in the ini option's format) and returns the ID or `None` to keep it; not called for the skipped row. Duplicates get pytest's suffixes (`odd0`, `odd1`); anything but a non-empty str or None, or an exception, fails collection (`Strategy 'burst': ids= returned 42 for row rand-3; return a str or None`). IDs never change values |
 
 - Directed and test vectors must give one value per argument (`RNGValueError`
   otherwise, naming the vector: a wrong length, a missing or unknown dict key,
@@ -147,7 +151,7 @@ class Parameter:
   only `pytest.param({"cfg": {"a": 1}}, marks=...)`). Dataclass and
   pydantic model instances are not supported as vectors yet; use a dict.
   `pytest.param(..., marks=...)` wraps any of these forms (an `id=` fails: the
-  vector's name is its test ID). Vectors are not
+  vector's name is its test ID; build other IDs with `ids=`). Vectors are not
   checked by predicates, constraints or validators.
 - The `Parameter` stores each vector as a `Vector` (a `pytest.param` keeps its
   marks, with a `Vector` as its values). `directed_vectors` and `test_vectors`

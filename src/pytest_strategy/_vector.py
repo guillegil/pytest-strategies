@@ -145,7 +145,10 @@ class VectorInfo:
             whose values are in the ID
         values: The row, by argument name (Nones for "skipped"); a record-mode
             test receives a record built from it
-        id: This strategy's part of the test ID, before pytest escapes it
+        id: This strategy's part of the test ID, before pytest escapes it: the
+            final ID, after ``Parameter(ids=...)`` and the suffixes of duplicates.
+            An ``ids=`` callable receives the row's VectorInfo with the ID in the
+            effective format instead, before any suffix.
         seed: The run's seed (``--rng-seed``)
         context: The fingerprint of the context the factory received, or None
         constraints_off: The constraints turned off in this strategy, in order
