@@ -302,19 +302,24 @@ class TestGenerators:
 
         assert set(stats.rejected) <= {"odd"}
 
-    def test_an_unknown_name_fails_listing_the_constraints(self):
+    def test_a_name_the_parameter_does_not_have_is_ignored(self):
+        """As a bare --strategy-constraint-off name: options.constraints_off holds the
+        names aimed at every strategy, which a factory can pass on as it is."""
         param = Parameter(
             TestArg("x", rng_type=RNGInteger(0, 9)),
             vector_constraints={"never": never, "small": lambda v: v.x < 5},
         )
+        options = StrategyOptions(strategy="s", constraints_off=frozenset({"never", "other"}))
 
-        message = "constraints_off names no constraint 'nevr', 'big'. Constraints: never, small"
-        with pytest.raises(ValueError, match=f"^{message}$"):
-            param.generate_vectors(1, constraints_off=["nevr", "never", "big"])
-        with pytest.raises(ValueError, match="^constraints_off names no constraint 'x'"):
-            param.generate_vectors(0, filter_by_name="zeros", constraints_off=["x"])
-        with pytest.raises(ValueError, match=r"Constraints: none$"):
-            Parameter(TestArg("x", value=1)).generate_vectors(1, constraints_off=["x"])
+        RNG.seed(3)
+        rows = param.generate_vectors(4, constraints_off=options.constraints_off)
+        RNG.seed(3)
+        assert param.generate_vectors(4, constraints_off=["never", "nevr", "big"]) == rows
+        assert all(row.x < 5 for row in rows) and len(rows) == 4
+        assert list(param.vector_constraints) == ["never", "small"]
+        with pytest.raises(ValueError, match="Rejected by .*: never=100"):
+            param.generate_vectors(1, constraints_off=["nevr"])
+        assert Parameter(TestArg("x", value=1)).generate_vectors(1, constraints_off=["x"]) == [(1,)]
 
     def test_a_str_fails(self):
         param = Parameter(TestArg("x", rng_type=RNGInteger(0, 9)), vector_constraints=[never])
@@ -324,12 +329,12 @@ class TestGenerators:
         with pytest.raises(TypeError, match="collection of constraint names, not a str"):
             param.generate_exhaustive(constraints_off="never")
 
-    def test_generate_exhaustive_checks_the_names_too(self):
+    def test_generate_exhaustive_ignores_unknown_names_too(self):
         param = Parameter(TestArg("ch", rng_type=Series([0, 1])), vector_constraints=[never])
 
-        with pytest.raises(ValueError, match="constraints_off names no constraint 'nevr'"):
+        with pytest.raises(ValueError, match="Rejected by .*: never=2"):
             param.generate_exhaustive(constraints_off=["nevr"])
-        assert param.generate_exhaustive(constraints_off=["never"]) == [(0,), (1,)]
+        assert param.generate_exhaustive(constraints_off=["never", "nevr"]) == [(0,), (1,)]
 
     @pytest.mark.parametrize("method", ["generate_vectors", "generate_exhaustive"])
     def test_constraints_off_is_keyword_only(self, method):

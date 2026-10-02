@@ -161,7 +161,8 @@ class Parameter:
   `clear_constraints()`, `get_arg(name)`,
   `generate_vectors(n, *, mode="all", filter_by_name=None, filter_by_index=None, constraints_off=())`,
   `generate_exhaustive(*, constraints_off=())`, `to_dict()`. `constraints_off` names
-  constraints that call does not evaluate; the `Parameter` keeps them.
+  constraints that call does not evaluate (names it does not have are ignored); the
+  `Parameter` keeps them.
 - Properties: `arg_names`, `arg_types`, `vector_names`, `num_args`,
   `num_directed_vectors`, `skip_reason`, `vector_type`.
 - The generated rows are `Vector`s: tuples whose fields are the argument names

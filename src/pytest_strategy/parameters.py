@@ -708,24 +708,19 @@ class Parameter:
         Return the constraints a generation call evaluates, in order: all of them
         but the ones named in ``constraints_off``. The Parameter is not changed.
 
+        A name the Parameter does not have turns nothing off, as a bare
+        ``--strategy-constraint-off`` name in a strategy without that constraint, so
+        a factory can pass ``options.constraints_off`` on as it is.
+
         Raises:
             TypeError: If constraints_off is a str instead of a collection of names
-            ValueError: If constraints_off names a constraint this Parameter does
-                not have
         """
         if isinstance(constraints_off, (str, bytes)):
             raise TypeError(
                 "constraints_off must be a collection of constraint names, not a "
                 f"{type(constraints_off).__name__} ({constraints_off!r})"
             )
-        off = dict.fromkeys(constraints_off)
-        unknown = [name for name in off if name not in self._constraints]
-        if unknown:
-            names = ", ".join(self._constraints) or "none"
-            raise ValueError(
-                f"constraints_off names no constraint {', '.join(map(repr, unknown))}. "
-                f"Constraints: {names}"
-            )
+        off = set(constraints_off)
         return tuple((name, fn) for name, fn in self._constraints.items() if name not in off)
 
     def _validate_vector(
@@ -1096,7 +1091,8 @@ class Parameter:
             filter_by_name: Only return this directed vector (for -vn CLI)
             filter_by_index: Only return directed vector at index (for -vi CLI)
             constraints_off: The names of constraints not to evaluate in this call
-                (``--strategy-constraint-off``). The Parameter keeps them.
+                (``--strategy-constraint-off``); names the Parameter does not have
+                are ignored. The Parameter keeps its constraints.
             _stats: Private: counts the rejections per constraint, for the plugin
 
         The arguments after n are keyword-only.
@@ -1112,8 +1108,7 @@ class Parameter:
             KeyError / IndexError: If filter_by_name / filter_by_index names no
                 directed vector (also when skip_reason is set)
             ValueError: If n is not an int >= 0 in a mode that generates samples
-            ValueError: If constraints_off names a constraint the Parameter does not
-                have (TypeError if it is a str)
+            TypeError: If constraints_off is a str instead of a collection of names
             ValueError: If the vector constraints reject every draw of a random row
                 (or every combination); the message counts the rejections by the
                 name of the first failing constraint and shows the first row each
@@ -1385,7 +1380,8 @@ class Parameter:
 
         Args:
             constraints_off: The names of constraints not to evaluate in this call
-                (``--strategy-constraint-off``). The Parameter keeps them.
+                (``--strategy-constraint-off``); names the Parameter does not have
+                are ignored. The Parameter keeps its constraints.
             _stats: Private: counts the rejections per constraint and the
                 combinations left out, for the plugin
 
@@ -1393,8 +1389,7 @@ class Parameter:
             List of Vectors. Empty when skip_reason is set.
 
         Raises:
-            ValueError: If constraints_off names a constraint the Parameter does not
-                have (TypeError if it is a str)
+            TypeError: If constraints_off is a str instead of a collection of names
             ValueError: If no sequence arguments are present
             ValueError: If a sequence value fails its argument's validator
             ValueError: If the vector constraints reject every combination
