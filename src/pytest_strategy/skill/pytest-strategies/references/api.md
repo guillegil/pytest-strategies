@@ -44,8 +44,8 @@ PytestStrategiesWarning` keeps working for old code). Use
 ## 2. register and strategy
 
 ```python
-def register(name: str): ...                                 # decorator for a factory
-def strategy(name_or_factory, validate_signature=True): ...  # decorator for a test
+def register(name: str): ...                                    # decorator for a factory
+def strategy(name_or_factory, *, validate_signature=True): ...  # decorator for a test
 ```
 
 - `@register("name")` records the factory under `name`, scoped to the folder of the
@@ -58,6 +58,7 @@ def strategy(name_or_factory, validate_signature=True): ...  # decorator for a t
   The factory runs, and the test is parametrized, in `pytest_generate_tests`, so a
   missing name or a signature mismatch is reported at collection.
 - `validate_signature=False` skips the check that the test takes every argument name.
+  It is keyword-only: `@strategy("name", False)` raises `TypeError`.
 - `Strategy.register is register` and `Strategy.strategy is strategy`: the old
   spellings are aliases, with no warning.
 - `Strategy.export_strategies(format="json")` returns a JSON string describing every
@@ -137,6 +138,7 @@ class TestArg:
         self,
         name: str,
         rng_type: RNGType | None = None,
+        *,
         value: Any = None,
         validator: Callable[[Any], bool] | None = None,
         description: str = "",
@@ -144,7 +146,11 @@ class TestArg:
 ```
 
 - `name` must match the test's parameter (or a dataclass field).
-- Give `rng_type` for generated values, or `value` for a fixed one.
+- Give `rng_type` for generated values, or `value` for a fixed one. `value`,
+  `validator` and `description` are keyword-only: `TestArg("x", None, 5)` raises
+  `TypeError`; write `TestArg("x", value=5)`.
+- `rng_type` must be an RNG type (or an object with a `generate()` method). A bare
+  function or lambda raises `TypeError`; subclass `RNGType` instead (section 6).
 - `validator` runs on generated and fixed values. A value that fails it stops
   collection with `ValueError` and is not redrawn, so filter with a `predicate` on the
   RNG type instead, and use `validator` only as an assertion.

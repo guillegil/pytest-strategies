@@ -59,7 +59,7 @@ def register(name: str) -> Callable[[_F], _F]:
     return decorate
 
 
-def strategy(name: str | Factory, validate_signature: bool = True) -> Callable[[_F], _F]:
+def strategy(name: str | Factory, *, validate_signature: bool = True) -> Callable[[_F], _F]:
     """
     Parametrize a test with a strategy.
 
@@ -67,6 +67,7 @@ def strategy(name: str | Factory, validate_signature: bool = True) -> Callable[[
         name: The name a factory was registered under, or the factory itself
             (registered or not)
         validate_signature: Check that the test takes the strategy's arguments
+            (keyword-only)
 
     The strategy is resolved when pytest collects the test, and its factory must
     return a :class:`Parameter`. The test takes the strategy's arguments by name,
@@ -95,7 +96,7 @@ def strategy(name: str | Factory, validate_signature: bool = True) -> Callable[[
     return decorate
 
 
-def export_strategies(format: str = "json") -> str:
+def export_strategies(*, format: str = "json") -> str:
     """
     Export the registered strategies' metadata.
 
@@ -103,7 +104,7 @@ def export_strategies(format: str = "json") -> str:
     registered in several directories is reported for the one registered last.
 
     Args:
-        format: Export format (currently only "json" is supported)
+        format: Export format (currently only "json" is supported), keyword-only
 
     Returns:
         Serialized string representation of all strategies

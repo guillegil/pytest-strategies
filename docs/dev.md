@@ -228,6 +228,10 @@ samples = arg1.generate_samples(10)        # 10 draws ([value] for a static argu
 - Type introspection
 - Integration with RNG types
 
+`value`, `validator` and `description` are keyword-only. `rng_type` must be an
+`RNGType` or have a callable `generate()`; anything else, such as a bare lambda,
+raises `TypeError` when the `TestArg` is built.
+
 **Properties:**
 - `name` - Argument name
 - `description` - Human-readable description
@@ -907,6 +911,12 @@ python -m pytest examples/*.py --nsamples=auto
 ruff check src/ tests/ && black --check src/ tests/
 mypy --strict src/pytest_strategy/ tests/unittests/test_typing.py
 ```
+
+Options that a 4.x release adds to a public callable go after a `*`, so that
+they are keyword-only and no existing positional call changes meaning. Since 4.0,
+`TestArg`'s options after `rng_type`, `strategy()`'s `validate_signature`,
+`export_strategies()`'s `format` and `Parameter.generate_vectors()`'s options
+after `n` are keyword-only.
 
 The suite runs with `filterwarnings = error`, `--strict-markers`,
 `--strict-config` and `empty_parameter_set_mark = fail_at_collect`, and an

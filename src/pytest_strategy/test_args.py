@@ -4,6 +4,8 @@ import builtins
 from collections.abc import Callable
 from typing import Any
 
+from .rng import RNGType
+
 
 class TestArg:
     """
@@ -24,6 +26,7 @@ class TestArg:
         self,
         name: str,
         rng_type: Any = None,
+        *,
         value: Any = None,
         validator: Callable[[Any], bool] | None = None,
         description: str = "",
@@ -33,13 +36,18 @@ class TestArg:
 
         Args:
             name: Argument name (must match test function parameter)
-            rng_type: RNG type for random generation (required if value is None)
-            description: Human-readable description of the argument
+            rng_type: RNG type for random generation (required if value is None): an
+                RNGType, or an object with a generate() method
             value: Single static value (for directed tests)
             validator: Optional function to validate generated values
+            description: Human-readable description of the argument
+
+        The arguments after rng_type are keyword-only.
 
         Raises:
             ValueError: If neither value nor rng_type is provided
+            TypeError: If rng_type is neither an RNGType nor has a generate() method
+                (a bare function or lambda, for example)
 
         Examples:
             # Pure random
@@ -57,6 +65,15 @@ class TestArg:
         # Validation: must have one way to produce values
         if value is None and rng_type is None:
             raise ValueError(f"TestArg '{name}' must have a value or an rng_type")
+        # A callable without generate() is rejected rather than called, so that a
+        # later release can give such callables a meaning of their own
+        if rng_type is not None and not (
+            isinstance(rng_type, RNGType) or callable(getattr(rng_type, "generate", None))
+        ):
+            raise TypeError(
+                f"TestArg '{name}' rng_type must be an RNGType or have a generate() method, "
+                f"got {rng_type!r}"
+            )
 
     def generate(self) -> Any:
         """

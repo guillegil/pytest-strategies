@@ -207,7 +207,7 @@ class PytestStrategyPlugin:
 
         config.addinivalue_line(
             "markers",
-            "strategy(name_or_factory, validate_signature=True): parametrize the test with "
+            "strategy(name_or_factory, *, validate_signature=True): parametrize the test with "
             "a strategy (added by @strategy)",
         )
 
@@ -1050,7 +1050,7 @@ def _marker_arguments(mark: pytest.Mark) -> tuple[Any, bool]:
     if args or kwargs or not (isinstance(ref, str) or callable(ref)):
         raise ValueError(
             f"invalid strategy marker {mark.args!r} {mark.kwargs!r}; use "
-            "@strategy(name_or_factory, validate_signature=True)"
+            "@strategy(name_or_factory, *, validate_signature=True)"
         )
     return ref, bool(validate)
 

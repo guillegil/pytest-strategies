@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Options are keyword-only: `TestArg(name, rng_type=None, *, value=None, validator=None, description="")`, `strategy(name, *, validate_signature=True)`, `export_strategies(*, format="json")` and `Parameter.generate_vectors(n, *, mode="all", filter_by_name=None, filter_by_index=None)`. Passing one by position raises Python's `TypeError` (for example `strategy() takes 1 positional argument but 2 were given`), and mypy reports the call: write `TestArg("x", value=5)` and `@strategy("name", validate_signature=False)`. `pytest --markers` and the error for a malformed `strategy` marker show `strategy(name_or_factory, *, validate_signature=True)`. Options that later 4.x releases add will be keyword-only too.
+- `TestArg`'s `rng_type` must be an `RNGType` or an object with a `generate()` method. Anything else, such as a bare lambda, raises `TypeError: TestArg 'x' rng_type must be an RNGType or have a generate() method, got ...` when the `TestArg` is built, also when a `value` is given. 3.0 accepted it, and failed with an `AttributeError` only when it drew a value.
+
 ### Removed
 The APIs deprecated in 3.0, without warnings left behind:
 - Factories that return an `(argnames, samples)` tuple. The tests that use such a strategy fail collection with `Strategy 'name' returned an (argnames, samples) tuple (factory: file:line:name)`, which says what to return instead: a `Parameter`, with one `TestArg` per argument and the fixed rows as `directed_vectors`. A factory that returns anything else that is not a `Parameter` fails with `must return a Parameter, got NoneType (did the factory forget to return?)`, and `export_strategies()` reports both as errors instead of a `legacy_tuple` entry.

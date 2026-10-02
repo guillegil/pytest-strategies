@@ -393,6 +393,7 @@ class Parameter:
     def generate_vectors(
         self,
         n: int,
+        *,
         mode: str = "all",
         filter_by_name: str | None = None,
         filter_by_index: int | None = None,
@@ -412,6 +413,8 @@ class Parameter:
                 - "test": Only test vectors, ignore n and directed
             filter_by_name: Only return this directed vector (for -vn CLI)
             filter_by_index: Only return directed vector at index (for -vi CLI)
+
+        The arguments after n are keyword-only.
 
         Returns:
             List of parameter vectors (tuples). Empty when skip_reason is set.
