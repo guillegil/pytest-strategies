@@ -117,7 +117,7 @@ class TestScopedRegistry:
 
     def test_registry_view_behaves_like_the_2x_dict(self, clean_registry):
         def factory(nsamples):
-            return ("x",), [(1,)]
+            return Parameter(TestArg("x", value=1), nsamples=1)
 
         Strategy._registry["v3_view"] = factory
 

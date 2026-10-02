@@ -40,11 +40,11 @@ from pytest_strategy.strategy import PytestStrategiesWarning
 SRC_DIR = Path(__file__).resolve().parents[2] / "src"
 
 STRATEGY_SOURCE = """
-from pytest_strategy import Strategy
+from pytest_strategy import Parameter, Strategy, TestArg
 
 @Strategy.register("r3_unit_strat")
 def r3_unit_strat(nsamples):
-    return ("x",), [(1,)]
+    return Parameter(TestArg("x", value=1), nsamples=1)
 """
 
 
@@ -405,27 +405,27 @@ class TestDuplicateRegistrationIsReported:
 
     def test_two_functions_of_the_same_name_in_one_file(self):
         source = """
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, Strategy, TestArg
 
             @Strategy.register("r3_small")
             def factory(nsamples):
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
 
             @Strategy.register("r3_small")
             def factory(nsamples):
-                return ("x",), [(2,)]
+                return Parameter(TestArg("x", value=2), nsamples=1)
             """
         with pytest.warns(PytestStrategiesWarning, match=r"my_strategies\.py:8:factory replaces"):
             _exec(source, "/virtual/r3/my_strategies.py")
 
     def test_decorated_factories_in_two_files_name_those_files(self):
         source = """
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, Strategy, TestArg
 
             @Strategy.register("r3_shared")
             @logged
             def factory(nsamples):
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
             """
         _exec(source, "/virtual/r3/a_strategies.py", {"logged": _logged})
         with pytest.warns(PytestStrategiesWarning) as record:
@@ -438,11 +438,11 @@ class TestDuplicateRegistrationIsReported:
     def test_cached_factories(self):
         @functools.cache
         def first(nsamples):
-            return ("x",), [(1,)]
+            return Parameter(TestArg("x", value=1), nsamples=1)
 
         @functools.cache
         def second(nsamples):
-            return ("x",), [(2,)]
+            return Parameter(TestArg("x", value=2), nsamples=1)
 
         Strategy.register("r3_cached")(first)
         with pytest.warns(PytestStrategiesWarning, match="second replaces"):
@@ -450,10 +450,10 @@ class TestDuplicateRegistrationIsReported:
 
     def test_partials_of_different_functions(self):
         def low(nsamples, bound):
-            return ("x",), [(bound,)]
+            return Parameter(TestArg("x", value=bound), nsamples=1)
 
         def high(nsamples, bound):
-            return ("x",), [(bound,)]
+            return Parameter(TestArg("x", value=bound), nsamples=1)
 
         Strategy.register("r3_partial")(functools.partial(low, bound=1))
         with pytest.warns(PytestStrategiesWarning, match="high replaces"):
@@ -462,21 +462,21 @@ class TestDuplicateRegistrationIsReported:
     def test_reexecuted_decorated_and_cached_factories_are_silent(self):
         source = """
             import functools
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, Strategy, TestArg
 
             @Strategy.register("r3_again")
             @logged
             def factory(nsamples):
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
 
             @Strategy.register("r3_again_cached")
             @functools.lru_cache
             def cached(nsamples):
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
 
             @Strategy.register("r3_again_partial")
             def _partial_target(nsamples, bound=0):
-                return ("x",), [(bound,)]
+                return Parameter(TestArg("x", value=bound), nsamples=1)
 
             Strategy.register("r3_again_partial")(functools.partial(_partial_target, bound=1))
             """

@@ -49,7 +49,7 @@ class TestMetadataExport:
 
         # Register a test strategy
         @Strategy.register("export_test_strategy")
-        def strategy_factory(n):
+        def strategy_factory(nsamples):
             return Parameter(
                 TestArg("status", rng_type=RNGEnum(Status)),
                 TestArg("count", rng_type=RNGInteger(1, 100)),

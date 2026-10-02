@@ -30,7 +30,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from pytest_strategy import Parameter, RNGInteger, RNGSequence, Strategy, TestArg
+from pytest_strategy import Parameter, RNGChoice, RNGInteger, RNGSequence, Strategy, TestArg
 
 
 @dataclass
@@ -67,22 +67,35 @@ def points(nsamples):
 @Strategy.register("legacy")
 def legacy(nsamples):
     # Explicit IDs override the generated ones, and "n=7_0" is already taken
-    return "n", [
-        7,
-        pytest.param(5, id="n=7", marks=pytest.mark.skip(reason="marks are kept")),
-        7,
-        pytest.param(9, id="n=7_0"),
-    ]
+    return Parameter(
+        TestArg("n", rng_type=RNGInteger(0, 9)),
+        directed_vectors={
+            "seven": (7,),
+            "five": pytest.param(5, id="n=7", marks=pytest.mark.skip(reason="marks are kept")),
+            "seven_again": (7,),
+            "nine": pytest.param(9, id="n=7_0"),
+        },
+        nsamples=0,
+    )
 
 
 @Strategy.register("legacy_points")
 def legacy_points(nsamples):
-    return ("x", "y"), [pytest.param(0, 2, id="p"), pytest.param(1, 2, id="p")]
+    return Parameter(
+        TestArg("x", rng_type=RNGInteger(0, 1)),
+        TestArg("y", rng_type=RNGInteger(2, 2)),
+        directed_vectors={"first": pytest.param(0, 2, id="p"), "second": pytest.param(1, 2, id="p")},
+        nsamples=0,
+    )
 
 
 @Strategy.register("accents")
 def accents(nsamples):
-    return "w", [pytest.param("a", id="café"), pytest.param("b", id="café")]
+    return Parameter(
+        TestArg("w", rng_type=RNGChoice(["a", "b"])),
+        directed_vectors={"a": pytest.param("a", id="café"), "b": pytest.param("b", id="café")},
+        nsamples=0,
+    )
 """
 
 TEST_MODULE = """

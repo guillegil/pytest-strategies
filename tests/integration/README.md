@@ -32,8 +32,8 @@ Defines 10 comprehensive strategies demonstrating all features:
 - **Mixed Mode**
   - `mixed_static_random_strategy`: Mixing static, directed, and random values
 
-- **Legacy Support**
-  - `legacy_tuple_strategy`: Tuple-based strategy for backward compatibility
+- **Fixed Rows**
+  - `fixed_rows_strategy`: Rows computed from nsamples, given as directed vectors only
 
 ### 2. Integration Tests
 **File:** `tests/integration/test_full_integration.py`
@@ -47,7 +47,7 @@ Defines 10 comprehensive strategies demonstrating all features:
 - Validation (13 tests)
 - String generation (13 tests)
 - Mixed mode (13 tests)
-- Legacy tuple-based (10 tests)
+- Fixed rows computed from nsamples (10 tests)
 
 #### Direct API Tests (using Parameter/TestArg directly)
 - RNG seed reproducibility (2 tests)
@@ -73,7 +73,6 @@ Defines 10 comprehensive strategies demonstrating all features:
 3. **TestArg Configuration**
    - Static values
    - Random generation with RNG types
-   - Directed values
    - Validators
    - Mixed modes
 
@@ -102,9 +101,8 @@ Defines 10 comprehensive strategies demonstrating all features:
    - `--vector-index` (filter by index)
    - `--nsamples`
 
-8. **Backward Compatibility**
-   - Tuple-based strategies still work
-   - Legacy factory functions supported
+8. **Fixed Rows**
+   - Rows computed from nsamples as directed vectors, without random rows
 
 9. **Reproducibility**
    - RNG seed control
@@ -216,7 +214,7 @@ def test_database_query(offset, limit, sort_field, sort_order):
 ✅ **All 340 tests passing** (no regressions)  
 ✅ **Full feature coverage** including CLI options, constraints, validation  
 ✅ **Real-world scenarios** (API, database, string generation)  
-✅ **Backward compatibility** verified  
+✅ **Fixed rows** computed from nsamples  
 ✅ **Bug fixes** for single-parameter handling  
 
 The integration tests provide:

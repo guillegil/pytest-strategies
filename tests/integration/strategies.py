@@ -9,8 +9,6 @@ This file demonstrates the complete pytest-strategies workflow:
 - Constraints for valid parameter combinations
 """
 
-from collections.abc import Sequence
-
 from pytest_strategy import (
     Parameter,
     RNGBoolean,
@@ -200,19 +198,14 @@ def create_string_strategy(nsamples: int | str) -> Parameter:
 
 @Strategy.register("mixed_static_random_strategy")
 def create_mixed_static_random_strategy(nsamples: int | str) -> Parameter:
-    """Strategy mixing static values, directed values, and random generation."""
+    """Strategy mixing static values, directed vectors, and random generation."""
     return Parameter(
         TestArg("static_val", value=42),  # Static value
         TestArg("random_val", rng_type=RNGInteger(0, 100)),  # Random
         TestArg(
             "directed_val", rng_type=RNGChoice([1, 2, 3])
         ),  # Use RNGChoice for directed-like behavior
-        TestArg(
-            "mixed_val",
-            rng_type=RNGInteger(0, 100),
-            directed_values=[0, 50, 100],
-            always_include_directed=True,
-        ),  # Mixed
+        TestArg("mixed_val", rng_type=RNGInteger(0, 100)),  # Random, fixed in the directed vectors
         directed_vectors={
             "all_zeros": (42, 0, 1, 0),
             "all_max": (42, 100, 3, 100),
@@ -221,18 +214,21 @@ def create_mixed_static_random_strategy(nsamples: int | str) -> Parameter:
 
 
 # ============================================================================
-# LEGACY TUPLE-BASED STRATEGY (BACKWARD COMPATIBILITY)
+# FIXED ROWS COMPUTED FROM NSAMPLES
 # ============================================================================
 
 
-@Strategy.register("legacy_tuple_strategy")
-def create_legacy_tuple_strategy(
-    nsamples: int | str,
-) -> tuple[tuple[str, ...], Sequence[tuple[int, ...]]]:
-    """Legacy tuple-based strategy for backward compatibility testing."""
-    # Legacy strategies don't support "auto" mode, default to 10 if "auto" passed
+@Strategy.register("fixed_rows_strategy")
+def create_fixed_rows_strategy(nsamples: int | str) -> Parameter:
+    """Strategy whose rows are computed from nsamples, given as directed vectors only."""
+    # Without a Series there is nothing for "auto" to enumerate: give 10 rows
     n = 10 if nsamples == "auto" else int(nsamples)
-
-    argnames = ("x", "y", "z")
-    samples = [(i, i * 2, i * 3) for i in range(n)]
-    return argnames, samples
+    return Parameter(
+        # Static values: the random rows that only --nsamples=N adds are (0, 0, 0), which
+        # keep y == 2x and z == 3x
+        TestArg("x", value=0),
+        TestArg("y", value=0),
+        TestArg("z", value=0),
+        directed_vectors={f"row_{i}": (i, i * 2, i * 3) for i in range(n)},
+        nsamples=0,
+    )

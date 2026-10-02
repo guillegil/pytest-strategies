@@ -164,14 +164,12 @@ All files now have proper type hints:
 
 ### Strategy Definitions (`strategies.py`)
 ```python
-from typing import Tuple, Sequence, Any
-
 @Strategy.register("simple_integer_strategy")
 def create_simple_integer_strategy(nsamples: int) -> Parameter:
     ...
 
-@Strategy.register("legacy_tuple_strategy")
-def create_legacy_tuple_strategy(nsamples: int) -> Tuple[Tuple[str, ...], Sequence[Tuple[int, ...]]]:
+@Strategy.register("fixed_rows_strategy")
+def create_fixed_rows_strategy(nsamples: int | str) -> Parameter:
     ...
 ```
 

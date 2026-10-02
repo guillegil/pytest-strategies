@@ -299,7 +299,7 @@ class TestDecoratedFactories:
     def test_resolver_uses_decorated_factory(self):
         @_inject_rng
         def make(nsamples, rng):
-            return ("x",), [(rng,)] * nsamples
+            return Parameter(TestArg("x", value=rng), nsamples=nsamples)
 
         _, samples, _ = _resolve(make, ["x"], nsamples=2)
         assert samples == ["rng", "rng"]
@@ -308,27 +308,27 @@ class TestDecoratedFactories:
         @Strategy.register("fix_r2_injected")
         @_inject_rng
         def injected(nsamples, rng):
-            return ("x",), [(rng,)]
+            return Parameter(TestArg("x", value=rng), nsamples=1)
 
         @Strategy.register("fix_r2_patched")
         @mock.patch("os.getcwd", return_value="/fake")
         def patched(nsamples, getcwd):
-            return ("x",), [(os.getcwd(),)]
+            return Parameter(TestArg("x", value=os.getcwd()), nsamples=1)
 
         @Strategy.register("fix_r2_adapted")
         @_adapt_zero_arg
         def adapted():
-            return ("x",), [(1,)]
+            return Parameter(TestArg("x", value=1), nsamples=1)
 
         @Strategy.register("fix_r2_opaque")
         @_passthrough
         def opaque(n):
-            return ("x",), [(n,)]
+            return Parameter(TestArg("x", value=n), nsamples=1)
 
         data = json.loads(Strategy.export_strategies())
 
         for name in ("fix_r2_injected", "fix_r2_patched", "fix_r2_adapted", "fix_r2_opaque"):
-            assert data[name] == {"type": "legacy_tuple", "argnames": ["x"]}
+            assert [arg["name"] for arg in data[name]["arguments"]] == ["x"]
 
 
 # ---------------------------------------------------------------------------
@@ -336,11 +336,11 @@ class TestDecoratedFactories:
 # ---------------------------------------------------------------------------
 
 STRATEGY_SOURCE = textwrap.dedent("""
-    from pytest_strategy import Strategy
+    from pytest_strategy import Parameter, Strategy, TestArg
 
     @Strategy.register("fix_r2_dup")
     def factory(nsamples):
-        return ("x",), [(1,)]
+        return Parameter(TestArg("x", value=1), nsamples=1)
     """)
 
 
@@ -401,10 +401,10 @@ class TestDuplicateRegistrationPaths:
     def test_warning_as_error_still_registers_the_new_factory(self):
         @Strategy.register("fix_r2_dup_error")
         def first(nsamples):
-            return ("x",), [(1,)]
+            return Parameter(TestArg("x", value=1), nsamples=1)
 
         def second(nsamples):
-            return ("y",), [(2,)]
+            return Parameter(TestArg("y", value=2), nsamples=1)
 
         with warnings.catch_warnings():
             warnings.simplefilter("error")
@@ -436,6 +436,11 @@ class StartedServer:
 class Point:
     x: int
     y: int
+
+
+def _one_server(nsamples):
+    """A strategy with the single row host="localhost", port=8000."""
+    return Parameter(TestArg("host", value="localhost"), TestArg("port", value=8000), nsamples=1)
 
 
 class TestDataclassTypedFixture:
@@ -492,9 +497,7 @@ class TestDataclassTypedFixture:
         def test_server(server: Server, client):
             pass
 
-        argstr, samples, _ = _parametrize(
-            lambda nsamples: (("host", "port"), [("localhost", 8000)]), test_server, validate=False
-        )
+        argstr, samples, _ = _parametrize(_one_server, test_server, validate=False)
         assert argstr == "host,port"
         assert samples == [("localhost", 8000)]
 
@@ -502,9 +505,7 @@ class TestDataclassTypedFixture:
         def test_server(server: Server, client):
             pass
 
-        argstr, samples, _ = _parametrize(
-            lambda nsamples: (("host", "port"), [("localhost", 8000)]), test_server
-        )
+        argstr, samples, _ = _parametrize(_one_server, test_server)
         assert argstr == "server"
         assert samples == [Server("localhost", 8000)]
 
@@ -685,7 +686,12 @@ class TestConvertCustomInit:
         def test_rect(r: Rect):
             pass
 
-        _, samples, ids = _parametrize(lambda nsamples: (("width", "height"), [(1, 2)]), test_rect)
+        _, samples, ids = _parametrize(
+            lambda nsamples: Parameter(
+                TestArg("width", value=1), TestArg("height", value=2), nsamples=1
+            ),
+            test_rect,
+        )
         assert [(r.width, r.height) for r in samples] == [(1, 2)]
         assert ids == ["width=1,height=2"]
 
@@ -705,9 +711,15 @@ class TestDataclassModePytestParam:
             pass
 
         argstr, samples, ids = _parametrize(
-            lambda nsamples: (
-                ("x", "y"),
-                [(1, 2), pytest.param(3, 4, marks=slow), pytest.param(5, 6, id="custom")],
+            lambda nsamples: Parameter(
+                TestArg("x", rng_type=RNGInteger(0, 9)),
+                TestArg("y", rng_type=RNGInteger(0, 9)),
+                directed_vectors={
+                    "plain": (1, 2),
+                    "slow": pytest.param(3, 4, marks=slow),
+                    "custom": pytest.param(5, 6, id="custom"),
+                },
+                nsamples=0,
             ),
             test_point,
         )

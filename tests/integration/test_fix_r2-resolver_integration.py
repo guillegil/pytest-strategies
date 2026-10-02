@@ -49,7 +49,7 @@ class TestDecoratedFactories:
             import os
             from unittest import mock
 
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, RNGChoice, RNGInteger, Strategy, TestArg
 
             def with_rng(fn):
                 @functools.wraps(fn)
@@ -71,22 +71,22 @@ class TestDecoratedFactories:
             @Strategy.register("r2_injected")
             @with_rng
             def injected(nsamples, rng):
-                return ("x",), [(rng,)] * nsamples
+                return Parameter(TestArg("x", value=rng), nsamples=nsamples)
 
             @Strategy.register("r2_patched")
             @mock.patch("os.getcwd", return_value="/fake")
             def patched(nsamples, getcwd):
-                return ("x",), [(os.getcwd(),)] * nsamples
+                return Parameter(TestArg("x", value=os.getcwd()), nsamples=nsamples)
 
             @Strategy.register("r2_adapted")
             @adapt
             def adapted():
-                return ("x",), [(1,), (2,)]
+                return Parameter(TestArg("x", rng_type=RNGChoice([1, 2])))
 
             @Strategy.register("r2_logged")
             @logged
             def logged_factory(n):
-                return ("x",), [(i,) for i in range(n)]
+                return Parameter(TestArg("x", rng_type=RNGInteger(0, n - 1)))
             """)
         pytester.makepyfile(test_deco="""
             from pytest_strategy import Strategy
@@ -110,7 +110,7 @@ class TestDecoratedFactories:
 
         result = pytester.runpytest_inprocess("--nsamples=3")
 
-        result.assert_outcomes(passed=3 + 3 + 2 + 3)
+        result.assert_outcomes(passed=3 + 3 + 3 + 3)
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +128,7 @@ class TestDuplicateRegistrationSameFile:
         shared = pytester.mkdir("shared")
         (shared / "api_strategies.py").write_text(
             "from dataclasses import dataclass\n"
-            "from pytest_strategy import Strategy\n"
+            "from pytest_strategy import Parameter, RNGChoice, Strategy, TestArg\n"
             "\n"
             "@dataclass\n"
             "class Req:\n"
@@ -137,7 +137,12 @@ class TestDuplicateRegistrationSameFile:
             "\n"
             '@Strategy.register("r2_reqs")\n'
             "def make(nsamples):\n"
-            '    return ("method", "path"), [("GET", "/a"), ("POST", "/b")]\n'
+            "    return Parameter(\n"
+            '        TestArg("method", rng_type=RNGChoice(["GET", "POST"])),\n'
+            '        TestArg("path", rng_type=RNGChoice(["/a", "/b"])),\n'
+            '        directed_vectors={"get": ("GET", "/a"), "post": ("POST", "/b")},\n'
+            "        nsamples=0,\n"
+            "    )\n"
         )
         (shared / "test_api.py").write_text(
             "from api_strategies import Req\n"
@@ -159,11 +164,15 @@ class TestDuplicateRegistrationSameFile:
         tests = original / "tests"
         tests.mkdir()
         (tests / "test_strategies.py").write_text(
-            "from pytest_strategy import Strategy\n"
+            "from pytest_strategy import Parameter, RNGInteger, Strategy, TestArg\n"
             "\n"
             '@Strategy.register("r2_inline")\n'
             "def make(nsamples):\n"
-            '    return ("x",), [(1,), (2,)]\n'
+            "    return Parameter(\n"
+            '        TestArg("x", rng_type=RNGInteger(1, 2)),\n'
+            '        directed_vectors={"one": (1,), "two": (2,)},\n'
+            "        nsamples=0,\n"
+            "    )\n"
             "\n"
             '@Strategy.strategy("r2_inline")\n'
             "def test_inline(x):\n"
@@ -187,11 +196,16 @@ class TestDuplicateRegistrationSameFile:
 # ---------------------------------------------------------------------------
 
 HOSTPORT_STRATEGIES = """
-    from pytest_strategy import Strategy
+    from pytest_strategy import Parameter, RNGChoice, RNGInteger, Strategy, TestArg
 
     @Strategy.register("r2_hostport")
     def hostport(nsamples):
-        return ("host", "port"), [("localhost", 8000), ("127.0.0.1", 9000)]
+        return Parameter(
+            TestArg("host", rng_type=RNGChoice(["localhost", "127.0.0.1"])),
+            TestArg("port", rng_type=RNGInteger(8000, 9000)),
+            directed_vectors={"local": ("localhost", 8000), "loopback": ("127.0.0.1", 9000)},
+            nsamples=0,
+        )
     """
 
 SERVER_FIXTURES = textwrap.dedent("""
@@ -259,15 +273,27 @@ class TestIdsInRealRuns:
 
     def test_strings_containing_at_0x_keep_their_value(self, pytester):
         pytester.makepyfile(fault_strategies="""
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, RNGChoice, RNGInteger, Strategy, TestArg
 
             @Strategy.register("r2_lines")
             def lines(nsamples):
-                return ("line",), [("segfault at 0x0",), ("jump at 0x401000",)]
+                return Parameter(
+                    TestArg("line", rng_type=RNGChoice(["segfault at 0x0", "jump at 0x401000"])),
+                    directed_vectors={
+                        "segfault": ("segfault at 0x0",),
+                        "jump": ("jump at 0x401000",),
+                    },
+                    nsamples=0,
+                )
 
             @Strategy.register("r2_pairs")
             def pairs(nsamples):
-                return ("msg", "code"), [("fault at 0x10", 1), ("fault at 0x20", 2)]
+                return Parameter(
+                    TestArg("msg", rng_type=RNGChoice(["fault at 0x10", "fault at 0x20"])),
+                    TestArg("code", rng_type=RNGInteger(1, 2)),
+                    directed_vectors={"first": ("fault at 0x10", 1), "second": ("fault at 0x20", 2)},
+                    nsamples=0,
+                )
             """)
         pytester.makepyfile(test_faults="""
             from pytest_strategy import Strategy
@@ -350,11 +376,16 @@ class TestDataclassModeSamples:
 
     def test_custom_init_dataclass(self, pytester):
         pytester.makepyfile(rect_strategies="""
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, RNGInteger, Strategy, TestArg
 
             @Strategy.register("r2_rect")
             def rect(nsamples):
-                return ("width", "height"), [(1, 2), (3, 4)]
+                return Parameter(
+                    TestArg("width", rng_type=RNGInteger(1, 3)),
+                    TestArg("height", rng_type=RNGInteger(2, 4)),
+                    directed_vectors={"small": (1, 2), "large": (3, 4)},
+                    nsamples=0,
+                )
             """)
         pytester.makepyfile(test_rect="""
             from dataclasses import dataclass
@@ -385,17 +416,22 @@ class TestDataclassModeSamples:
         pytester.makepyfile(point_strategies="""
             import pytest
 
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, RNGInteger, Strategy, TestArg
 
             @Strategy.register("r2_points")
             def points(nsamples):
-                return ("x", "y"), [
-                    (1, 2),
-                    pytest.param(3, 4, marks=pytest.mark.slow),
-                    pytest.param(5, 6, marks=pytest.mark.xfail(strict=True)),
-                    pytest.param(7, 8, marks=pytest.mark.skip),
-                    pytest.param(9, 10, id="custom"),
-                ]
+                return Parameter(
+                    TestArg("x", rng_type=RNGInteger(1, 9)),
+                    TestArg("y", rng_type=RNGInteger(2, 10)),
+                    directed_vectors={
+                        "plain": (1, 2),
+                        "slow": pytest.param(3, 4, marks=pytest.mark.slow),
+                        "strict_xfail": pytest.param(5, 6, marks=pytest.mark.xfail(strict=True)),
+                        "skipped": pytest.param(7, 8, marks=pytest.mark.skip),
+                        "custom": pytest.param(9, 10, id="custom"),
+                    },
+                    nsamples=0,
+                )
             """)
         pytester.makepyfile(test_points="""
             from dataclasses import dataclass

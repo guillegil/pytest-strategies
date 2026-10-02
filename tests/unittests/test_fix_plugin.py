@@ -15,11 +15,11 @@ from pytest_strategy._runtime import StrategyRuntime, runtime
 from pytest_strategy.plugin import PytestStrategyPlugin
 
 STRATEGY_SOURCE = """
-from pytest_strategy import Strategy
+from pytest_strategy import Parameter, Strategy, TestArg
 
 @Strategy.register("s")
 def s(nsamples):
-    return ("x",), [(1,)]
+    return Parameter(TestArg("x", value=1), nsamples=1)
 """
 
 

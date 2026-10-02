@@ -175,6 +175,59 @@ class TestSingleArgumentIdsIntegration:
         )
 
 
+class TestPytestParamVectorsIntegration:
+    """pytest.param vectors keep their marks and ids, as in pytest.mark.parametrize."""
+
+    def test_pytest_param_marks_and_ids_are_kept(self, pytester):
+        pytester.makepyfile(test_fix_param="""
+            import pytest
+            from pytest_strategy import Parameter, RNGInteger, Strategy, TestArg
+
+            @Strategy.register("fix_param_one")
+            def one(nsamples):
+                return Parameter(
+                    TestArg("x", rng_type=RNGInteger(1, 5)),
+                    directed_vectors={
+                        "one": pytest.param(1, marks=pytest.mark.xfail(strict=True)),
+                        "five": pytest.param(5, id="five"),
+                        "two": (2,),
+                    },
+                    nsamples=0,
+                )
+
+            @Strategy.register("fix_param_two")
+            def two(nsamples):
+                return Parameter(
+                    TestArg("a", rng_type=RNGInteger(1, 3)),
+                    TestArg("b", rng_type=RNGInteger(2, 3)),
+                    directed_vectors={
+                        "unequal": pytest.param(1, 2, marks=pytest.mark.xfail(strict=True)),
+                        "equal": (3, 3),
+                    },
+                    nsamples=0,
+                )
+
+            @Strategy.strategy("fix_param_one")
+            def test_one(x):
+                assert x in (2, 5)
+
+            @Strategy.strategy("fix_param_two")
+            def test_two(a, b):
+                assert a == b
+            """)
+        result = pytester.runpytest("-v")
+        result.assert_outcomes(passed=3, xfailed=2)
+        result.stdout.fnmatch_lines(
+            [
+                "*test_one[[]x=1[]] XFAIL*",
+                "*test_one[[]five[]] PASSED*",
+                "*test_one[[]x=2[]] PASSED*",
+                "*test_two[[]a=1,b=2[]] XFAIL*",
+                "*test_two[[]a=3,b=3[]] PASSED*",
+            ]
+        )
+
+
 class TestLegacyTupleStrategiesIntegration:
     """Legacy (argnames, samples) strategies behave like pytest.mark.parametrize."""
 
@@ -209,61 +262,24 @@ class TestLegacyTupleStrategiesIntegration:
         result = pytester.runpytest()
         result.assert_outcomes(passed=3)
 
-    def test_pytest_param_marks_and_ids_are_kept(self, pytester):
-        pytester.makepyfile(test_fix_legacy_param="""
-            import pytest
-            from pytest_strategy import Strategy
-
-            @Strategy.register("fix_legacy_param_one")
-            def one(nsamples):
-                return ("x",), [
-                    pytest.param(1, marks=pytest.mark.xfail(strict=True)),
-                    pytest.param(5, id="five"),
-                    2,
-                ]
-
-            @Strategy.register("fix_legacy_param_two")
-            def two(nsamples):
-                return ("a", "b"), [pytest.param(1, 2, marks=pytest.mark.xfail(strict=True)), (3, 3)]
-
-            @Strategy.strategy("fix_legacy_param_one")
-            def test_one(x):
-                assert x in (2, 5)
-
-            @Strategy.strategy("fix_legacy_param_two")
-            def test_two(a, b):
-                assert a == b
-            """)
-        result = pytester.runpytest("-v")
-        result.assert_outcomes(passed=3, xfailed=2)
-        result.stdout.fnmatch_lines(
-            [
-                "*test_one[[]x=1[]] XFAIL*",
-                "*test_one[[]five[]] PASSED*",
-                "*test_one[[]x=2[]] PASSED*",
-                "*test_two[[]a=1,b=2[]] XFAIL*",
-                "*test_two[[]a=3,b=3[]] PASSED*",
-            ]
-        )
-
 
 class TestDuplicateRegistrationIntegration:
     """A strategy name taken over by a different function is reported."""
 
     def test_name_clash_in_one_folder_is_a_usage_error(self, pytester):
         pytester.makepyfile(fix_dup_strategies="""
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, Strategy, TestArg
 
             @Strategy.register("fix_dup_clash")
             def from_strategies_file(nsamples):
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
             """)
         pytester.makepyfile(test_fix_dup_clash="""
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, Strategy, TestArg
 
             @Strategy.register("fix_dup_clash")
             def from_test_module(nsamples):
-                return ("x",), [(2,)]
+                return Parameter(TestArg("x", value=2), nsamples=1)
 
             @Strategy.strategy("fix_dup_clash")
             def test_clash(x):
@@ -281,18 +297,18 @@ class TestDuplicateRegistrationIntegration:
 
     def test_same_name_in_another_folder_is_used_there(self, pytester):
         pytester.makepyfile(fix_dup_strategies="""
-            from pytest_strategy import register
+            from pytest_strategy import Parameter, TestArg, register
 
             @register("fix_dup_scoped")
             def outer(nsamples):
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
             """)
         pytester.makepyfile(**{"sub/fix_dup_strategies": """
-            from pytest_strategy import register
+            from pytest_strategy import Parameter, TestArg, register
 
             @register("fix_dup_scoped")
             def inner(nsamples):
-                return ("x",), [(2,)]
+                return Parameter(TestArg("x", value=2), nsamples=1)
             """})
         pytester.makepyfile(test_outer="""
             from pytest_strategy import strategy
@@ -309,15 +325,15 @@ class TestDuplicateRegistrationIntegration:
                 assert x == 2
             """})
         result = pytester.runpytest()
-        result.assert_outcomes(passed=2, warnings=2)
+        result.assert_outcomes(passed=2, warnings=0)
 
     def test_reloaded_strategies_file_is_silent(self, pytester):
         pytester.makepyfile(fix_reload_strategies="""
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, Strategy, TestArg
 
             @Strategy.register("fix_dup_reload")
             def factory(nsamples):
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
             """)
         pytester.makepyfile(test_fix_dup_reload="""
             from pytest_strategy import Strategy

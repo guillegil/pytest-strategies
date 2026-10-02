@@ -240,11 +240,11 @@ class TestNestedSessionSeed:
 
 # A test that needs a strategy: running it loads the strategy files of its folder
 OTHER_STRATEGY = """
-from pytest_strategy import register
+from pytest_strategy import Parameter, TestArg, register
 
 @register("other_strat")
 def other(nsamples):
-    return ("x",), [(1,)]
+    return Parameter(TestArg("x", value=1), nsamples=1)
 """
 OTHER_TEST = """
 from pytest_strategy import strategy
@@ -265,11 +265,11 @@ class TestSkipInStrategyFile:
 
             missing = pytest.importorskip("pytest_strategies_missing_module")
 
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, Strategy, TestArg
 
             @Strategy.register("optional_strat")
             def optional(nsamples):
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
 
             def test_optional():
                 pass
@@ -287,11 +287,11 @@ class TestSkipInStrategyFile:
 
             pytest.skip("no gpu", allow_module_level=True)
 
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, Strategy, TestArg
 
             @Strategy.register("gpu_strat")
             def gpu(nsamples):
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
             """)
         pytester.makepyfile(other_strategies=OTHER_STRATEGY, test_other=OTHER_TEST)
 
@@ -309,11 +309,11 @@ class TestSkipInStrategyFile:
 
             pytest.fail("broken setup")
 
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, Strategy, TestArg
 
             @Strategy.register("failing_strat")
             def failing(nsamples):
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
             """)
         pytester.makepyfile(test_other="def test_other():\n    pass\n")
 
@@ -359,11 +359,11 @@ class TestLoadErrorsAreVisible:
 
     def test_syntax_error_is_reported_in_quiet_mode(self, pytester):
         pytester.makepyfile(strategies="""
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, Strategy, TestArg
 
             @Strategy.register("broken")
             def broken(nsamples)
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
             """)
         pytester.makepyfile(other_strategies=OTHER_STRATEGY, test_other=OTHER_TEST)
 

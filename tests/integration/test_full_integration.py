@@ -8,7 +8,7 @@ These tests demonstrate the complete workflow integrating:
 - Directed test vectors
 - Constraints and validation
 - CLI options support
-- Backward compatibility
+- Fixed rows computed from nsamples
 
 The strategies are defined in strategies.py and auto-discovered by the plugin.
 """
@@ -135,13 +135,13 @@ def test_mixed_mode(static_val, random_val, directed_val, mixed_val):
 
 
 # ============================================================================
-# BACKWARD COMPATIBILITY TESTS
+# FIXED ROWS TESTS
 # ============================================================================
 
 
-@Strategy.strategy("legacy_tuple_strategy")
-def test_legacy_tuple(x, y, z):
-    """Test legacy tuple-based strategy."""
+@Strategy.strategy("fixed_rows_strategy")
+def test_fixed_rows(x, y, z):
+    """Test a strategy whose rows are computed from nsamples."""
     assert isinstance(x, int)
     assert isinstance(y, int)
     assert isinstance(z, int)

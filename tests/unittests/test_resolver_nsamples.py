@@ -171,21 +171,25 @@ class TestResolverNsamplesPrecedence:
         # Exhaustive: 3 elements in sequence → 3 samples (not 15)
         assert len(samples) == 3
 
-    def test_legacy_path_never_receives_none(self):
-        """FR-8: Legacy tuple factory must always receive an int, never None.
+    def test_factory_never_receives_none(self):
+        """FR-8: A factory must always receive an int, never None.
 
-        When CLI is None and the factory returns a legacy tuple, the nsamples
-        passed to the factory must be the integer 10 (fallback), not None.
+        When CLI is None, the nsamples passed to the factory must be the integer
+        10 (fallback), not None, also for a factory that builds its rows from it.
         """
         received = []
 
-        def legacy_factory(nsamples):
+        def factory(nsamples):
             received.append(nsamples)
-            # Return a legacy tuple (argnames, samples)
-            return ("x", [(i,) for i in range(nsamples)])
+            # Rows built from nsamples, without random rows
+            return Parameter(
+                TestArg("x", rng_type=RNGInteger(0, 100)),
+                directed_vectors={f"row_{i}": (i,) for i in range(nsamples)},
+                nsamples=0,
+            )
 
         config = _make_config(None)
-        registry = {"strat": legacy_factory}
+        registry = {"strat": factory}
         test_fn = _make_test_fn(["x"])
 
         resolve_and_parametrize(

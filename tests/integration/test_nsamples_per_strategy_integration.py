@@ -95,16 +95,19 @@ class TestNsamplesPerStrategyIntegration:
         result = pytester.runpytest_inprocess("--nsamples=auto")
         result.assert_outcomes(passed=3)
 
-    def test_legacy_path_no_typeerror_when_cli_absent(self, pytester):
-        """Scenario 6: legacy tuple factory + no CLI --nsamples → no TypeError, 10 cases."""
+    def test_factory_nsamples_is_an_int_when_cli_absent(self, pytester):
+        """Scenario 6: rows from range(nsamples) + no CLI --nsamples → no TypeError, 10 cases."""
         pytester.makepyfile(ns_e_strategies="""
-            from pytest_strategy import Strategy
+            from pytest_strategy import Strategy, Parameter, TestArg, RNGInteger
 
             @Strategy.register("ns_strat_e")
             def factory(nsamples):
-                # Legacy path: return a tuple (argnames, samples)
-                samples = [(i,) for i in range(nsamples)]
-                return ("x", samples)
+                # The rows are built from nsamples, without random rows
+                return Parameter(
+                    TestArg("x", rng_type=RNGInteger(0, 100)),
+                    directed_vectors={f"row_{i}": (i,) for i in range(nsamples)},
+                    nsamples=0,
+                )
             """)
         pytester.makepyfile(test_ns_e="""
             from pytest_strategy import Strategy
@@ -113,6 +116,6 @@ class TestNsamplesPerStrategyIntegration:
             def test_ns_e(x):
                 assert isinstance(x, int)
             """)
-        # No --nsamples; legacy path must receive 10 (int), not None
+        # No --nsamples; the factory must receive 10 (int), not None
         result = pytester.runpytest_inprocess()
         result.assert_outcomes(passed=10)

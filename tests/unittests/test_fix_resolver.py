@@ -375,12 +375,16 @@ class TestResolverFactoryCalling:
         _, samples, _ = _resolve(factory, ["x"])
         assert len(samples) == 3
 
-    def test_legacy_factory_under_auto_reports_real_error(self):
+    def test_factory_failing_under_auto_reports_real_error(self):
         calls = []
 
         def factory(nsamples):
             calls.append(nsamples)
-            return ("x",), [(i,) for i in range(nsamples)]
+            return Parameter(
+                TestArg("x", rng_type=RNGInteger(0, 9)),
+                directed_vectors={f"row_{i}": (i,) for i in range(nsamples)},
+                nsamples=0,
+            )
 
         with pytest.raises(ValueError) as exc_info:
             _resolve(factory, ["x"], nsamples="auto")
@@ -409,14 +413,14 @@ class TestExportStrategiesFactoryCalling:
 
         @Strategy.register("fix_export_noargs")
         def noargs():
-            return ("x",), [(1,)]
+            return Parameter(TestArg("x", value=1), nsamples=1)
 
         data = json.loads(Strategy.export_strategies())
 
         assert received == [1]
         assert data["fix_export_kwonly"]["arguments"][0]["name"] == "x"
         assert data["fix_export_varkw"]["arguments"][0]["name"] == "x"
-        assert data["fix_export_noargs"] == {"type": "legacy_tuple", "argnames": ["x"]}
+        assert data["fix_export_noargs"]["arguments"][0]["name"] == "x"
 
     def test_factory_error_is_still_recorded(self, restore_registry):
         @Strategy.register("fix_export_broken")
@@ -471,7 +475,57 @@ class TestSingleArgumentIds:
 
 
 # ---------------------------------------------------------------------------
-# Legacy tuple strategies: comma argnames, generators and pytest.param samples
+# pytest.param vectors: marks and ids are kept, IDs are built from the values
+# ---------------------------------------------------------------------------
+
+
+class TestPytestParamVectors:
+    """A pytest.param vector reaches parametrize like a pytest.param row would."""
+
+    def test_pytest_param_single_arg_is_not_unwrapped(self):
+        xfail = pytest.mark.xfail(strict=True)
+        param = Parameter(
+            TestArg("x", rng_type=RNGInteger(0, 9)),
+            directed_vectors={
+                "one": pytest.param(1, marks=xfail),
+                "five": pytest.param(5, id="five"),
+                "two": (2,),
+            },
+            nsamples=0,
+        )
+        _, samples, ids = _resolve(lambda nsamples: param, ["x"])
+        assert samples[0] == pytest.param(1, marks=xfail)
+        assert samples[1] == pytest.param(5, id="five")
+        assert samples[2] == 2
+        assert ids == ["x=1", "x=5", "x=2"]
+
+    def test_pytest_param_multi_arg_ids_use_values(self):
+        xfail = pytest.mark.xfail(strict=True)
+        param = Parameter(
+            TestArg("a", rng_type=RNGInteger(0, 9)),
+            TestArg("b", rng_type=RNGInteger(0, 9)),
+            directed_vectors={"unequal": pytest.param(1, 2, marks=xfail), "equal": (3, 3)},
+            nsamples=0,
+        )
+        _, samples, ids = _resolve(lambda nsamples: param, ["a", "b"])
+        assert samples == [pytest.param(1, 2, marks=xfail), (3, 3)]
+        assert ids == ["a=1,b=2", "a=3,b=3"]
+
+    def test_pytest_param_id_repeating_another_row_is_suffixed(self):
+        xfail = pytest.mark.xfail(strict=True)
+        param = Parameter(
+            TestArg("x", rng_type=RNGInteger(0, 9)),
+            directed_vectors={"one": (1,), "two": pytest.param(2, id="x=1", marks=xfail)},
+            nsamples=0,
+        )
+        _, samples, ids = _resolve(lambda nsamples: param, ["x"])
+        # The row keeps its marks; its ids entry, which pytest ignores, is unchanged
+        assert samples == [1, pytest.param(2, id="x=1_1", marks=xfail)]
+        assert ids == ["x=1_0", "x=2"]
+
+
+# ---------------------------------------------------------------------------
+# Legacy tuple strategies: comma argnames and generators
 # ---------------------------------------------------------------------------
 
 
@@ -505,50 +559,17 @@ class TestLegacyTupleStrategies:
         assert samples == [0, 1, 2]
         assert ids == ["a=0", "a=1", "a=2"]
 
-    def test_pytest_param_single_arg_is_not_unwrapped(self):
-        xfail = pytest.mark.xfail(strict=True)
-        _, samples, ids = _resolve(
-            lambda nsamples: (
-                ("x",),
-                [pytest.param(1, marks=xfail), pytest.param(5, id="five"), (2,)],
-            ),
-            ["x"],
-        )
-        assert samples[0] == pytest.param(1, marks=xfail)
-        assert samples[1] == pytest.param(5, id="five")
-        assert samples[2] == 2
-        assert ids == ["x=1", "x=5", "x=2"]
-
-    def test_pytest_param_multi_arg_ids_use_values(self):
-        xfail = pytest.mark.xfail(strict=True)
-        _, samples, ids = _resolve(
-            lambda nsamples: (("a", "b"), [pytest.param(1, 2, marks=xfail), (3, 3)]),
-            ["a", "b"],
-        )
-        assert samples == [pytest.param(1, 2, marks=xfail), (3, 3)]
-        assert ids == ["a=1,b=2", "a=3,b=3"]
-
-    def test_pytest_param_id_repeating_another_row_is_suffixed(self):
-        xfail = pytest.mark.xfail(strict=True)
-        _, samples, ids = _resolve(
-            lambda nsamples: ("x", [1, pytest.param(2, id="x=1", marks=xfail)]),
-            ["x"],
-        )
-        # The row keeps its marks; its ids entry, which pytest ignores, is unchanged
-        assert samples == [1, pytest.param(2, id="x=1_1", marks=xfail)]
-        assert ids == ["x=1_0", "x=2"]
-
 
 # ---------------------------------------------------------------------------
 # Duplicate strategy names: warn when a different function takes over a name
 # ---------------------------------------------------------------------------
 
 STRATEGY_SOURCE = textwrap.dedent("""
-    from pytest_strategy import Strategy
+    from pytest_strategy import Parameter, Strategy, TestArg
 
     @Strategy.register("fix_dup_source")
     def factory(nsamples):
-        return ("x",), [(1,)]
+        return Parameter(TestArg("x", value=1), nsamples=1)
     """)
 
 
@@ -558,13 +579,13 @@ class TestDuplicateRegistration:
     def test_different_function_warns_and_last_wins(self, restore_registry):
         @Strategy.register("fix_dup")
         def first(nsamples):
-            return ("x",), [(1,)]
+            return Parameter(TestArg("x", value=1), nsamples=1)
 
         with pytest.warns(PytestStrategiesWarning, match="'fix_dup'") as record:
 
             @Strategy.register("fix_dup")
             def second(nsamples):
-                return ("y",), [(2,)]
+                return Parameter(TestArg("y", value=2), nsamples=1)
 
         assert Strategy._registry["fix_dup"] is second
         assert len(record) == 1
@@ -579,7 +600,7 @@ class TestDuplicateRegistration:
 
     def test_same_function_again_is_silent(self, restore_registry):
         def factory(nsamples):
-            return ("x",), [(1,)]
+            return Parameter(TestArg("x", value=1), nsamples=1)
 
         Strategy.register("fix_dup_same")(factory)
         with warnings.catch_warnings():
