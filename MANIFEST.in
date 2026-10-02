@@ -1,5 +1,6 @@
 # Source distribution: everything needed to run the test suite from it
 include CHANGELOG.md .github/workflows/tests.yml
+graft benchmarks
 graft docs
 graft examples
 graft tests

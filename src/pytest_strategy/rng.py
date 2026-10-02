@@ -188,6 +188,11 @@ class RNG:
             RNG.integer(1, 100)
             RNG.integer(1, 100, predicate=lambda x: x % 2 == 0)  # Even numbers only
         """
+        if predicate is None:
+            # The helper's draw without its call and closure, and with one lookup on
+            # RNG fewer: random rows assign RNG._generator before each argument's
+            # draw, and a lookup on a class whose attribute was just assigned costs more
+            return RNG._generator.randint(min, max)
         return RNG._generate_with_constraint(lambda: RNG._generator.randint(min, max), predicate)
 
     @staticmethod
@@ -209,6 +214,9 @@ class RNG:
             RNG.float(0.0, 10.0)
             RNG.float(0.0, 1.0, predicate=lambda x: x > 0.5)
         """
+        if predicate is None:
+            # The same draw without the helper (see integer())
+            return _uniform(min, max)
         return RNG._generate_with_constraint(lambda: _uniform(min, max), predicate)
 
     @staticmethod

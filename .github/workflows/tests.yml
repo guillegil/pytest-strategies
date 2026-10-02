@@ -139,6 +139,12 @@ jobs:
       - name: Examples on two xdist workers, with a seed
         run: python -m pytest examples/*.py -n 2 --rng-seed=1
 
+      # Informational: timings depend on the runner, so the step prints them and never
+      # fails the job. Compare versions by running the script on one machine
+      - name: Benchmark (informational)
+        continue-on-error: true
+        run: python benchmarks/bench.py --sweep --memory
+
   packaging:
     name: Packaging
     runs-on: ubuntu-latest
@@ -207,10 +213,10 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Ruff
-        run: ruff check src/ tests/
+        run: ruff check src/ tests/ benchmarks/
 
       - name: Black
-        run: black --check src/ tests/
+        run: black --check src/ tests/ benchmarks/
 
   typecheck:
     name: Type check (mypy --strict)

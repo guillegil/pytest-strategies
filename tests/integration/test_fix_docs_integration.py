@@ -55,6 +55,15 @@ def _cli_actions(parser: argparse.ArgumentParser) -> list:
     return actions
 
 
+def _bench_parser() -> argparse.ArgumentParser:
+    """The command-line parser of benchmarks/bench.py, which docs/dev.md describes."""
+    spec = importlib.util.spec_from_file_location("bench", REPO_ROOT / "benchmarks" / "bench.py")
+    assert spec is not None and spec.loader is not None
+    bench = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bench)
+    return bench.build_parser()
+
+
 def _package_docstring_example() -> str:
     """The "Example Usage" section of ``help(pytest_strategy)``."""
     doc = pytest_strategy.__doc__ or ""
@@ -126,6 +135,13 @@ class TestDocumentedCliOptions:
         known.update(
             option
             for action in _cli_actions(parser)
+            for option in action.option_strings
+            if option.startswith("--")
+        )
+        # The options of the benchmark script
+        known.update(
+            option
+            for action in _cli_actions(_bench_parser())
             for option in action.option_strings
             if option.startswith("--")
         )

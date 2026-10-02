@@ -1148,9 +1148,25 @@ Set up and check a change the way CI does:
 pip install -e ".[dev]"
 python -m pytest -n auto                  # The suite (warnings are errors)
 python -m pytest examples/*.py --nsamples=auto
-ruff check src/ tests/ && black --check src/ tests/
+ruff check src/ tests/ benchmarks/ && black --check src/ tests/ benchmarks/
 mypy --strict src/pytest_strategy/ tests/unittests/test_typing.py
 ```
+
+`benchmarks/bench.py` times row generation through
+`Parameter.generate_vectors()`: 10,000 rows of 5 arguments, 100,000 rows of 4,
+and 5,000 rows of 2 arguments whose constraints reject about half the draws.
+`--sweep` adds that last case at about 0%, 50% and 90% rejection, per accepted
+row, and `--memory` the collection of 100,000 exhaustive rows in a new
+interpreter (time and peak memory). CI runs `python benchmarks/bench.py --sweep
+--memory` as an informational step of the examples job, which never fails it.
+Timings compare only on one machine: to compare two versions, run the script
+once with each, the other version's `src` on `PYTHONPATH`. On Python 3.11
+(Linux), 4.0 generates 10,000 rows of 5 arguments in about 0.47 s (3.0: 0.05 s),
+about 8.5 µs more per drawn argument per row, almost all of it seeding the
+argument's generator. A rejected row continues its arguments' streams instead
+of reseeding them, so the cost per accepted row does not grow with the rejection
+rate: 16 to 17 µs more than 3.0 at 0%, 50% and 90%. Collecting 100,000
+exhaustive rows takes about 10 s and 417 MiB at peak (3.0: 6 s and 328 MiB).
 
 Options that a 4.x release adds to a public callable go after a `*`, so that
 they are keyword-only and no existing positional call changes meaning. Since 4.0,
