@@ -34,6 +34,7 @@ Defines 10 comprehensive strategies demonstrating all features:
 
 - **Fixed Rows**
   - `fixed_rows_strategy`: Rows computed from nsamples, given as directed vectors only
+    (so `--vector-mode=random_only` leaves its test without rows; see Example Usage)
 
 ### 2. Integration Tests
 **File:** `tests/integration/test_full_integration.py`
@@ -170,6 +171,17 @@ pytest tests/integration/test_full_integration.py::test_api_request -v
 pytest tests/integration/test_full_integration.py --vector-mode=directed_only -v
 pytest tests/integration/test_full_integration.py --nsamples=50 -v
 ```
+
+`test_fixed_rows` gets its rows from directed vectors only (what a 3.0 factory that
+returned an `(argnames, samples)` tuple becomes in 4.0), so the vector mode treats them
+like any directed vectors:
+- `--vector-mode=random_only` leaves the test without rows. With this project's
+  `empty_parameter_set_mark = fail_at_collect`, the whole file then fails collection
+  (`Empty parameter set in 'test_fixed_rows'`); add
+  `-o empty_parameter_set_mark=skip` to skip that test instead. (3.0 gave the tuple's
+  rows in every mode.)
+- `--nsamples=N` gives it N directed rows plus N random rows of its static values,
+  `(0, 0, 0)`, which also satisfy the test.
 
 ### Strategy Auto-Discovery
 

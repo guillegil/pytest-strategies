@@ -297,12 +297,14 @@ class TestDecoratedFactories:
         assert calls == [3]
 
     def test_resolver_uses_decorated_factory(self):
+        # The value carries the nsamples the factory received, which must be the run's:
+        # the row count alone comes from --nsamples, whatever the factory received
         @_inject_rng
         def make(nsamples, rng):
-            return Parameter(TestArg("x", value=rng), nsamples=nsamples)
+            return Parameter(TestArg("x", value=(nsamples, rng)))
 
         _, samples, _ = _resolve(make, ["x"], nsamples=2)
-        assert samples == ["rng", "rng"]
+        assert samples == [(2, "rng"), (2, "rng")]
 
     def test_export_strategies_lists_decorated_factories(self):
         @Strategy.register("fix_r2_injected")

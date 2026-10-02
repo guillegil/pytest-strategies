@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 The APIs deprecated in 3.0, without warnings left behind:
-- Factories that return an `(argnames, samples)` tuple. The tests that use such a strategy fail collection with `Strategy 'name' returned an (argnames, samples) tuple (factory: file:line:name)`, which says what to return instead: a `Parameter`, with one `TestArg` per argument and the fixed rows as `directed_vectors`. A factory that returns anything else that is not a `Parameter` fails with `must return a Parameter, got NoneType (did the factory forget to return?)`, and `export_strategies()` reports both as errors instead of a `legacy_tuple` entry.
+- Factories that return an `(argnames, samples)` tuple. The tests that use such a strategy fail collection with `Strategy 'name' returned an (argnames, samples) tuple (factory: file:line:name)`, which says what to return instead: a `Parameter`, with one `TestArg` per argument and the fixed rows as `directed_vectors`. Unlike a tuple's rows, which 3.0 gave in every `--vector-mode`, directed vectors are left out under `--vector-mode=random_only` and `test`. A factory that returns anything else that is not a `Parameter` fails with `must return a Parameter, got NoneType (did the factory forget to return?)`, and `export_strategies()` reports both as errors instead of a `legacy_tuple` entry.
 - `RNG.set_max_retries()`. Use `Parameter(max_retries=...)`; the draws a `predicate=` gets stay fixed at 100.
 - `configure()`, which did nothing. Delete the call.
 - `Strategy.set_config()`. Delete the call: the plugin uses the config of the session that collects each test.

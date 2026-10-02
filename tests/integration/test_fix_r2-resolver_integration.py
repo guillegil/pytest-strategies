@@ -49,7 +49,7 @@ class TestDecoratedFactories:
             import os
             from unittest import mock
 
-            from pytest_strategy import Parameter, RNGChoice, RNGInteger, Strategy, TestArg
+            from pytest_strategy import Parameter, RNGChoice, Strategy, TestArg
 
             def with_rng(fn):
                 @functools.wraps(fn)
@@ -68,15 +68,17 @@ class TestDecoratedFactories:
                     return fn(*args, **kwargs)
                 return wrapper
 
+            # The values carry the nsamples each factory received, which must be the
+            # run's: the row count alone comes from --nsamples, whatever it received
             @Strategy.register("r2_injected")
             @with_rng
             def injected(nsamples, rng):
-                return Parameter(TestArg("x", value=rng), nsamples=nsamples)
+                return Parameter(TestArg("x", value=(nsamples, rng)))
 
             @Strategy.register("r2_patched")
             @mock.patch("os.getcwd", return_value="/fake")
             def patched(nsamples, getcwd):
-                return Parameter(TestArg("x", value=os.getcwd()), nsamples=nsamples)
+                return Parameter(TestArg("x", value=(nsamples, os.getcwd())))
 
             @Strategy.register("r2_adapted")
             @adapt
@@ -86,18 +88,18 @@ class TestDecoratedFactories:
             @Strategy.register("r2_logged")
             @logged
             def logged_factory(n):
-                return Parameter(TestArg("x", rng_type=RNGInteger(0, n - 1)))
+                return Parameter(TestArg("x", value=n))
             """)
         pytester.makepyfile(test_deco="""
             from pytest_strategy import Strategy
 
             @Strategy.strategy("r2_injected")
             def test_injected(x):
-                assert x == 7
+                assert x == (3, 7)
 
             @Strategy.strategy("r2_patched")
             def test_patched(x):
-                assert x == "/fake"
+                assert x == (3, "/fake")
 
             @Strategy.strategy("r2_adapted")
             def test_adapted(x):
@@ -105,7 +107,7 @@ class TestDecoratedFactories:
 
             @Strategy.strategy("r2_logged")
             def test_logged(x):
-                assert 0 <= x < 3
+                assert x == 3
             """)
 
         result = pytester.runpytest_inprocess("--nsamples=3")

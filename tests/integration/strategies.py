@@ -223,6 +223,8 @@ def create_fixed_rows_strategy(nsamples: int | str) -> Parameter:
     """Strategy whose rows are computed from nsamples, given as directed vectors only."""
     # Without a Series there is nothing for "auto" to enumerate: give 10 rows
     n = 10 if nsamples == "auto" else int(nsamples)
+    # Directed vectors only, so --vector-mode=random_only leaves the test without rows
+    # (3.0 gave a tuple factory's rows in every mode; see README.md)
     return Parameter(
         # Static values: the random rows that only --nsamples=N adds are (0, 0, 0), which
         # keep y == 2x and z == 3x
