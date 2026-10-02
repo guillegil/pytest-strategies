@@ -1,0 +1,139 @@
+"""
+Random streams v1 (D5): the keys that seed the plugin's random streams.
+
+A stream key is a path of parts, each an int or a str, under a seed:
+``StreamKey.root(seed, "test", strategy, nodeid)`` keys what one strategy draws for
+one test, and ``.child(...)`` keys a part of that, such as one argument of one row.
+``seed_int()`` hashes the path into a 128-bit int, which seeds a
+``random.Random``.
+
+The derivation is streams version 1 (``VERSION``), the version that
+``VectorInfo.streams`` reports. A key's int, and so every value drawn from its
+stream, must not change within a major release: the goldens in
+tests/unittests/test_streams.py pin it.
+
+- Each part is encoded as one type byte, ``i`` for an int or ``s`` for a str, the
+  length of its payload in 8 bytes (unsigned, big-endian), and the payload: the
+  int in two's complement, big-endian, in ``(n.bit_length() + 8) // 8`` bytes, or
+  the str in UTF-8 (a lone surrogate with ``surrogatepass``). An int or str
+  subclass is encoded by its int or str value. bools, floats and anything else
+  are a TypeError.
+- The path is the seed's encoding followed by each part's, so
+  ``root(s, a).child(b)`` is ``root(s, a, b)``. The encoding is typed and
+  length-prefixed, so ``("a:b", "c")`` and ``("a", "b:c")`` are different paths,
+  and so are ``"3"`` and ``3``; the 3.x key ``f"{seed}:{key}"`` gave such pairs
+  one stream.
+- ``seed_int()`` is ``blake2b(path, digest_size=16, person=b"pst-stream/1")``,
+  read as an unsigned big-endian int. BLAKE2b is built into CPython (no OpenSSL,
+  so FIPS builds have it), and nothing here uses ``hash()``, so a key's int is the
+  same in every process, whatever ``PYTHONHASHSEED`` or the OS.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from typing import Any
+
+# The version of the derivation: the streams version of the generated values
+VERSION = 1
+
+# BLAKE2b's personalization string: the same bytes give other digests in other uses
+_PERSON = f"pst-stream/{VERSION}".encode("ascii")
+
+# Bytes in the length of a part's payload
+_LENGTH_SIZE = 8
+
+# A BLAKE2b hasher with nothing fed yet, copied for each key (cheaper than a new one)
+_HASHER = hashlib.blake2b(digest_size=16, person=_PERSON)
+
+
+def _part(value: Any) -> bytes:
+    """
+    Encode one part of a stream key: its type byte (``i`` or ``s``), the length of
+    its payload in 8 bytes, and the payload (see the module docstring).
+
+    Raises:
+        TypeError: If the part is not an int or a str. A bool is refused, though it
+            is an int: ``True`` would key the stream of ``1``.
+    """
+    if isinstance(value, str):
+        tag = b"s"
+        # str.encode() and int.to_bytes() read the value itself, not a subclass's override
+        payload = str.encode(value, "utf-8", "surrogatepass")
+    elif isinstance(value, int) and not isinstance(value, bool):
+        tag = b"i"
+        payload = int.to_bytes(value, (int.bit_length(value) + 8) // 8, "big", signed=True)
+    else:
+        raise TypeError(
+            f"A stream key part must be an int or a str, got {value!r} ({type(value).__name__})"
+        )
+    return tag + len(payload).to_bytes(_LENGTH_SIZE, "big") + payload
+
+
+class StreamKey:
+    """
+    The key of one random stream: a seed and a path of int and str parts.
+
+    Build one with :meth:`root` and extend it with :meth:`child`; a key is not
+    changed once built. Keys are equal when their paths are equal, and
+    :meth:`seed_int` gives the int that seeds the stream's ``random.Random``.
+    """
+
+    __slots__ = ("_parts", "_path")
+
+    _parts: tuple[Any, ...]
+    _path: bytes
+
+    def __init__(self) -> None:
+        raise TypeError("StreamKey is built with StreamKey.root(seed, *parts)")
+
+    @classmethod
+    def _make(cls, parts: tuple[Any, ...], path: bytes) -> StreamKey:
+        key = object.__new__(cls)
+        key._parts = parts
+        key._path = path
+        return key
+
+    @classmethod
+    def root(cls, seed: int, *parts: int | str) -> StreamKey:
+        """
+        Return the key of a stream under ``seed``.
+
+        Args:
+            seed: The seed the stream derives from: the run's seed, or
+                ``RNG.get_seed()`` for the streams of direct calls
+            *parts: The stream's path, each part an int or a str
+
+        Raises:
+            TypeError: If the seed or a part is not an int or a str (a bool or a
+                float included)
+        """
+        everything = (seed, *parts)
+        return cls._make(everything, b"".join([_part(p) for p in everything]))
+
+    def child(self, *parts: int | str) -> StreamKey:
+        """
+        Return the key of a stream below this one: ``root(s, a).child(b)`` is
+        ``root(s, a, b)``.
+
+        Raises:
+            TypeError: If a part is not an int or a str (a bool or a float included)
+        """
+        return self._make((*self._parts, *parts), self._path + b"".join([_part(p) for p in parts]))
+
+    def seed_int(self) -> int:
+        """Return the 128-bit int that seeds this key's stream."""
+        hasher = _HASHER.copy()
+        hasher.update(self._path)
+        return int.from_bytes(hasher.digest(), "big")
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, StreamKey):
+            return NotImplemented
+        return self._path == other._path
+
+    def __hash__(self) -> int:
+        return hash(self._path)
+
+    def __repr__(self) -> str:
+        return f"StreamKey({', '.join(repr(p) for p in self._parts)})"

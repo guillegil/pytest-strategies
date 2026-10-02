@@ -98,7 +98,7 @@ src/pytest_strategy/
 ├── py.typed             # PEP 561 marker: type checkers use the package's annotations
 └── _*.py                # Other internal helpers (introspection, test IDs, record mode,
                          # StrategyOptions, factory calls, runtime state, warning categories,
-                         # the value encoding of schema 1 documents)
+                         # the value encoding of schema 1 documents, the random stream keys)
 ```
 
 ## Core Components
