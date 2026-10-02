@@ -145,6 +145,7 @@ class TestFactoryReference:
         assert by_object == by_name
 
     def test_partial_and_callable_object_ids_are_stable(self, pytester):
+        pytest.importorskip("xdist")
         pytester.makepyfile(test_ref="""
             import functools
 
@@ -711,6 +712,7 @@ class TestReporting:
         )
 
     def test_verbose_summary_under_xdist(self, pytester):
+        pytest.importorskip("xdist")
         pytester.makepyfile(test_report=self.SOURCE.replace("{condition}", "x >= 0"))
 
         result = pytester.runpytest_subprocess("-p", "no:cacheprovider", "-v", "-n", "2")
