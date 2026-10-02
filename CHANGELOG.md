@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- A `pytest.param(*values, marks=...)` directed or test vector is checked by the number of its values instead of the length of the `pytest.param` itself, which is always 3. Marked rows such as `pytest.param(1, 2, marks=pytest.mark.xfail)` now work in a strategy with two arguments (or one) and keep their marks, `pytest.param(1, 2)` in a strategy with three arguments fails when the `Parameter` is built, naming the vector, instead of with pytest's parametrize error, and `export_strategies()` lists the vector's values.
+
 ## [3.0.0] - 2026-09-30
 
 For the same `--rng-seed`, 3.0.0 generates the same values and test IDs as 2.0.0 for strategies that draw through the RNG types, so recorded seeds and node IDs keep working. The exception is values a strategy file draws when it is imported, which now come from a stream of the file's own (see Changed). What changes is where strategies are looked up, when strategy files run, and who owns the random state.

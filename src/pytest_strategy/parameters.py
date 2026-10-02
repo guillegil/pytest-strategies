@@ -4,12 +4,17 @@ import itertools
 import math
 import warnings
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
+
+import pytest
 
 from ._warnings import PytestStrategiesWarning
 from .rng import RNGValueError, SequenceLike, Series
 from .test_args import TestArg
+
+# pytest.param() returns a ParameterSet (a NamedTuple), which pytest does not export
+_ParameterSet = type(pytest.param())
 
 
 def _as_vector(values: Any) -> tuple[Any, ...]:
@@ -21,6 +26,16 @@ def _as_vector(values: Any) -> tuple[Any, ...]:
     pytest.param(...), is kept as it is.
     """
     return values if isinstance(values, tuple) else tuple(values)
+
+
+def _vector_values(vector: Sequence[Any]) -> Sequence[Any]:
+    """
+    Return the values of a directed or test vector.
+
+    A pytest.param(*values, marks=..., id=...) vector is a ParameterSet, a tuple of
+    (values, marks, id), so its length and items are those of its values.
+    """
+    return vector.values if isinstance(vector, _ParameterSet) else vector
 
 
 class Parameter:
@@ -51,8 +66,11 @@ class Parameter:
 
         Args:
             *test_args: Variable number of TestArg instances
-            directed_vectors: Dictionary mapping vector names to value tuples
-            test_vectors: Dictionary mapping test vector names to value tuples (for test mode)
+            directed_vectors: Dictionary mapping vector names to value tuples. A
+                pytest.param(*values, marks=...) vector keeps its marks (and id) on
+                its row, and its values are counted against the test args.
+            test_vectors: Dictionary mapping test vector names to value tuples (for test
+                mode), or pytest.param(*values, marks=...) as for directed_vectors
             always_include_directed: If True, directed vectors are included in "mixed" mode
             vector_constraints: List of functions that validate entire parameter vectors
             max_retries: Maximum attempts to satisfy vector_constraints before raising (>= 1).
@@ -143,10 +161,10 @@ class Parameter:
         """
         expected_len = len(self.test_args)
         for name, vector in self.directed_vectors.items():
-            if len(vector) != expected_len:
+            count = len(_vector_values(vector))
+            if count != expected_len:
                 raise ValueError(
-                    f"Directed vector '{name}' has {len(vector)} values, "
-                    f"expected {expected_len}"
+                    f"Directed vector '{name}' has {count} values, expected {expected_len}"
                 )
 
     def _validate_test_vectors(self) -> None:
@@ -158,9 +176,10 @@ class Parameter:
         """
         expected_len = len(self.test_args)
         for name, vector in self.test_vectors.items():
-            if len(vector) != expected_len:
+            count = len(_vector_values(vector))
+            if count != expected_len:
                 raise ValueError(
-                    f"Test vector '{name}' has {len(vector)} values, " f"expected {expected_len}"
+                    f"Test vector '{name}' has {count} values, " f"expected {expected_len}"
                 )
 
     def _validate_vector(
@@ -210,7 +229,8 @@ class Parameter:
 
         Args:
             name: Unique name for the vector
-            values: Tuple of values matching test_args length
+            values: Tuple of values matching test_args length, or a
+                pytest.param(*values, marks=...) whose values match it
 
         Raises:
             ValueError: If vector length doesn't match test_args
@@ -218,8 +238,9 @@ class Parameter:
         Example:
             param.add_directed_vector("edge_case", (0, 100, "fast"))
         """
-        if len(values) != len(self.test_args):
-            raise ValueError(f"Vector must have {len(self.test_args)} values, got {len(values)}")
+        count = len(_vector_values(values))
+        if count != len(self.test_args):
+            raise ValueError(f"Vector must have {len(self.test_args)} values, got {count}")
         self.directed_vectors[name] = _as_vector(values)
 
     def remove_directed_vector(self, name: str) -> None:
@@ -242,7 +263,8 @@ class Parameter:
 
         Args:
             name: Unique name for the vector
-            values: Tuple of values matching test_args length
+            values: Tuple of values matching test_args length, or a
+                pytest.param(*values, marks=...) whose values match it
 
         Raises:
             ValueError: If vector length doesn't match test_args
@@ -250,8 +272,9 @@ class Parameter:
         Example:
             param.add_test_vector("test_case_1", (0, 100, "fast"))
         """
-        if len(values) != len(self.test_args):
-            raise ValueError(f"Vector must have {len(self.test_args)} values, got {len(values)}")
+        count = len(_vector_values(values))
+        if count != len(self.test_args):
+            raise ValueError(f"Vector must have {len(self.test_args)} values, got {count}")
         self.test_vectors[name] = _as_vector(values)
 
     def remove_test_vector(self, name: str) -> None:
@@ -353,10 +376,12 @@ class Parameter:
         return {
             "arguments": [arg.to_dict() for arg in self.test_args],
             "directed_vectors": {
-                name: [str(v) for v in vector] for name, vector in self.directed_vectors.items()
+                name: [str(v) for v in _vector_values(vector)]
+                for name, vector in self.directed_vectors.items()
             },
             "test_vectors": {
-                name: [str(v) for v in vector] for name, vector in self.test_vectors.items()
+                name: [str(v) for v in _vector_values(vector)]
+                for name, vector in self.test_vectors.items()
             },
             "always_include_directed": self.always_include_directed,
             "has_constraints": bool(self.vector_constraints),

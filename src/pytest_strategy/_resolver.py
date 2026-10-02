@@ -24,14 +24,11 @@ from ._introspection import detect_dataclass_param, lazy_signature, validate_sig
 from ._registry import _describe_factory, display_path, factory_source
 from ._runtime import Resolution, runtime
 from ._warnings import PytestStrategiesWarning
-from .parameters import Parameter
+from .parameters import Parameter, _ParameterSet
 from .rng import RNG, SequenceLike
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-# pytest.param() returns a ParameterSet (a NamedTuple), which pytest does not export
-_ParameterSet = type(pytest.param())
 
 # Default for the strategies_max_exhaustive ini option
 DEFAULT_MAX_EXHAUSTIVE = 100_000
