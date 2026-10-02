@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+The APIs deprecated in 3.0, without warnings left behind:
+- Factories that return an `(argnames, samples)` tuple. The tests that use such a strategy fail collection with `Strategy 'name' returned an (argnames, samples) tuple (factory: file:line:name)`, which says what to return instead: a `Parameter`, with one `TestArg` per argument and the fixed rows as `directed_vectors`. A factory that returns anything else that is not a `Parameter` fails with `must return a Parameter, got NoneType (did the factory forget to return?)`, and `export_strategies()` reports both as errors instead of a `legacy_tuple` entry.
+- `RNG.set_max_retries()`. Use `Parameter(max_retries=...)`; the draws a `predicate=` gets stay fixed at 100.
+- `configure()`, which did nothing. Delete the call.
+- `Strategy.set_config()`. Delete the call: the plugin uses the config of the session that collects each test.
+- `TestArg(directed_values=..., test_values=..., always_include_directed=...)`, the `directed_values`, `test_values` and `has_directed_values` properties, and the `has_directed_values`, `has_test_values` and `always_include_directed` keys of `TestArg.to_dict()`. Passing them is a `TypeError`, and `TestArg("x")` without a value or an rng_type raises `ValueError: TestArg 'x' must have a value or an rng_type`. Use `Parameter(directed_vectors=..., test_vectors=..., always_include_directed=...)`. `TestArg.generate_samples(n)` stays: `[value]` for a static argument, n draws otherwise.
+
 ### Fixed
 - A `pytest.param(*values, marks=...)` directed or test vector is checked by the number of its values instead of the length of the `pytest.param` itself, which is always 3. Marked rows such as `pytest.param(1, 2, marks=pytest.mark.xfail)` now work in a strategy with two arguments (or one) and keep their marks, `pytest.param(1, 2)` in a strategy with three arguments fails when the `Parameter` is built, naming the vector, instead of with pytest's parametrize error, and `export_strategies()` lists the vector's values.
 

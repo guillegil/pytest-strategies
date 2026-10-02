@@ -219,7 +219,7 @@ arg3 = TestArg(
 
 # Generate values
 value = arg1.generate()                    # Single value
-samples = arg1.generate_samples(10)        # 10 samples
+samples = arg1.generate_samples(10)        # 10 draws ([value] for a static argument)
 ```
 
 **Key Features:**
@@ -233,13 +233,12 @@ samples = arg1.generate_samples(10)        # 10 samples
 - `description` - Human-readable description
 - `type` - Python type
 - `is_static` - Whether it has a fixed value
-- `has_directed_values` - Whether it has directed values
 
 **Inside a `Parameter`:** a strategy uses each argument's `rng_type` (or static
 `value`) and its `validator`. Define edge cases as the `Parameter`'s
-`directed_vectors` and `test_vectors`. (The argument-level `directed_values` and
-`test_values` are deprecated and removed in 4.0: a `Parameter` never turned them
-into vectors.) The validator runs on random draws,
+`directed_vectors` and `test_vectors`. (The argument-level `directed_values`,
+`test_values` and `always_include_directed`, deprecated in 3.0, are removed in 4.0:
+a `Parameter` never turned them into vectors.) The validator runs on random draws,
 static values and `Series`/`RNGSequence` values, but not on directed or test
 vectors. A value that fails it stops collection with a `ValueError` and is not
 redrawn, so use a predicate on the RNG type to filter values instead.

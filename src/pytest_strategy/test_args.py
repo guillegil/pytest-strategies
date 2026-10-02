@@ -1,7 +1,6 @@
 # test_args.py
 
 import builtins
-import warnings
 from collections.abc import Callable
 from typing import Any
 
@@ -13,7 +12,9 @@ class TestArg:
     A TestArg can be:
     - Static (fixed value)
     - Random (generated using an RNG type)
-    - Directed (from a predefined list of values)
+
+    Fixed rows of several arguments are the Parameter's directed_vectors and
+    test_vectors.
     """
 
     # Prevent pytest from collecting this class as a test
@@ -24,11 +25,7 @@ class TestArg:
         name: str,
         rng_type: Any = None,
         value: Any = None,
-        directed_values: list[Any] | None = None,
-        test_values: list[Any] | None = None,
         validator: Callable[[Any], bool] | None = None,
-        # Control
-        always_include_directed: bool = True,
         description: str = "",
     ) -> None:
         """
@@ -39,15 +36,10 @@ class TestArg:
             rng_type: RNG type for random generation (required if value is None)
             description: Human-readable description of the argument
             value: Single static value (for directed tests)
-            directed_values: Deprecated, removed in 4.0: Parameter does not use them.
-                Use Parameter(directed_vectors=...).
-            test_values: Deprecated, removed in 4.0: Parameter does not use them.
-                Use Parameter(test_vectors=...).
-            always_include_directed: If True, directed values are always included in samples
             validator: Optional function to validate generated values
 
         Raises:
-            ValueError: If neither value, rng_type, nor directed_values are provided
+            ValueError: If neither value nor rng_type is provided
 
         Examples:
             # Pure random
@@ -56,29 +48,15 @@ class TestArg:
             # Static value
             TestArg("count", value=0, description="Edge case")
         """
-        for option, given in (("directed_values", directed_values), ("test_values", test_values)):
-            if given is not None:
-                replacement = "directed_vectors" if option == "directed_values" else "test_vectors"
-                warnings.warn(
-                    f"TestArg({option}=...) is deprecated and will be removed in 4.0: strategies "
-                    f"do not use it. Use Parameter({replacement}=...) instead.",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
         self._name = name
         self._rng_type = rng_type
         self._description = description
         self._value = value
-        self._directed_values = directed_values or []
-        self._test_values = test_values or []
-        self._always_include_directed = always_include_directed
         self._validator = validator
 
-        # Validation: must have at least one way to produce values
-        if value is None and rng_type is None and not directed_values and not test_values:
-            raise ValueError(
-                f"TestArg '{name}' must have either a value, rng_type, directed_values, or test_values"
-            )
+        # Validation: must have one way to produce values
+        if value is None and rng_type is None:
+            raise ValueError(f"TestArg '{name}' must have a value or an rng_type")
 
     def generate(self) -> Any:
         """
@@ -88,16 +66,11 @@ class TestArg:
             Generated or static value
 
         Raises:
-            ValueError: If no rng_type is available for generation
             ValueError: If generated value fails validation
         """
         # If static value, return it
         if self._value is not None:
             return self._validate(self._value)
-
-        # If no RNG type, can't generate
-        if self._rng_type is None:
-            raise ValueError(f"Cannot generate value for '{self._name}' without rng_type")
 
         # Generate and validate
         value = self._rng_type.generate()
@@ -113,9 +86,6 @@ class TestArg:
             "name": self._name,
             "description": self._description,
             "has_static_value": self._value is not None,
-            "has_directed_values": bool(self._directed_values),
-            "has_test_values": bool(self._test_values),
-            "always_include_directed": self._always_include_directed,
         }
 
         if self._value is not None:
@@ -145,43 +115,28 @@ class TestArg:
 
     def generate_samples(self, n: int) -> list[Any]:
         """
-        Generate n samples, optionally including directed values.
+        Generate n samples.
 
         Args:
             n: Number of random samples to generate
 
         Returns:
-            List of samples. If always_include_directed is True and directed_values
-            exist, the list will contain directed values + n random samples.
-            If value is set (static), returns directed values or [value].
+            List of n generated values, or [value] for a static argument.
 
         Examples:
-            # With directed values and n=10
-            arg = TestArg("x", rng_type=RNGInteger(1, 100), directed_values=[0, 1])
-            samples = arg.generate_samples(10)  # Returns 12 samples: [0, 1, ...10 random...]
+            # Random, n=10
+            arg = TestArg("x", rng_type=RNGInteger(1, 100))
+            samples = arg.generate_samples(10)  # Returns 10 random values
 
             # Static value
             arg = TestArg("x", value=42)
             samples = arg.generate_samples(10)  # Returns [42]
         """
-        samples = []
-
-        # Add directed values if configured
-        if self._always_include_directed and self._directed_values:
-            samples.extend(self._directed_values)
-
-        # If we have a static value, just return it (with directed values if any)
+        # A static value is a single sample
         if self._value is not None:
-            if not samples:  # Only add static value if no directed values
-                samples.append(self._value)
-            return samples
+            return [self._value]
 
-        # Generate random samples
-        if self._rng_type:
-            for _ in range(n):
-                samples.append(self.generate())
-
-        return samples
+        return [self.generate() for _ in range(n)]
 
     def _validate(self, value: Any) -> Any:
         """
@@ -227,8 +182,6 @@ class TestArg:
             return python_type
         if self._value is not None:
             return type(self._value)
-        if self._directed_values:
-            return type(self._directed_values[0])
         return Any
 
     @property
@@ -237,24 +190,9 @@ class TestArg:
         return self._value is not None
 
     @property
-    def has_directed_values(self) -> bool:
-        """Check if this argument has directed test values"""
-        return bool(self._directed_values)
-
-    @property
     def rng_type(self) -> Any:
         """Get the RNG type for this argument"""
         return self._rng_type
-
-    @property
-    def directed_values(self) -> list[Any]:
-        """Get list of directed values."""
-        return self._directed_values
-
-    @property
-    def test_values(self) -> list[Any]:
-        """Get list of test values."""
-        return self._test_values
 
     # ====
     # String Representation
@@ -269,9 +207,6 @@ class TestArg:
 
         if self._rng_type:
             parts.append(f"type={self.type.__name__}")
-
-        if self._directed_values:
-            parts.append(f"directed={len(self._directed_values)}")
 
         return f"TestArg({', '.join(parts)})"
 

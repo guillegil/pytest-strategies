@@ -10,7 +10,7 @@ class TestStrategyRuntimeStack:
         rt = StrategyRuntime()
         assert rt.current is None
         rt.push("cfg1")
-        assert rt.config == "cfg1"
+        assert rt.current.config == "cfg1"
         rt.pop()
         assert rt.current is None
 
@@ -26,17 +26,11 @@ class TestStrategyRuntimeStack:
         rt.push("inner")
         # Inner session starts fresh and shadows the outer config.
         assert rt.strategies_loaded is False
-        assert rt.config == "inner"
+        assert rt.current.config == "inner"
         rt.pop()
         # Outer state is restored intact.
         assert rt.strategies_loaded is True
-        assert rt.config == "outer"
-
-    def test_config_setter_with_empty_stack_does_not_leak(self):
-        rt = StrategyRuntime()
-        rt.config = "stray"  # must NOT push an unpoppable state
-        assert rt.current is None
-        assert rt.config is None
+        assert rt.current.config == "outer"
 
     def test_strategies_loaded_setter_with_empty_stack_is_noop(self):
         rt = StrategyRuntime()

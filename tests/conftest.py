@@ -21,7 +21,6 @@ def _restore_strategy_state():
     seed = RNG.get_seed()
     generator_state = RNG.generator().getstate()
     random_state = random.getstate()
-    max_retries = RNG._max_retries
     try:
         yield
     finally:
@@ -29,4 +28,3 @@ def _restore_strategy_state():
         RNG._seed = seed
         RNG.generator().setstate(generator_state)
         random.setstate(random_state)
-        RNG._max_retries = max_retries

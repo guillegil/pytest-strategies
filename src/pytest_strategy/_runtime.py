@@ -142,19 +142,6 @@ class StrategyRuntime:
     # Convenience accessors that operate on the active session ----------- #
 
     @property
-    def config(self) -> pytest.Config | None:
-        return self.current.config if self.current else None
-
-    @config.setter
-    def config(self, value: pytest.Config | None) -> None:
-        # No-op when there is no active session. The session's config is already
-        # captured by push(config); a standalone set_config() with an empty stack
-        # must not push (it would never be popped — a leak). Guarded like
-        # strategies_loaded below.
-        if self.current is not None:
-            self.current.config = value
-
-    @property
     def strategies_loaded(self) -> bool:
         return self.current.strategies_loaded if self.current else False
 

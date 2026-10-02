@@ -14,7 +14,7 @@ import os
 import warnings
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from typing import Any, NamedTuple, cast
 
 import pytest
 
@@ -26,9 +26,6 @@ from ._runtime import Resolution, runtime
 from ._warnings import PytestStrategiesWarning
 from .parameters import Parameter, _ParameterSet
 from .rng import RNG, SequenceLike
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
 
 # Default for the strategies_max_exhaustive ini option
 DEFAULT_MAX_EXHAUSTIVE = 100_000
@@ -42,14 +39,12 @@ class Parametrization(NamedTuple):
     ids: list[str]
 
 
-def _id_row(sample: Any, single: bool) -> Any:
-    """Return the row generate_test_ids expects for a sample passed to parametrize."""
+def _id_row(sample: Any) -> Any:
+    """Return the values generate_test_ids builds the ID of a generated row from."""
     if isinstance(sample, _ParameterSet):
         # Build the ID from the values; pytest still prefers an explicit id
         return sample.values
-    # generate_test_ids unwraps a single-argument row once, so re-wrap the value:
-    # a tuple value then keeps its full ID
-    return (sample,) if single else sample
+    return sample
 
 
 def _skipped_param(reason: str, width: int) -> Any:
@@ -368,19 +363,28 @@ def _check_size(
     )
 
 
-def _warn_legacy(name: str, factory: Callable[..., Any]) -> None:
-    """Warn that a factory returned the deprecated (argnames, samples) tuple, at the factory."""
-    # The path as spelled, not normalized: warnings report and filter by it
-    filename, _, line = factory_source(factory)
-    message = (
-        f"Strategy '{name}' returns an (argnames, samples) tuple, which is deprecated and "
-        "will stop working in 4.0; return a Parameter instead "
-        f"(factory: {_describe_factory(factory)})"
+def check_factory_result(name: str, factory: Callable[..., Any], result: Any) -> Parameter:
+    """
+    Return what a strategy factory returned, which must be a :class:`Parameter`.
+
+    Raises:
+        ValueError: For anything else. An ``(argnames, samples)`` tuple, the form
+            3.0 deprecated, gets a message that says what to return instead.
+    """
+    if isinstance(result, Parameter):
+        return result
+    if isinstance(result, tuple) and len(result) == 2:
+        raise ValueError(
+            f"Strategy '{name}' returned an (argnames, samples) tuple "
+            f"(factory: {_describe_factory(factory)}). Returning a tuple was deprecated in "
+            "3.0 and is no longer supported in 4.0: return a Parameter, with one TestArg "
+            "per argument and fixed rows as directed_vectors; a fixed table with no random "
+            "arguments fits @pytest.mark.parametrize better."
+        )
+    hint = " (did the factory forget to return?)" if result is None else ""
+    raise ValueError(
+        f"Strategy '{name}' must return a Parameter, got {type(result).__name__}{hint}"
     )
-    if filename is None or line is None:
-        warnings.warn(message, DeprecationWarning, stacklevel=3)
-    else:
-        warnings.warn_explicit(message, DeprecationWarning, filename, line)
 
 
 def build_parametrization(
@@ -414,28 +418,21 @@ def build_parametrization(
     vector_name = config.getoption("vector_name") if config else None
     vector_index = config.getoption("vector_index") if config else None
 
-    # Compute the legacy-safe nsamples to pass to the factory.
-    # The factory must always receive an int (FR-8: never None), or the string
-    # "auto" when --nsamples=auto is given.
-    # At this point we don't yet know whether the factory returns a Parameter
-    # or a legacy tuple, so we use the CLI value if explicit, otherwise 10 as
-    # a safe sentinel. The real per-strategy override is applied AFTER the
-    # factory returns and we confirm it's a Parameter instance.
+    # The factory receives the --nsamples value, "auto", or 10 without the option,
+    # never None (FR-8). The count the rows use is resolved below, once the
+    # Parameter's own nsamples is known.
     if cli_nsamples == "auto":
         factory_nsamples: int | str = "auto"
     elif cli_nsamples is not None:
         factory_nsamples = int(cli_nsamples)
     else:
-        # CLI absent: pass 10 to the factory so legacy paths never see None.
-        # For Parameter-based strategies the true effective count is resolved
-        # below once we have access to param.nsamples.
         factory_nsamples = 10
 
     # Restart the RNG generator on this strategy and test's own stream
     RNG.refresh_seed(key=f"{name}:{_test_location(test_fn, config)}::{test_fn.__qualname__}")
 
     # Call the factory function the way its signature accepts nsamples
-    result = call_factory(name, factory, factory_nsamples)
+    param = check_factory_result(name, factory, call_factory(name, factory, factory_nsamples))
 
     resolution = Resolution(strategy=name, where=_where(factory, config))
 
@@ -443,123 +440,96 @@ def build_parametrization(
     # skipped row with this reason instead of the generated vectors
     skip_reason: str | None = None
 
-    # Detect if result is a Parameter instance or tuple
-    if isinstance(result, Parameter):
-        # NEW MODE: Parameter-based strategy
-        param = result
-
-        # Resolve the effective nsamples with full precedence (FR-3):
-        #   1. CLI "auto" → exhaustive (already handled below)
-        #   2. CLI explicit int → use it
-        #   3. param.nsamples set → use it
-        #   4. fallback → 10
-        if cli_nsamples == "auto":
-            effective_nsamples: int | str = "auto"
-            source = "--nsamples"
-        elif cli_nsamples is not None:
-            effective_nsamples = int(cli_nsamples)
-            source = "--nsamples"
-        elif param.nsamples is not None:
-            effective_nsamples = param.nsamples
-            source = "Parameter(nsamples=)"
-        else:
-            effective_nsamples = 10
-            source = "default"
-
-        # "auto" enumerates the Series/RNGSequence args. A strategy without any has
-        # nothing to enumerate, so it falls back to the finite count instead of failing.
-        # param.nsamples may itself be "auto" (e.g. a factory forwarding its nsamples),
-        # so only an int count is used; anything else falls back to 10.
-        if effective_nsamples == "auto" and not any(
-            isinstance(arg.rng_type, SequenceLike) for arg in param.test_args
-        ):
-            if isinstance(param.nsamples, int):
-                effective_nsamples, source = param.nsamples, "Parameter(nsamples=)"
-            else:
-                effective_nsamples, source = 10, "default"
-            source += ", no Series/RNGSequence for auto"
-        resolution.nsamples, resolution.source = effective_nsamples, source
-
-        filtered = vector_name is not None or vector_index is not None
-        if not filtered and vector_mode not in ("test", "directed_only"):
-            if effective_nsamples == "auto":
-                _check_size(name, param, 1, "--nsamples=auto", _max_exhaustive(param, config))
-            elif param.per_sequence_samples and isinstance(effective_nsamples, int):
-                _check_size(
-                    name,
-                    param,
-                    effective_nsamples,
-                    "per_sequence_samples=True",
-                    _max_exhaustive(param, config),
-                )
-
-        # Generate samples using Parameter's generate_vectors with CLI options
-        try:
-            # Warnings raised while generating name the strategy and the test
-            with _attributed_warnings(name, test_fn):
-                if effective_nsamples == "auto":
-                    # "auto" replaces only the random samples: CLI filters, vector modes
-                    # and directed vectors apply exactly as they do for a finite count.
-                    samples = param.generate_vectors(
-                        n=0,
-                        mode=vector_mode,
-                        filter_by_name=vector_name,
-                        filter_by_index=vector_index,
-                    )
-                    if not filtered and vector_mode not in ("test", "directed_only"):
-                        samples.extend(param.generate_exhaustive())
-                else:
-                    assert isinstance(effective_nsamples, int)
-                    samples = param.generate_vectors(
-                        n=effective_nsamples,
-                        mode=vector_mode,
-                        filter_by_name=vector_name,
-                        filter_by_index=vector_index,
-                    )
-        except (KeyError, IndexError) as e:
-            # If filtering by name (KeyError) or index (IndexError) and the vector
-            # doesn't exist, return empty samples
-            # This allows CLI filtering to work gracefully across multiple strategies
-            if filtered:
-                samples = []
-                # The plugin reports a filter that no strategy in the run matches
-                runtime.record_vector_filter(name, False, list(param.directed_vectors))
-            else:
-                raise ValueError(f"Error generating samples for strategy '{name}': {e}") from e
-        except Exception as e:
-            raise ValueError(f"Error generating samples for strategy '{name}': {e}") from e
-        else:
-            if filtered:
-                runtime.record_vector_filter(name, True)
-            # The generators return nothing for a skipped Parameter. A vector filter
-            # that names none of its vectors keeps the empty set, as for any strategy.
-            skip_reason = param.skip_reason
-
-        _count_rows(resolution, param, samples, vector_mode, filtered)
-
-        # Get argument names from Parameter
-        argnames: Sequence[str] = param.arg_names
-
+    # Resolve the effective nsamples with full precedence (FR-3):
+    #   1. CLI "auto" → exhaustive (already handled below)
+    #   2. CLI explicit int → use it
+    #   3. param.nsamples set → use it
+    #   4. fallback → 10
+    if cli_nsamples == "auto":
+        effective_nsamples: int | str = "auto"
+        source = "--nsamples"
+    elif cli_nsamples is not None:
+        effective_nsamples = int(cli_nsamples)
+        source = "--nsamples"
+    elif param.nsamples is not None:
+        effective_nsamples = param.nsamples
+        source = "Parameter(nsamples=)"
     else:
-        # LEGACY MODE: Tuple-based strategy (backward compatibility)
-        if not isinstance(result, tuple) or len(result) != 2:
-            raise ValueError(
-                f"Strategy '{name}' must return either a Parameter instance "
-                f"or a tuple (argnames, samples), got {type(result).__name__}"
+        effective_nsamples = 10
+        source = "default"
+
+    # "auto" enumerates the Series/RNGSequence args. A strategy without any has
+    # nothing to enumerate, so it falls back to the finite count instead of failing.
+    # param.nsamples may itself be "auto" (e.g. a factory forwarding its nsamples),
+    # so only an int count is used; anything else falls back to 10.
+    if effective_nsamples == "auto" and not any(
+        isinstance(arg.rng_type, SequenceLike) for arg in param.test_args
+    ):
+        if isinstance(param.nsamples, int):
+            effective_nsamples, source = param.nsamples, "Parameter(nsamples=)"
+        else:
+            effective_nsamples, source = 10, "default"
+        source += ", no Series/RNGSequence for auto"
+    resolution.nsamples, resolution.source = effective_nsamples, source
+
+    filtered = vector_name is not None or vector_index is not None
+    if not filtered and vector_mode not in ("test", "directed_only"):
+        if effective_nsamples == "auto":
+            _check_size(name, param, 1, "--nsamples=auto", _max_exhaustive(param, config))
+        elif param.per_sequence_samples and isinstance(effective_nsamples, int):
+            _check_size(
+                name,
+                param,
+                effective_nsamples,
+                "per_sequence_samples=True",
+                _max_exhaustive(param, config),
             )
-        _warn_legacy(name, factory)
 
-        argnames, samples = result
+    # Generate samples using Parameter's generate_vectors with CLI options
+    try:
+        # Warnings raised while generating name the strategy and the test
+        with _attributed_warnings(name, test_fn):
+            if effective_nsamples == "auto":
+                # "auto" replaces only the random samples: CLI filters, vector modes
+                # and directed vectors apply exactly as they do for a finite count.
+                samples = param.generate_vectors(
+                    n=0,
+                    mode=vector_mode,
+                    filter_by_name=vector_name,
+                    filter_by_index=vector_index,
+                )
+                if not filtered and vector_mode not in ("test", "directed_only"):
+                    samples.extend(param.generate_exhaustive())
+            else:
+                assert isinstance(effective_nsamples, int)
+                samples = param.generate_vectors(
+                    n=effective_nsamples,
+                    mode=vector_mode,
+                    filter_by_name=vector_name,
+                    filter_by_index=vector_index,
+                )
+    except (KeyError, IndexError) as e:
+        # If filtering by name (KeyError) or index (IndexError) and the vector
+        # doesn't exist, return empty samples
+        # This allows CLI filtering to work gracefully across multiple strategies
+        if filtered:
+            samples = []
+            # The plugin reports a filter that no strategy in the run matches
+            runtime.record_vector_filter(name, False, list(param.directed_vectors))
+        else:
+            raise ValueError(f"Error generating samples for strategy '{name}': {e}") from e
+    except Exception as e:
+        raise ValueError(f"Error generating samples for strategy '{name}': {e}") from e
+    else:
+        if filtered:
+            runtime.record_vector_filter(name, True)
+        # The generators return nothing for a skipped Parameter. A vector filter
+        # that names none of its vectors keeps the empty set, as for any strategy.
+        skip_reason = param.skip_reason
 
-        # Materialize the samples: a generator would otherwise be consumed by ID
-        # generation before pytest.mark.parametrize sees it
-        samples = list(samples)
-        resolution.random = len(samples)
-        resolution.nsamples, resolution.source = factory_nsamples, "legacy tuple"
+    _count_rows(resolution, param, samples, vector_mode, filtered)
 
-        # Convert a string of argnames to a tuple, split on commas as pytest does
-        if isinstance(argnames, str):
-            argnames = tuple(n.strip() for n in argnames.split(",") if n.strip())
+    argnames = param.arg_names
 
     runtime.record_resolution(resolution)
 
@@ -624,6 +594,11 @@ def build_parametrization(
         if skip_reason is not None:
             samples = [_skipped_param(skip_reason, len(argnames))]
 
+        # Generate test IDs for better test output readability, from the rows' values.
+        # generate_test_ids unwraps a single-argument row once, so a tuple value
+        # keeps its full ID.
+        ids = generate_test_ids(argnames, [_id_row(s) for s in samples])
+
         # For single parameters, unwrap the tuples. A pytest.param() sample is a tuple
         # too (ParameterSet); it is passed through unchanged to keep its marks and id.
         if len(argnames) == 1:
@@ -631,10 +606,6 @@ def build_parametrization(
                 s[0] if isinstance(s, tuple) and not isinstance(s, _ParameterSet) else s
                 for s in samples
             ]
-
-        # Generate test IDs for better test output readability, from the same values
-        # passed to parametrize
-        ids = generate_test_ids(argnames, [_id_row(s, len(argnames) == 1) for s in samples])
         samples, ids = _unique_ids(samples, ids, config)
 
         return Parametrization(argstr, samples, ids)

@@ -179,17 +179,3 @@ def get_strategy_info(name: str) -> dict[str, object]:
         "factory": Strategy._registry[name],
         "registered": True,
     }
-
-
-def configure(
-    validate_signatures: bool = True,  # noqa: ARG001 - kept for 2.x callers
-    default_nsamples: int = 10,  # noqa: ARG001
-) -> None:
-    """Deprecated: this function never did anything, and will be removed in 4.0."""
-    import warnings
-
-    warnings.warn(
-        "pytest_strategy.configure() does nothing and will be removed in 4.0",
-        DeprecationWarning,
-        stacklevel=2,
-    )

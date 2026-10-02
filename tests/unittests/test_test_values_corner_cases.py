@@ -2,8 +2,6 @@
 Corner case tests for test_values feature.
 """
 
-import pytest
-
 from pytest_strategy import Parameter, RNGInteger, TestArg
 
 
@@ -28,16 +26,6 @@ class TestTestValuesCornerCases:
         # Constraints are only applied during generate_vector() for random generation
         vectors = param.generate_vectors(n=0, mode="test")
         assert len(vectors) == 2
-
-    def test_test_values_only_no_rng_type(self):
-        """Test TestArg with only test_values and no rng_type."""
-        arg = TestArg("x", test_values=[1, 2, 3])
-        assert arg.test_values == [1, 2, 3]
-        assert arg.rng_type is None
-
-        # Should raise error when trying to generate since no rng_type
-        with pytest.raises(ValueError, match="Cannot generate value"):
-            arg.generate()
 
     def test_mixed_test_and_directed_vectors(self):
         """Test Parameter with both test and directed vectors."""

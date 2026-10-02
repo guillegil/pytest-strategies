@@ -458,21 +458,6 @@ class TestSingleArgumentIds:
         # Repeated rows are suffixed as pytest would, so strict IDs accept them
         assert ids == ["pt=(7, 8)0", "pt=(7, 8)1"]
 
-    def test_legacy_one_tuple_rows(self):
-        _, samples, ids = _resolve(lambda nsamples: (("x",), [(1,), (2,)]), ["x"])
-        assert samples == [1, 2]
-        assert ids == ["x=1", "x=2"]
-
-    def test_legacy_bare_values(self):
-        _, samples, ids = _resolve(lambda nsamples: ("x", [1, "a"]), ["x"])
-        assert samples == [1, "a"]
-        assert ids == ["x=1", "x='a'"]
-
-    def test_legacy_tuple_value_in_one_tuple_row(self):
-        _, samples, ids = _resolve(lambda nsamples: (("x",), [((1, 2),)]), ["x"])
-        assert samples == [(1, 2)]
-        assert ids == ["x=(1, 2)"]
-
 
 # ---------------------------------------------------------------------------
 # pytest.param vectors: marks and ids are kept, IDs are built from the values
@@ -522,42 +507,6 @@ class TestPytestParamVectors:
         # The row keeps its marks; its ids entry, which pytest ignores, is unchanged
         assert samples == [1, pytest.param(2, id="x=1_1", marks=xfail)]
         assert ids == ["x=1_0", "x=2"]
-
-
-# ---------------------------------------------------------------------------
-# Legacy tuple strategies: comma argnames and generators
-# ---------------------------------------------------------------------------
-
-
-class TestLegacyTupleStrategies:
-    """Legacy (argnames, samples) strategies behave like pytest.mark.parametrize."""
-
-    @pytest.mark.parametrize("argnames", ["x,y", "x, y", " x , y "])
-    def test_comma_separated_argnames(self, argnames):
-        argstr, samples, ids = _resolve(
-            lambda nsamples: (argnames, [(1, 2), (3, 4)]), ["x", "y"], validate=True
-        )
-        assert argstr == "x,y"
-        assert samples == [(1, 2), (3, 4)]
-        assert ids == ["x=1,y=2", "x=3,y=4"]
-
-    def test_single_string_argname_stays_one_name(self):
-        argstr, samples, ids = _resolve(lambda nsamples: ("x", [(1,), (2,)]), ["x"], validate=True)
-        assert argstr == "x"
-        assert samples == [1, 2]
-        assert ids == ["x=1", "x=2"]
-
-    def test_generator_samples_multi_arg(self):
-        _, samples, ids = _resolve(
-            lambda nsamples: (("a", "b"), ((i, i + 1) for i in range(3))), ["a", "b"]
-        )
-        assert samples == [(0, 1), (1, 2), (2, 3)]
-        assert ids == ["a=0,b=1", "a=1,b=2", "a=2,b=3"]
-
-    def test_generator_samples_single_arg(self):
-        _, samples, ids = _resolve(lambda nsamples: ("a", (i for i in range(3))), ["a"])
-        assert samples == [0, 1, 2]
-        assert ids == ["a=0", "a=1", "a=2"]
 
 
 # ---------------------------------------------------------------------------

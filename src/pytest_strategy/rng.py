@@ -4,7 +4,6 @@ import builtins
 import math
 import random
 import time
-import warnings
 from collections.abc import Callable, Mapping, Sequence
 from enum import Enum
 from typing import Any, Generic, TypeVar, cast
@@ -28,6 +27,7 @@ class RNG:
     """
 
     _seed = time.time_ns()
+    # The draws an RNG type's predicate= gets before RNGValueError (fixed)
     _max_retries = 100
     _generator = random.Random(_seed)
 
@@ -77,23 +77,6 @@ class RNG:
             # A str seed is hashed with SHA-512, so it is stable across processes
             # (unlike hash(), which is salted per process).
             RNG._generator.seed(f"{RNG._seed}:{key}")
-
-    @staticmethod
-    def set_max_retries(retries: int) -> None:
-        """
-        Deprecated: set the number of draws the ``predicate=`` of an RNG type gets.
-
-        Use ``Parameter(max_retries=...)``, which bounds the draws for the
-        strategy's vector constraints, or a predicate that accepts more values.
-        Removed in 4.0.
-        """
-        warnings.warn(
-            "RNG.set_max_retries() is deprecated and will be removed in 4.0; "
-            "use Parameter(max_retries=...)",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        RNG._max_retries = retries
 
     # ====
     # Internal Helper

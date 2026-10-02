@@ -228,41 +228,6 @@ class TestPytestParamVectorsIntegration:
         )
 
 
-class TestLegacyTupleStrategiesIntegration:
-    """Legacy (argnames, samples) strategies behave like pytest.mark.parametrize."""
-
-    def test_comma_separated_argnames(self, pytester):
-        pytester.makepyfile(test_fix_legacy_csv="""
-            from pytest_strategy import Strategy
-
-            @Strategy.register("fix_legacy_csv")
-            def csv(nsamples):
-                return "x, y", [(1, 2), (3, 4)]
-
-            @Strategy.strategy("fix_legacy_csv")
-            def test_csv(x, y):
-                assert y == x + 1
-            """)
-        result = pytester.runpytest("-v")
-        result.assert_outcomes(passed=2)
-        result.stdout.fnmatch_lines(["*test_csv[[]x=1,y=2[]] PASSED*"])
-
-    def test_generator_samples(self, pytester):
-        pytester.makepyfile(test_fix_legacy_gen="""
-            from pytest_strategy import Strategy
-
-            @Strategy.register("fix_legacy_gen")
-            def gen(nsamples):
-                return ("a", "b"), ((i, i + 1) for i in range(3))
-
-            @Strategy.strategy("fix_legacy_gen")
-            def test_gen(a, b):
-                assert b == a + 1
-            """)
-        result = pytester.runpytest()
-        result.assert_outcomes(passed=3)
-
-
 class TestDuplicateRegistrationIntegration:
     """A strategy name taken over by a different function is reported."""
 

@@ -18,7 +18,6 @@ from ._introspection import PYTEST_FIXTURES as _PYTEST_FIXTURES
 from ._registry import Factory, RegistryView, _describe_factory, registry
 from ._runtime import runtime
 from ._warnings import PytestStrategiesWarning
-from .parameters import Parameter
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 
@@ -69,11 +68,10 @@ def strategy(name: str | Factory, validate_signature: bool = True) -> Callable[[
             (registered or not)
         validate_signature: Check that the test takes the strategy's arguments
 
-    The strategy is resolved when pytest collects the test. A factory can return
-    a :class:`Parameter` (recommended) or, deprecated, a ``(argnames, samples)``
-    tuple. The test takes the strategy's arguments by name, or one parameter
-    annotated with a dataclass whose fields are those arguments; any other
-    parameter is a fixture.
+    The strategy is resolved when pytest collects the test, and its factory must
+    return a :class:`Parameter`. The test takes the strategy's arguments by name,
+    or one parameter annotated with a dataclass whose fields are those arguments;
+    any other parameter is a fixture.
 
     Usage::
 
@@ -112,7 +110,7 @@ def export_strategies(format: str = "json") -> str:
     """
     import json
 
-    from ._resolver import call_factory
+    from ._resolver import call_factory, check_factory_result
 
     if format != "json":
         raise ValueError(f"Unsupported format: {format}")
@@ -123,15 +121,8 @@ def export_strategies(format: str = "json") -> str:
         factory = registry.registrations(name)[-1].factory
         try:
             # Instantiate parameter with dummy count to get metadata
-            # We handle both tuple-returning and Parameter-returning factories
-            result = call_factory(name, factory, 1)
-
-            if isinstance(result, Parameter):
-                strategies_data[name] = result.to_dict()
-            else:
-                # Legacy tuple support (argnames, values)
-                argnames, _ = result
-                strategies_data[name] = {"type": "legacy_tuple", "argnames": argnames}
+            param = check_factory_result(name, factory, call_factory(name, factory, 1))
+            strategies_data[name] = param.to_dict()
         except Exception as e:
             strategies_data[name] = {"error": f"Failed to inspect strategy: {str(e)}"}
 
@@ -155,14 +146,3 @@ class Strategy:
     register = staticmethod(register)
     strategy = staticmethod(strategy)
     export_strategies = staticmethod(export_strategies)
-
-    @staticmethod
-    def set_config(config: pytest.Config) -> None:
-        """Deprecated: the plugin passes each test's config to its strategy itself."""
-        warnings.warn(
-            "Strategy.set_config() is deprecated and will be removed in 4.0: strategies are "
-            "resolved with the config of the session that collects the test.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        runtime.config = config

@@ -80,7 +80,7 @@ same module object the plugin loaded.
 - It may declare `nsamples` (an int, or `"auto"` under `--nsamples=auto`) and
   `ctx` (the result of the context hook, see below). Both are optional. It rarely
   needs `nsamples`: return a `Parameter` and the plugin generates the rows.
-- It returns a `Parameter`. Returning an `(argnames, samples)` tuple is deprecated.
+- It returns a `Parameter`. Returning an `(argnames, samples)` tuple fails since 4.0.
 - The test must take every `TestArg` name as a parameter (checked at collection;
   `@strategy(..., validate_signature=False)` turns the check off). Its other
   parameters are fixtures, as usual. Or use dataclass mode (see Traps).
@@ -309,7 +309,7 @@ To reproduce a failure:
 - **`--vector-name`/`--vector-index` select directed vectors only.** Strategies
   without that vector yield an empty parameter set (their tests are skipped). If no
   strategy has it, the run stops with a usage error.
-- **Deprecated, removed in 4.0:** tuple-returning factories,
+- **Removed in 4.0:** tuple-returning factories,
   `TestArg(directed_values=..., test_values=...)` (use `Parameter(directed_vectors=,
   test_vectors=)`), `RNG.set_max_retries()` (use `Parameter(max_retries=)`),
   `configure()` and `Strategy.set_config()`. `Strategy.register`/`Strategy.strategy`

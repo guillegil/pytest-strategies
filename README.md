@@ -111,7 +111,7 @@ def math_strategy(nsamples: int):
 
 The factory is called once for each test that uses the strategy, when pytest collects that test. It receives the run's sample count as `nsamples`: an integer (the `--nsamples` value, or 10 when the option is not given), or the string `"auto"` under `--nsamples=auto`. The factory may take it as a keyword or positional parameter, or take no parameters at all; the plugin reads the signature to decide how to call it. A factory that returns a `Parameter` does not need to use `nsamples`, because the plugin generates the vectors itself.
 
-A factory should return a `Parameter`. Returning an `(argnames, samples)` tuple, the 1.x form, still works but is deprecated: it emits a `DeprecationWarning` that points at the factory, and it will be removed in 4.0.
+A factory must return a `Parameter`. Returning an `(argnames, samples)` tuple, the 1.x form deprecated in 3.0, fails the collection of the tests that use the strategy since 4.0: give the `Parameter` one `TestArg` per argument and the fixed rows as `directed_vectors`.
 
 Strategy names are scoped by folder, like fixtures in `conftest.py` files (see [Strategy Files and Scoped Names](#10-strategy-files-and-scoped-names)). A name registered twice in the same folder is an error.
 

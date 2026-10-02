@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 # Factories are user functions called as factory(nsamples=...) that return a
-# Parameter or a legacy (argnames, samples) tuple
+# Parameter
 Factory = Callable[..., Any]
 
 Origin = tuple[str | None, str | None, int | None]

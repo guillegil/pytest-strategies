@@ -80,9 +80,8 @@ def factory(nsamples, ctx):   # both parameters optional, any order, keyword or 
 - `ctx`: the result of the `pytest_strategies_context` hook (section 12). Only
   factories that declare a `ctx` parameter trigger the hook.
 - A `functools.partial`, a decorated function or a callable object works as a factory.
-- Return a `Parameter`. An `(argnames, samples)` tuple still works but emits a
-  `DeprecationWarning` pointing at the factory, and CLI vector options do not apply
-  to it.
+- Return a `Parameter`. Since 4.0 an `(argnames, samples)` tuple fails the
+  collection of the tests that use it.
 - An exception in the factory fails the collection of the tests that use it, with
   `Error calling strategy factory '<name>' (nsamples=...)`.
 - Values the factory draws itself are reproducible only when drawn through the
@@ -149,10 +148,9 @@ class TestArg:
 - `validator` runs on generated and fixed values. A value that fails it stops
   collection with `ValueError` and is not redrawn, so filter with a `predicate` on the
   RNG type instead, and use `validator` only as an assertion.
-- `directed_values=` and `test_values=` are deprecated: they never produced rows. Use
-  the `Parameter`'s `directed_vectors` and `test_vectors`.
-- Pass `validator` and `description` by keyword: the 4th and 5th positional
-  parameters are the deprecated `directed_values` and `test_values`.
+- `directed_values=`, `test_values=` and `always_include_directed=` were removed in
+  4.0: they never produced rows. Use the `Parameter`'s `directed_vectors`,
+  `test_vectors` and `always_include_directed`.
 
 ## 6. RNG types
 
@@ -438,12 +436,12 @@ extra names. IDs look like `x=1,y=2`.
 
 ## 16. Deprecations and upgrading from 2.x
 
-Deprecated in 3.0 (a `DeprecationWarning` at your line; removed in 4.0):
+Deprecated in 3.0 and removed in 4.0:
 
-| Deprecated | Use instead |
+| Removed | Use instead |
 | --- | --- |
 | factories returning `(argnames, samples)` | return a `Parameter` |
-| `TestArg(directed_values=..., test_values=...)` | `Parameter(directed_vectors=..., test_vectors=...)` |
+| `TestArg(directed_values=..., test_values=..., always_include_directed=...)` | `Parameter(directed_vectors=..., test_vectors=..., always_include_directed=...)` |
 | `RNG.set_max_retries(n)` | `Parameter(max_retries=n)` |
 | `pytest_strategy.configure()` | nothing (it never did anything) |
 | `Strategy.set_config()` | nothing; the plugin reads the config itself |

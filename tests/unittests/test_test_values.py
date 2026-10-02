@@ -7,33 +7,6 @@ import pytest
 from pytest_strategy import Parameter, RNGInteger, TestArg
 
 
-class TestTestArgWithTestValues:
-    """Test TestArg with test_values parameter."""
-
-    def test_initialization_with_test_values(self):
-        """Test initialization with test values."""
-        arg = TestArg("x", rng_type=RNGInteger(0, 10), test_values=[5, 10, 15])
-        assert arg.test_values == [5, 10, 15]
-
-    def test_initialization_only_test_values(self):
-        """Test initialization with only test values (no rng_type)."""
-        arg = TestArg("x", test_values=[1, 2, 3])
-        assert arg.test_values == [1, 2, 3]
-        assert arg.rng_type is None
-
-    def test_to_dict_includes_test_values(self):
-        """Test that to_dict includes test values."""
-        arg = TestArg("x", rng_type=RNGInteger(0, 10), test_values=[5, 10])
-        data = arg.to_dict()
-        assert data["has_test_values"] is True
-
-    def test_to_dict_no_test_values(self):
-        """Test that to_dict correctly reports no test values."""
-        arg = TestArg("x", rng_type=RNGInteger(0, 10))
-        data = arg.to_dict()
-        assert data["has_test_values"] is False
-
-
 class TestParameterWithTestVectors:
     """Test Parameter with test_vectors parameter."""
 

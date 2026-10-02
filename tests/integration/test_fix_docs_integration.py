@@ -92,7 +92,7 @@ class TestPackageDocstring:
         assert result.parseoutcomes().get("passed", 0) > 0
 
     def test_example_honours_vector_mode(self, pytester):
-        """The factory must return a Parameter: the legacy tuple form ignores --vector-mode."""
+        """The example's directed vectors are the rows --vector-mode=directed_only keeps."""
         pytester.makepyfile(test_doc_example=_package_docstring_example())
         pytester.runpytest("--vector-mode", "directed_only").assert_outcomes(passed=2)
 
