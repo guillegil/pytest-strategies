@@ -28,7 +28,7 @@ from ._runtime import Resolution, runtime
 from ._warnings import PytestStrategiesWarning
 from .parameters import (
     Parameter,
-    _ConstraintError,
+    _constraint_failure,
     _ConstraintsExhausted,
     _GenerationStats,
     _ParameterSet,
@@ -382,24 +382,22 @@ def build_parametrization(
         raise ValueError(
             f"Error generating samples for strategy '{name}': {_exhausted_message(name, e)}"
         ) from e
-    except _ConstraintError as e:
-        # Chained to the constraint's own exception, so the error shows the user's frame
-        raise ValueError(
-            f"Error generating samples for strategy '{name}': "
-            f"{e.message('--strategy-constraint-off')}"
-        ) from e.__cause__
-    except (KeyError, IndexError) as e:
-        # If filtering by name (KeyError) or index (IndexError) and the vector
-        # doesn't exist, return empty samples
-        # This allows CLI filtering to work gracefully across multiple strategies
-        if filtered:
-            samples = []
-            # The plugin reports a filter that no strategy in the run matches
-            runtime.record_vector_filter(name, False, list(param.directed_vectors))
-        else:
-            raise ValueError(f"Error generating samples for strategy '{name}': {e}") from e
     except Exception as e:
-        raise ValueError(f"Error generating samples for strategy '{name}': {e}") from e
+        failure = _constraint_failure(e)
+        if failure is not None:
+            # A constraint raised (a KeyError too): chained to its own exception, so
+            # the error shows the user's frame
+            raise ValueError(
+                f"Error generating samples for strategy '{name}': "
+                f"{failure.message('--strategy-constraint-off')}"
+            ) from e
+        if not (filtered and isinstance(e, (KeyError, IndexError))):
+            raise ValueError(f"Error generating samples for strategy '{name}': {e}") from e
+        # Filtering by name (KeyError) or index (IndexError) for a vector this
+        # strategy doesn't have gives it no rows, so CLI filtering works across
+        # strategies. The plugin reports a filter that no strategy in the run matches.
+        samples = []
+        runtime.record_vector_filter(name, False, list(param.directed_vectors))
     else:
         if filtered:
             runtime.record_vector_filter(name, True)

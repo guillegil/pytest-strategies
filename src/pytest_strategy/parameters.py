@@ -377,18 +377,28 @@ class _ConstraintsExhausted(ValueError):
         super().__init__(f"{detail} {advice}")
 
 
-class _ConstraintError(ValueError):
-    """
-    A constraint raised: names the constraint and the row.
+# The attribute of a constraint's exception that holds its _ConstraintFailure
+_CONSTRAINT_FAILURE = "_pytest_strategies_constraint_failure"
 
-    It is raised from the constraint's own exception, which the resolver chains
-    the collection error to, so the user's frame is shown.
+
+class _ConstraintFailure:
+    """
+    Which constraint raised, and on which row.
+
+    The generators re-raise the constraint's own exception, so a caller that
+    catches its type keeps working, with this attached to it (``_CONSTRAINT_FAILURE``)
+    and described in a note. The resolver builds the collection error from it,
+    chained to that exception, so the user's frame is shown.
 
     Attributes:
+        label: The constraint, as the messages show it ("'ratio'")
+        row: Where it raised: "random row 3, Vector(...)" or "the row Vector(...)"
         detail: The message without the note on the constraints turned off
         off_before: The constraints before it in the mapping that the generation
             call turned off (one of them may have guarded it)
     """
+
+    __slots__ = ("label", "row", "detail", "off_before")
 
     def __init__(
         self,
@@ -399,26 +409,43 @@ class _ConstraintError(ValueError):
         off_before: Sequence[str] = (),
     ) -> None:
         where = "the row" if index is None else f"random row {index},"
-        self.detail = (
-            f"Constraint {label} raised {type(error).__name__} on {where} "
-            f"{_short_repr(row)}: {error}"
-        )
+        self.label = label
+        self.row = f"{where} {_short_repr(row)}"
+        # Not the exception itself, which holds this object
+        self.detail = f"Constraint {label} raised {type(error).__name__} on {self.row}: {error}"
         self.off_before = tuple(off_before)
-        super().__init__(self.message("constraints_off"))
+
+    def note(self, turned_off_by: str) -> str:
+        """Return the note the exception gets: ``Raised by constraint 'ratio' on ...``."""
+        return self._with_off_before(
+            f"Raised by constraint {self.label} on {self.row}", turned_off_by
+        )
 
     def message(self, turned_off_by: str) -> str:
         """
-        Return the message, with a note naming the constraints before this one that
-        ``turned_off_by`` turned off. The resolver names ``--strategy-constraint-off``.
+        Return the message: ``Constraint 'ratio' raised ZeroDivisionError on random row
+        3, Vector(...): division by zero``, with a note naming the constraints before
+        this one that ``turned_off_by`` turned off. The resolver names
+        ``--strategy-constraint-off``.
         """
+        return self._with_off_before(self.detail, turned_off_by)
+
+    def _with_off_before(self, text: str, turned_off_by: str) -> str:
+        """Add the constraints turned off before this one to ``text``, if any."""
         if not self.off_before:
-            return self.detail
+            return text
         names = ", ".join(repr(name) for name in self.off_before)
         if len(self.off_before) == 1:
             note = f"constraint {names} before it is turned off"
         else:
             note = f"constraints {names} before it are turned off"
-        return f"{self.detail} ({note} by {turned_off_by})"
+        return f"{text} ({note} by {turned_off_by})"
+
+
+def _constraint_failure(error: BaseException) -> _ConstraintFailure | None:
+    """Return the _ConstraintFailure of an exception a constraint raised, else None."""
+    failure = getattr(error, _CONSTRAINT_FAILURE, None)
+    return failure if isinstance(failure, _ConstraintFailure) else None
 
 
 class Parameter:
@@ -723,7 +750,8 @@ class Parameter:
             True if all constraints pass, False otherwise
 
         Raises:
-            _ConstraintError: If a constraint raises, chained to its exception
+            Exception: The exception a constraint raised, unchanged but for a note
+                naming the constraint and the row, and its _ConstraintFailure
         """
         for name, constraint in constraints:
             try:
@@ -732,9 +760,12 @@ class Parameter:
             except Exception as e:
                 origin = self._unnamed_origin(name)
                 label = f"{name!r} ({origin})" if origin else repr(name)
-                raise _ConstraintError(
+                failure = _ConstraintFailure(
                     label, vector, index, e, self._off_before(name, constraints)
-                ) from e
+                )
+                setattr(e, _CONSTRAINT_FAILURE, failure)
+                e.add_note(failure.note("constraints_off"))
+                raise
             if rejected:
                 if rejections is not None:
                     rejections.add(name, vector, result)
@@ -972,7 +1003,8 @@ class Parameter:
         Raises:
             ValueError: If the constraints reject max_retries draws; the message
                 counts the rejections per constraint name
-            ValueError: If a constraint raises, naming the constraint and the row
+            Exception: The exception a constraint raised, with a note naming the
+                constraint and the row
 
         Example:
             vector = param.generate_vector()  # e.g., Vector(x=5, y=3.14, mode="fast")
@@ -1086,8 +1118,8 @@ class Parameter:
                 (or every combination); the message counts the rejections by the
                 name of the first failing constraint and shows the first row each
                 one rejected
-            ValueError: If a constraint raises, naming the constraint and the row
-                (chained to the constraint's exception)
+            Exception: The exception a constraint raised, with a note naming the
+                constraint and the row
 
         Warns:
             PytestStrategiesWarning: If a Series combination is skipped, or with
@@ -1366,7 +1398,8 @@ class Parameter:
             ValueError: If no sequence arguments are present
             ValueError: If a sequence value fails its argument's validator
             ValueError: If the vector constraints reject every combination
-            ValueError: If a constraint raises, naming the constraint and the row
+            Exception: The exception a constraint raised, with a note naming the
+                constraint and the row
         """
         constraints = self._evaluated(constraints_off)
 

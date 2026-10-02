@@ -30,7 +30,11 @@ from pytest_strategy._options import (
 )
 from pytest_strategy._resolver import _exhausted_message, build_parametrization
 from pytest_strategy._runtime import Resolution, StrategyRuntime
-from pytest_strategy.parameters import _ConstraintsExhausted, _GenerationStats
+from pytest_strategy.parameters import (
+    _constraint_failure,
+    _ConstraintsExhausted,
+    _GenerationStats,
+)
 from pytest_strategy.plugin import _constraint_off_type, _summary_lines
 
 
@@ -349,38 +353,40 @@ class TestRaisingConstraintNote:
         )
 
     def test_a_constraint_turned_off_before_it_is_named(self):
-        with pytest.raises(ValueError) as excinfo:
+        with pytest.raises(ZeroDivisionError) as excinfo:
             self._ratio().generate_vectors(1, constraints_off=["nonzero", "last"])
 
-        message = str(excinfo.value)
+        [note] = excinfo.value.__notes__
+        assert note.startswith("Raised by constraint 'ratio' on random row 0, Vector(addr=")
+        assert note.endswith(
+            "len=0) (constraint 'nonzero' before it is turned off by constraints_off)"
+        )
+        assert _constraint_failure(excinfo.value).off_before == ("nonzero",)
+
+    def test_the_resolver_names_the_option(self):
+        with pytest.raises(ZeroDivisionError) as excinfo:
+            self._ratio().generate_vectors(1, constraints_off=["nonzero", "aligned"])
+
+        message = _constraint_failure(excinfo.value).message("--strategy-constraint-off")
         assert message.startswith(
             "Constraint 'ratio' raised ZeroDivisionError on random row 0, Vector(addr="
         )
         assert message.endswith(
-            "len=0): division by zero (constraint 'nonzero' before it is turned off by "
-            "constraints_off)"
-        )
-        assert excinfo.value.off_before == ("nonzero",)
-        assert isinstance(excinfo.value.__cause__, ZeroDivisionError)
-
-    def test_the_resolver_names_the_option(self):
-        with pytest.raises(ValueError) as excinfo:
-            self._ratio().generate_vectors(1, constraints_off=["nonzero", "aligned"])
-
-        assert excinfo.value.message("--strategy-constraint-off").endswith(
-            "division by zero (constraints 'nonzero', 'aligned' before it are turned off by "
-            "--strategy-constraint-off)"
+            "len=0): division by zero (constraints 'nonzero', 'aligned' before it are "
+            "turned off by --strategy-constraint-off)"
         )
 
     def test_no_note_when_none_before_it_is_off(self):
-        with pytest.raises(ValueError) as excinfo:
+        with pytest.raises(ZeroDivisionError) as excinfo:
             Parameter(
                 TestArg("len", value=0),
                 vector_constraints={"ratio": lambda v: 64 / v.len > 4, "after": never},
             ).generate_vectors(1, constraints_off=["after"])
 
-        assert str(excinfo.value).endswith("Vector(len=0): division by zero")
-        assert excinfo.value.off_before == ()
+        assert excinfo.value.__notes__ == [
+            "Raised by constraint 'ratio' on random row 0, Vector(len=0)"
+        ]
+        assert _constraint_failure(excinfo.value).off_before == ()
 
 
 class TestResolver:

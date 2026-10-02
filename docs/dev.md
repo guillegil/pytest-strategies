@@ -327,8 +327,11 @@ random vector that fails a constraint is redrawn up to `max_retries` times
 message counts the draws by the name of the first failing constraint
 (`_Rejections`) and shows the first row each one rejected; the resolver replaces
 its last sentence with advice that names the strategy and its strictest
-constraint. A constraint that raises becomes `_ConstraintError`, chained to the
-user's exception, which the resolver chains the collection error to. The private
+constraint. The exception of a constraint that raises goes up unchanged, so a
+caller that catches its type keeps working, with a note naming the constraint
+and the row and a `_ConstraintFailure` in its `_CONSTRAINT_FAILURE` attribute;
+the resolver builds the collection error from that and chains it to the user's
+exception. The private
 `_stats` keyword of `generate_vectors()` and `generate_exhaustive()` collects the
 counts (and the combinations `--nsamples=auto` left out) for the `-v` summary.
 Their keyword-only `constraints_off` names constraints the call does not
@@ -339,7 +342,7 @@ the names of `--strategy-constraint-off` that the `Parameter` has
 records every resolved strategy's constraint names on the session
 (`SessionState.constraint_names`), whether or not the run evaluates them, so the
 plugin can check the items once collection ends. A raising constraint's error
-names the constraints before it that were turned off (`_ConstraintError.off_before`).
+names the constraints before it that were turned off (`_ConstraintFailure.off_before`).
 With `Series`
 args, `n` rows are taken by cycling through the `Series` combinations. A
 combination the constraints reject is skipped, after its random args have been

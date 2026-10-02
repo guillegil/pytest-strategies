@@ -28,7 +28,7 @@ from pytest_strategy import (
     Series,
     TestArg,
 )
-from pytest_strategy.parameters import _GenerationStats
+from pytest_strategy.parameters import _constraint_failure, _GenerationStats
 
 FIRST_FAILING = "Rejected by (first failing constraint per draw): "
 
@@ -586,29 +586,57 @@ class TestRaisingConstraints:
             vector_constraints={"ratio": lambda v: 10 / v.len > 1},
         )
 
-        with pytest.raises(ValueError) as excinfo:
+        with pytest.raises(ZeroDivisionError) as excinfo:
             param.generate_vectors(2)
 
-        assert str(excinfo.value) == (
+        # The constraint's own exception, with a note, and its frame in the traceback
+        assert str(excinfo.value) == "division by zero"
+        assert excinfo.value.__notes__ == [
+            "Raised by constraint 'ratio' on random row 0, Vector(len=0)"
+        ]
+        assert any(entry.name == "<lambda>" for entry in excinfo.traceback)
+        # The resolver's collection error
+        assert _constraint_failure(excinfo.value).message("--strategy-constraint-off") == (
             "Constraint 'ratio' raised ZeroDivisionError on random row 0, Vector(len=0): "
             "division by zero"
         )
-        # Chained to the constraint's own exception, whose traceback has its frame
-        cause = excinfo.value.__cause__
-        assert isinstance(cause, ZeroDivisionError)
-        assert cause.__traceback__.tb_next.tb_frame.f_code.co_name == "<lambda>"
+
+    @pytest.mark.parametrize(
+        "generate",
+        [
+            lambda p: p.generate_vector(),
+            lambda p: p.generate_vectors(5, mode="random_only"),
+            lambda p: p.generate_exhaustive(),
+        ],
+        ids=["generate_vector", "generate_vectors", "generate_exhaustive"],
+    )
+    def test_callers_catch_the_constraints_own_exception(self, generate):
+        """3.0 let the constraint's exception through: code that catches it keeps working."""
+        param = Parameter(
+            TestArg("x", rng_type=RNGSequence([0, 3])),
+            vector_constraints={"known": lambda v: {1: True}[v.x]},
+        )
+
+        with pytest.raises(KeyError) as excinfo:
+            generate(param)
+
+        assert type(excinfo.value) is KeyError
+        assert excinfo.value.__notes__[0].startswith("Raised by constraint 'known' on ")
 
     def test_an_unnamed_constraint_shows_where_it_comes_from(self):
         param = Parameter(TestArg("len", value=0), vector_constraints=[lambda v: v.lenght > 0])
 
-        with pytest.raises(ValueError) as excinfo:
+        with pytest.raises(AttributeError) as excinfo:
             param.generate_vector()
 
         line = _line(param.vector_constraints["constraint_0"])
-        assert str(excinfo.value) == (
-            f"Constraint 'constraint_0' (lambda at test_named_constraints.py:{line}) raised "
-            "AttributeError on the row Vector(len=0): Vector has no argument 'lenght'; its "
-            "arguments are len"
+        origin = f"'constraint_0' (lambda at test_named_constraints.py:{line})"
+        assert excinfo.value.__notes__ == [
+            f"Raised by constraint {origin} on the row Vector(len=0)"
+        ]
+        assert _constraint_failure(excinfo.value).message("-") == (
+            f"Constraint {origin} raised AttributeError on the row Vector(len=0): Vector has "
+            "no argument 'lenght'; its arguments are len"
         )
 
     def test_a_series_row_is_named_by_its_values(self):
@@ -617,8 +645,10 @@ class TestRaisingConstraints:
             vector_constraints={"ratio": lambda v: 6 / v.ch},
         )
 
-        with pytest.raises(ValueError, match=r"on the row Vector\(ch=0\): division by zero"):
+        with pytest.raises(ZeroDivisionError) as excinfo:
             param.generate_vectors(2)
+
+        assert excinfo.value.__notes__ == ["Raised by constraint 'ratio' on the row Vector(ch=0)"]
 
     def test_a_truth_value_that_raises_is_named_too(self):
         class Ambiguous:
@@ -627,8 +657,12 @@ class TestRaisingConstraints:
 
         param = Parameter(TestArg("x", value=1), vector_constraints={"odd": lambda v: Ambiguous()})
 
-        with pytest.raises(ValueError, match="Constraint 'odd' raised ValueError on random row 0"):
+        with pytest.raises(ValueError, match="ambiguous") as excinfo:
             param.generate_vectors(1)
+
+        assert excinfo.value.__notes__ == [
+            "Raised by constraint 'odd' on random row 0, Vector(x=1)"
+        ]
 
 
 class TestPredicates:

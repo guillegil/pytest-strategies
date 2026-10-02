@@ -150,6 +150,36 @@ def test_a_raising_constraint_names_itself_the_row_and_the_users_frame(pytester)
     result.stdout.no_fnmatch_line("*parameters.py*")
 
 
+def test_a_constraint_that_raises_a_key_error_is_named_too(pytester):
+    """The resolver tells a constraint's KeyError from a --vector-name miss."""
+    pytester.makepyfile(test_nc_lookup="""
+        from pytest_strategy import Parameter, RNGInteger, TestArg, register, strategy
+
+        @register("nc_lookup")
+        def factory():
+            return Parameter(
+                TestArg("len", value=0),
+                vector_constraints={"known": lambda v: {1: True}[v.len]},
+            )
+
+        @strategy("nc_lookup")
+        def test_lookup(len):
+            pass
+        """)
+
+    result = pytester.runpytest()
+
+    result.assert_outcomes(errors=1)
+    result.stdout.fnmatch_lines(
+        [
+            "In test_lookup: Error generating samples for strategy 'nc_lookup': Constraint "
+            "'known' raised KeyError on random row 0, Vector(len=0): 0",
+            '*test_nc_lookup.py", line 7, in <lambda>',
+            "KeyError: 0",
+        ]
+    )
+
+
 def test_a_predicate_that_runs_out_names_its_argument(pytester):
     pytester.makepyfile(test_nc_predicate="""
         from pytest_strategy import Parameter, RNGInteger, TestArg, register, strategy
