@@ -40,6 +40,7 @@ from ._records import (
 )
 from ._registry import _describe_factory, display_path, factory_source
 from ._runtime import Resolution, runtime
+from ._streams import StreamKey, seed_part
 from ._vector import VectorInfo
 from ._warnings import PytestStrategiesWarning
 from .parameters import (
@@ -308,6 +309,15 @@ def _test_location(test_fn: Callable[..., Any], config: pytest.Config | None) ->
     return test_fn.__module__
 
 
+def _fallback_test_key(test_fn: Callable[..., Any], config: pytest.Config | None) -> str:
+    """
+    Return the test's key for its random streams without a node ID (a call that
+    has no metafunc): the test's location and its qualified name, with ``::``
+    for the dots, as pytest writes a node ID.
+    """
+    return f"{_test_location(test_fn, config)}::{test_fn.__qualname__.replace('.', '::')}"
+
+
 def _max_exhaustive(param: Parameter, config: pytest.Config | None) -> int:
     """Return the most rows the exhaustive generation of ``param`` may produce."""
     if param.max_exhaustive is not None:
@@ -416,6 +426,7 @@ def build_parametrization(
     pytest_fixtures: set[str],
     validate: bool = True,
     fixturenames: Collection[str] | None = None,
+    test_key: str | None = None,
 ) -> Parametrization:
     """
     Call a strategy's factory and build the parametrization of a test.
@@ -430,6 +441,10 @@ def build_parametrization(
         validate: Check that the test takes the strategy's arguments
         fixturenames: The names the test and its fixtures ask for
             (``metafunc.fixturenames``), or None to read only the test's parameters
+        test_key: The test's part of its random stream key: its node ID without
+            parameters (``metafunc.definition.nodeid``), so inherited methods in
+            two subclasses get rows of their own. None uses the test's location
+            and qualified name.
 
     Raises:
         ValueError: With a message naming the strategy when the factory, the
@@ -526,6 +541,15 @@ def build_parametrization(
     stats = _GenerationStats()
     auto = effective_nsamples == "auto"
     exhaustive = auto and not filtered and vector_mode not in ("test", "directed_only")
+    # The key T of this strategy and test (streams v1, D5): every random and
+    # exhaustive row draws each argument from a stream below it, so the factory's
+    # draws, the other rows and the other arguments do not move a row's values
+    stream_key = StreamKey.root(
+        seed_part(runtime.run_seed()),
+        "test",
+        name,
+        test_key if test_key is not None else _fallback_test_key(test_fn, config),
+    )
     try:
         # Warnings raised while generating name the strategy and the test
         with _attributed_warnings(name, test_fn):
@@ -539,6 +563,7 @@ def build_parametrization(
                 filter_by_index=vector_index,
                 constraints_off=constraints_off,
                 stats=stats,
+                key=stream_key,
             )
     except _ConstraintsExhausted as e:
         raise ValueError(
@@ -780,6 +805,7 @@ def resolve_and_parametrize(
     pytest_fixtures: set[str],
     validate: bool = True,
     fixturenames: Collection[str] | None = None,
+    test_key: str | None = None,
 ) -> Callable[..., Any]:
     """Build the parametrization for a registered strategy and apply it to ``test_fn``."""
     parametrization = build_parametrization(
@@ -790,6 +816,7 @@ def resolve_and_parametrize(
         pytest_fixtures=pytest_fixtures,
         validate=validate,
         fixturenames=fixturenames,
+        test_key=test_key,
     )
     mark = pytest.mark.parametrize(parametrization.argnames, parametrization.params())
     return cast(Callable[..., Any], mark(test_fn))

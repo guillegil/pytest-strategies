@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn, Self, cast
 import pytest
 
 from ._encode import encode
+from ._streams import VERSION as STREAMS_VERSION
 
 # The kinds of rows a strategy generates
 RowKind = Literal["directed", "test", "random", "exhaustive", "skipped"]
@@ -166,7 +167,7 @@ class VectorInfo:
     seed: int
     context: str | None
     constraints_off: tuple[str, ...]
-    streams: int = 1
+    streams: int = STREAMS_VERSION
 
     def to_dict(self) -> dict[str, Any]:
         """

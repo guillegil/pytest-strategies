@@ -263,8 +263,13 @@ caches it, so `Parameter.vector_type` is shared by Parameters with the same name
 and a prefix of the names gets a class of its own. One private `_build_row` fills
 a row in declaration order (the enumerated values are already in place, the other
 arguments are drawn), builds the Vector and hands it to the constraints, for the
-plain, Series, `per_sequence_samples` and exhaustive paths alike. Argument names
-must therefore be identifiers that are not keywords and do not start with `_`.
+plain, Series, `per_sequence_samples` and exhaustive paths alike. Each drawn
+argument draws from a generator of its own, reseeded for each row from the row's
+key (`_RowStreams`, see [Reproducibility](#reproducibility)); the generator is
+installed as `RNG._generator` only while the argument's `generate()` and
+validator run, and a retry continues it. `_generate_row(key, pos, j)` builds one
+row on its own, with the values of the full list. Argument names must therefore
+be identifiers that are not keywords and do not start with `_`.
 
 ```python
 from pytest_strategy import Parameter, TestArg
@@ -506,7 +511,8 @@ def test_coordinates(x, y):
    factory passed directly is used as it is.
 4. `build_parametrization()` restarts the generator on the strategy and test's
    own stream (see [Reproducibility](#reproducibility)), then calls the factory
-   once through `_factory.call_factory()`. The factory gets, by name, the inputs
+   once through `_factory.call_factory()`. The rows draw from streams keyed by
+   the run seed, the strategy name and the test's node ID. The factory gets, by name, the inputs
    it declares: `nsamples`, `ctx`, `rng` and `options` (see "Factory inputs"
    below).
 5. It generates the vectors from the returned `Parameter` according to the CLI
@@ -556,7 +562,7 @@ parametrized, so a fixture asking for an argument would find nothing.
 **Key Features:**
 - Folder-scoped strategy names
 - Automatic pytest parametrization
-- A random stream of its own for each strategy and test
+- Random streams of their own for each strategy, test, row and argument
 - CLI option integration
 - Test IDs that name the row (`directed-zeros`, `rand-3`, `ch=2-rand-1`, built by
   `names_id()` from the row's kind, name, j and labels), the same for every seed.
@@ -885,11 +891,28 @@ on `RNG.generator()`.
 **Per-test streams:** before calling a strategy's factory for a test, the plugin
 restarts the generator from the run seed and a key made of the strategy name,
 the test file's path relative to the rootdir and the test's qualified name
-(`RNG.refresh_seed(key=...)`). Each strategy and test pair therefore gets its
-own stream. The vectors of a test do not depend on which other tests are
-collected, on the collection order or on `--import-mode`. Two tests that share
-a strategy get different vectors. For the same seed, the values are those of
-2.0.0, and differ from those of 1.x (1.0.0 and the 1.1.0 pre-releases).
+(`RNG.refresh_seed(key=...)`).
+
+**Row streams (streams v1, `_streams.py`):** the rows draw from streams keyed
+under `T = StreamKey.root(seed, "test", strategy, nodeid)`, where `nodeid` is the
+test's node ID without its parameters (`metafunc.definition.nodeid`). Each drawn
+argument of a row draws from `T/"row"/pos/j/name`: `pos` is the row's enumerated
+position, its `(name, token)` pairs sorted by name and flattened (the tokens of
+`_position_keys`), `j` is the row's index within that position, and `name` is
+the argument's name. The order of an `RNGSequence` under `--nsamples=auto` comes
+from `T/"order"/name`. A row's values therefore depend only on the seed, the
+strategy, the test, the row and the argument: more rows keep the first ones, a
+node ID run alone gets the values of the full run, adding, reordering or
+changing another argument leaves an argument's values alone, and a constraint
+redraws only the rows it rejects, continuing the same streams. Static `value=`
+arguments draw nothing. Direct calls (`generate_vectors()`, `generate_vector()`,
+`generate_exhaustive()` outside the plugin) use the key
+`root(RNG.get_seed(), "direct", n)`, where `n` is 128 bits drawn from
+`RNG._generator` once per call. The vectors of a test do not depend on which
+other tests are collected, on the collection order or on `--import-mode`. Two
+tests that share a strategy get different vectors, and so do two classes that
+inherit one test method. For the same seed, directed and test vectors and
+`Series` values are those of 3.x; random rows differ from 3.x's.
 
 **Import time:** `pytest_configure` restarts the generator from the seed. A
 strategy file is imported on a stream of its own (keyed by its path), and the

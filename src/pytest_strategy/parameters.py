@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import _random
 import contextlib
 import dataclasses
 import difflib
@@ -13,6 +14,7 @@ import math
 import numbers
 import operator
 import os
+import random
 import re
 import reprlib
 import warnings
@@ -25,11 +27,12 @@ from typing import Any, Literal, NamedTuple, cast
 import pytest
 
 from ._ids import ID_FORMATS
+from ._streams import StreamKey, encode, seed_part
 from ._vector import RowKind as _RowKind
 from ._vector import Vector, VectorInfo
 from ._vector import vector_type as _vector_type
 from ._warnings import PytestStrategiesWarning
-from .rng import RNGValueError, SequenceLike, Series
+from .rng import RNG, RNGValueError, SequenceLike, Series
 from .test_args import TestArg
 
 # pytest.param() returns a ParameterSet (a NamedTuple), which pytest does not export
@@ -564,6 +567,101 @@ class _Enumeration:
             tuple([part[0] for part in parts]),
             tuple([parts[a][1] for a in self._by_name]),
         )
+
+
+def _direct_key() -> StreamKey:
+    """
+    Return the key of a generation call made outside the plugin (generate_vectors()
+    and the other generators called directly): ``RNG.get_seed()`` and 128 bits of the
+    current generator, so consecutive calls differ and ``RNG.seed(s)`` repeats them.
+    """
+    return StreamKey.root(seed_part(RNG.get_seed()), "direct", RNG._generator.getrandbits(128))
+
+
+class _ArgRandom(random.Random):
+    """
+    The generator of one argument's row streams (``_RowStreams``).
+
+    It is reseeded with a 128-bit int at the start of every row, by ``reseed()``,
+    which seeds it as ``random.Random.seed()`` seeds it with an int (the seeding in
+    C, then no cached ``gauss()`` value) without that method's checks of the seed's
+    type: about 0.6 us of the 8 us a seed costs.
+    """
+
+    def reseed(self, seed: int) -> None:
+        """Seed the generator as ``self.seed(seed)`` would, for an int seed."""
+        _random.Random.seed(self, seed)
+        self.gauss_next = None
+
+
+class _RowStreams:
+    """
+    The random streams of a generation call's rows (D5): one ``random.Random`` per
+    argument that draws, reseeded at the start of each row from the key
+    ``T/"row"/pos/j/argname``, where T is the call's key.
+
+    A drawn argument's values therefore depend only on T, the row's identity (pos
+    and j) and the argument's name: not on the other rows, on the other arguments,
+    or on what was drawn before. The generators continue across the attempts of
+    one row, so a constraint that rejects a row changes only that row.
+    """
+
+    __slots__ = ("_rows", "_names", "_generators", "_pos")
+
+    def __init__(self, key: StreamKey, args: Sequence[TestArg]) -> None:
+        self._rows = key.child("row")
+        # Each argument's part of its streams' keys, encoded once
+        self._names = [encode(arg.name) for arg in args]
+        # A static value= argument draws nothing, so it gets no generator
+        self._generators: list[_ArgRandom | None] = [
+            None if arg.is_static else _ArgRandom(0) for arg in args
+        ]
+        # The encoded parts of each pos seen, which the rows of a combination share
+        self._pos: dict[tuple[tuple[str, str], ...], bytes] = {}
+
+    def start(
+        self,
+        pos: tuple[tuple[str, str], ...],
+        j: int,
+        drawn: Sequence[int],
+        ambient: random.Random,
+    ) -> list[tuple[int, random.Random]]:
+        """
+        Reseed the generators of the ``drawn`` positions for the row (pos, j), and
+        return each position with the generator its argument draws from: its own,
+        or ``ambient`` for a static argument, which draws nothing.
+        """
+        # pos is flattened into the key: its parts are strs and j is the first int,
+        # so the path stays unambiguous
+        encoded = self._pos.get(pos)
+        if encoded is None:
+            encoded = self._pos[pos] = encode(*[part for pair in pos for part in pair])
+        row = encoded + encode(j)
+        rows, names, generators = self._rows, self._names, self._generators
+        started: list[tuple[int, random.Random]] = []
+        for i in drawn:
+            generator = generators[i]
+            if generator is None:
+                started.append((i, ambient))
+            else:
+                # The seed of T/"row"/pos/j/argname
+                generator.reseed(rows.child_seed_int(row + names[i]))
+                started.append((i, generator))
+        return started
+
+
+def _auto_order_from(key: StreamKey, rng_type: SequenceLike[Any]) -> list[tuple[int, Any]]:
+    """
+    Return ``_auto_order(rng_type)`` with ``RNG.generator()`` on the stream of
+    ``key`` (``T/"order"/argname``), so an RNGSequence's permutation under
+    ``--nsamples=auto`` depends on nothing but its argument.
+    """
+    ambient = RNG._generator
+    RNG._generator = random.Random(key.seed_int())
+    try:
+        return _auto_order(rng_type)
+    finally:
+        RNG._generator = ambient
 
 
 # The constraints a generation call evaluates, as (name, function) pairs in order
@@ -1371,6 +1469,9 @@ class Parameter:
         attempts: int,
         rejections: _Rejections,
         constraints: _Constraints,
+        streams: _RowStreams,
+        pos: tuple[tuple[str, str], ...],
+        j: int,
         kind: _RowKind = "random",
         index: int | None = None,
         labels: tuple[str, ...] = (),
@@ -1378,7 +1479,11 @@ class Parameter:
         """
         Fill one row in declaration order and return it once the constraints accept it.
 
-        Every generation path builds its rows here.
+        Every generation path builds its rows here. Each drawn argument draws from
+        its own stream for the row (``streams``): its generator is reseeded from the
+        row's key first, and is ``RNG.generator()`` only while that argument's RNG
+        type and validator run. The constraints run with the generator that was
+        there before, which is restored also when something raises.
 
         Args:
             row_type: The class of the rows (``self.vector_type``)
@@ -1386,9 +1491,12 @@ class Parameter:
                 already hold their validated values; the others are overwritten.
             drawn: The positions to generate, in declaration order: each gets
                 ``arg.generate()`` on every attempt
-            attempts: How many draws of the drawn positions to try
+            attempts: How many draws of the drawn positions to try. Each argument's
+                stream continues from one attempt to the next.
             rejections: Counts the first constraint that rejects each attempt
             constraints: The constraints to evaluate (``_evaluated()``)
+            streams: The generation call's row streams
+            pos, j: The row's identity, which keys its streams (see ``_Row``)
             kind, index, labels: The row being drawn, for the message of a
                 constraint that raises (an index of None for generate_vector())
 
@@ -1397,21 +1505,34 @@ class Parameter:
             all attempts were rejected
         """
         args = self.test_args
-        for _ in range(attempts):
-            for i in drawn:
-                values[i] = args[i].generate()
-            # The whole row goes to the constraints, as a Vector
-            row = tuple.__new__(row_type, values)
-            if self._validate_vector(row, constraints, rejections, kind, index, labels):
-                return row
+        ambient = RNG._generator
+        generators = streams.start(pos, j, drawn, ambient)
+        try:
+            for _ in range(attempts):
+                for i, generator in generators:
+                    RNG._generator = generator
+                    values[i] = args[i].generate()
+                RNG._generator = ambient
+                # The whole row goes to the constraints, as a Vector
+                row = tuple.__new__(row_type, values)
+                if self._validate_vector(row, constraints, rejections, kind, index, labels):
+                    return row
+        finally:
+            RNG._generator = ambient
         return None
 
-    def generate_vector(self) -> Vector:
+    def generate_vector(self, *, _key: StreamKey | None = None) -> Vector:
         """
         Generate a single random parameter vector.
 
+        Args:
+            _key: Private: the key of the row's streams. Without it, the key comes
+                from the seed and 128 bits of ``RNG.generator()``, so consecutive
+                calls differ and ``RNG.seed(s)`` repeats them.
+
         Returns:
-            A Vector of generated values, one per TestArg
+            A Vector of generated values, one per TestArg: the first random row of
+            generate_vectors() with the same key
 
         Raises:
             ValueError: If the constraints reject max_retries draws; the message
@@ -1422,13 +1543,15 @@ class Parameter:
         Example:
             vector = param.generate_vector()  # e.g., Vector(x=5, y=3.14, mode="fast")
         """
-        return self._random_row(self.vector_type, _Rejections(), self._evaluated())
+        streams = _RowStreams(_key if _key is not None else _direct_key(), self.test_args)
+        return self._random_row(self.vector_type, _Rejections(), self._evaluated(), streams)
 
     def _random_row(
         self,
         row_type: type[Vector],
         rejections: _Rejections,
         constraints: _Constraints,
+        streams: _RowStreams,
         index: int | None = None,
     ) -> Vector:
         """
@@ -1439,7 +1562,9 @@ class Parameter:
             row_type: The class of the rows
             rejections: Counts this row's rejected draws (cleared first)
             constraints: The constraints to evaluate (``_evaluated()``)
-            index: The row's number among the random rows, or None for a single row
+            streams: The generation call's row streams
+            index: The row's number among the random rows (its j), or None for a
+                single row, which draws as row 0
         """
         if rejections.counts:
             rejections.clear()
@@ -1451,6 +1576,9 @@ class Parameter:
             self.max_retries,
             rejections,
             constraints,
+            streams,
+            (),
+            0 if index is None else index,
             "random",
             index,
         )
@@ -1493,6 +1621,7 @@ class Parameter:
         filter_by_index: int | None = None,
         constraints_off: Iterable[str] = (),
         _stats: _GenerationStats | None = None,
+        _key: StreamKey | None = None,
     ) -> list[Vector]:
         """
         Generate parameter vectors.
@@ -1513,6 +1642,15 @@ class Parameter:
                 (``--strategy-constraint-off``); names the Parameter does not have
                 are ignored. The Parameter keeps its constraints.
             _stats: Private: counts the rejections per constraint
+            _key: Private: the key of the random rows' streams (the plugin's is the
+                test's). Without it, the key comes from the seed and 128 bits of
+                ``RNG.generator()``, so consecutive calls differ and ``RNG.seed(s)``
+                repeats them.
+
+        Each random row draws each argument from a stream of its own, keyed by the
+        row and the argument's name: the first n rows are the same for any larger n,
+        and an argument's values do not change when another argument or a
+        constraint that accepts the row is added.
 
         The arguments after n are keyword-only. The plugin does not call this
         method: it generates a test's rows with the same code, so a subclass that
@@ -1566,6 +1704,7 @@ class Parameter:
             filter_by_index=filter_by_index,
             constraints_off=constraints_off,
             stats=_stats,
+            key=_key,
         )
         if rows and rows[0].kind == "skipped":
             return []
@@ -1581,12 +1720,17 @@ class Parameter:
         filter_by_index: int | None = None,
         constraints_off: Iterable[str] = (),
         stats: _GenerationStats | None = None,
+        key: StreamKey | None = None,
     ) -> list[_Row]:
         """
         Generate the rows of a run with their identity: the one entry point of
         generation. generate_vectors() and generate_exhaustive() return the rows'
         values, and the plugin builds each row's test ID and metadata from its kind,
         name, index, pos and j.
+
+        A random or exhaustive row draws each argument from the stream
+        ``key/"row"/pos/j/argname`` (``_RowStreams``), and under ``--nsamples=auto``
+        an RNGSequence's order comes from ``key/"order"/argname``.
 
         Args:
             n: Number of random rows (per combination with per_sequence_samples=True),
@@ -1600,6 +1744,10 @@ class Parameter:
             constraints_off: The names of constraints not to evaluate in this call
             stats: Counts the rejections per constraint, and the combinations the
                 exhaustive rows left out
+            key: The key of the rows' streams: the test's key T for the plugin.
+                Without it, the key comes from the seed and 128 bits of
+                ``RNG.generator()`` (``_direct_key()``), drawn only when the call
+                generates random or exhaustive rows.
 
         Returns:
             The rows in order: the directed or test vectors the mode and the filters
@@ -1653,21 +1801,24 @@ class Parameter:
         if mode == "all" or mode == "mixed" and self.always_include_directed:
             rows.extend(self._vector_rows("directed"))
 
+        if key is None:
+            key = _direct_key()
         if exhaustive:
-            rows.extend(self._exhaustive_rows(constraints, stats))
+            rows.extend(self._exhaustive_rows(constraints, key, stats))
             return rows
 
         # Every rejected draw is also counted here, for the plugin's -v summary
         total = stats.rejected if stats is not None else None
         if self.per_sequence_samples and self._sequence_indices():
-            rows.extend(self._per_sequence_rows(n, constraints, total))
+            rows.extend(self._per_sequence_rows(n, constraints, key, total))
         elif any(isinstance(arg.rng_type, Series) for arg in self.test_args):
-            rows.extend(self._series_rows(n, constraints, total))
+            rows.extend(self._series_rows(n, constraints, key, total))
         else:
             row_type = self.vector_type
             rejections = _Rejections(total)
+            streams = _RowStreams(key, self.test_args)
             for k in range(n):
-                row = self._random_row(row_type, rejections, constraints, k)
+                row = self._random_row(row_type, rejections, constraints, streams, k)
                 rows.append(_Row("random", None, k, (), k, row))
         return rows
 
@@ -1691,8 +1842,96 @@ class Parameter:
         values = tuple.__new__(self.vector_type, [None] * len(self.test_args))
         return _Row("skipped", None, None, (), None, values)
 
+    def _generate_row(
+        self,
+        key: StreamKey,
+        pos: Iterable[tuple[str, str]],
+        j: int,
+        *,
+        constraints_off: Iterable[str] = (),
+    ) -> Vector:
+        """
+        Compute one random or exhaustive row on its own: the values the row (pos, j)
+        gets in a generation call whose key is ``key``, whatever the call's other
+        rows, n or mode (D5).
+
+        The arguments that pos names hold the values their tokens name
+        (``_position_keys``), validated; every other argument is drawn from the
+        row's streams, with the retries the generation paths give it.
+
+        Args:
+            key: The generation call's key: the test's key T, or the ``_key`` of a
+                direct call
+            pos: The row's enumerated arguments as (argument name, token) pairs, in
+                any order; empty for a plain random row
+            j: The row's number within its combination (0 for an exhaustive row)
+            constraints_off: The names of constraints not to evaluate
+
+        Returns:
+            The row, a Vector
+
+        Raises:
+            KeyError: If pos names an argument twice, an argument that is not a
+                Series or RNGSequence argument, or a token its sequence does not have
+            ValueError: If an enumerated value fails its argument's validator, or the
+                constraints reject every attempt
+        """
+        args = self.test_args
+        pairs = tuple(sorted(pos))
+        tokens = dict(pairs)
+        if len(tokens) != len(pairs):
+            raise KeyError(f"pos names an argument twice: {pairs!r}")
+        values: list[Any] = [None] * len(args)
+        labels = []
+        drawn = []
+        for i, arg in enumerate(args):
+            token = tokens.pop(arg.name, None)
+            if token is None:
+                drawn.append(i)
+                continue
+            if not isinstance(arg.rng_type, SequenceLike):
+                raise KeyError(f"{arg.name!r} is not a Series or RNGSequence argument")
+            sequence = arg.rng_type.sequence
+            keys = _position_keys(arg.name, sequence)
+            position = next((p for p, k in enumerate(keys) if k.token == token), None)
+            if position is None:
+                raise KeyError(f"{arg.name!r} has no value with the token {token!r}")
+            values[i] = arg._validate(sequence[position])
+            labels.append(keys[position].label)
+        if tokens:
+            raise KeyError(f"No argument named {next(iter(tokens))!r}")
+        rejections = _Rejections()
+        # Redrawing only helps when there are other positions to change
+        attempts = self.max_retries if drawn else 1
+        row = self._build_row(
+            self.vector_type,
+            values,
+            drawn,
+            attempts,
+            rejections,
+            self._evaluated(constraints_off),
+            _RowStreams(key, args),
+            pairs,
+            j,
+            "random",
+            j,
+            tuple(labels),
+        )
+        if row is None:
+            what = _describe_row("random", j, tuple(labels))
+            if drawn:
+                what += f" after max_retries={attempts} draws"
+            else:
+                what += ": the constraints reject its values"
+            raise self._exhausted(f"Could not generate {what}", rejections, retries=bool(drawn))
+        return row
+
     def _series_rows(
-        self, n: int, constraints: _Constraints, total: Counter[str] | None = None
+        self,
+        n: int,
+        constraints: _Constraints,
+        key: StreamKey,
+        total: Counter[str] | None = None,
     ) -> list[_Row]:
         """
         Generate n rows that cycle through the combinations of the Series args (the
@@ -1707,6 +1946,7 @@ class Parameter:
         Args:
             n: Number of rows
             constraints: The constraints to evaluate (``_evaluated()``)
+            key: The key of the rows' streams
             total: If given, counts every rejected draw by constraint name
 
         Raises:
@@ -1728,6 +1968,7 @@ class Parameter:
         attempts = self.max_retries if random_indices else 1
         num_combos = math.prod(len(seq) for seq in series_seqs)
         enumeration = _Enumeration([args[i].name for i in series_indices], series_seqs)
+        streams = _RowStreams(key, args)
         rows: list[_Row] = []
         misses = 0
         # Combinations skipped after redrawing their random args, keyed by their
@@ -1754,7 +1995,18 @@ class Parameter:
             if visit.counts:
                 visit.clear()
             row = self._build_row(
-                row_type, vec, random_indices, attempts, visit, constraints, "random", j, labels
+                row_type,
+                vec,
+                random_indices,
+                attempts,
+                visit,
+                constraints,
+                streams,
+                pos,
+                j,
+                "random",
+                j,
+                labels,
             )
             if row is not None:
                 rows.append(_Row("random", None, j, pos, j, row, labels))
@@ -1804,7 +2056,11 @@ class Parameter:
         ]
 
     def _per_sequence_rows(
-        self, n: int, constraints: _Constraints, total: Counter[str] | None = None
+        self,
+        n: int,
+        constraints: _Constraints,
+        key: StreamKey,
+        total: Counter[str] | None = None,
     ) -> list[_Row]:
         """
         Generate n random rows for every combination of the sequence args.
@@ -1817,6 +2073,7 @@ class Parameter:
         Args:
             n: Number of rows per combination
             constraints: The constraints to evaluate (``_evaluated()``)
+            key: The key of the rows' streams
             total: If given, counts every rejected draw by constraint name
 
         Returns:
@@ -1843,6 +2100,7 @@ class Parameter:
 
         row_type = self.vector_type
         enumeration = _Enumeration([args[i].name for i in sequence_indices], sequences)
+        streams = _RowStreams(key, args)
         rows: list[_Row] = []
         # Combinations cut short after redrawing their random args, with their row
         # count and the rejections of the row they could not fill
@@ -1869,6 +2127,9 @@ class Parameter:
                     attempts,
                     visit,
                     constraints,
+                    streams,
+                    pos,
+                    made,
                     "random",
                     made,
                     labels,
@@ -1910,7 +2171,11 @@ class Parameter:
         return rows
 
     def generate_exhaustive(
-        self, *, constraints_off: Iterable[str] = (), _stats: _GenerationStats | None = None
+        self,
+        *,
+        constraints_off: Iterable[str] = (),
+        _stats: _GenerationStats | None = None,
+        _key: StreamKey | None = None,
     ) -> list[Vector]:
         """
         Generate all combinations of sequence arguments (Cartesian product).
@@ -1926,6 +2191,7 @@ class Parameter:
                 are ignored. The Parameter keeps its constraints.
             _stats: Private: counts the rejections per constraint and the
                 combinations left out
+            _key: Private: the key of the rows' streams, as for generate_vectors()
 
         Returns:
             List of Vectors. Empty when skip_reason is set.
@@ -1943,22 +2209,28 @@ class Parameter:
         # An empty skip_if_empty sequence has no combinations to enumerate
         if self.skip_reason is not None:
             return []
-        return [row.values for row in self._exhaustive_rows(constraints, _stats)]
+        key = _key if _key is not None else _direct_key()
+        return [row.values for row in self._exhaustive_rows(constraints, key, _stats)]
 
     def _exhaustive_rows(
-        self, constraints: _Constraints, stats: _GenerationStats | None = None
+        self,
+        constraints: _Constraints,
+        key: StreamKey,
+        stats: _GenerationStats | None = None,
     ) -> list[_Row]:
         """
         Generate one row for every combination of the sequence args (Cartesian
         product), drawing the other args for each.
 
         The combinations follow each arg's ``--nsamples=auto`` order: a Series in
-        declaration order, an RNGSequence in a random permutation. A row's index is
-        its combination's position in the declaration-order product, whatever that
-        order, and its j is 0.
+        declaration order, an RNGSequence in a random permutation drawn from its
+        own stream (``key/"order"/argname``). A row's index is its combination's
+        position in the declaration-order product, whatever that order, and its j
+        is 0.
 
         Args:
             constraints: The constraints to evaluate (``_evaluated()``)
+            key: The key of the rows' streams and of the sequences' orders
             stats: If given, counts the rejections per constraint and the
                 combinations left out
 
@@ -1974,7 +2246,7 @@ class Parameter:
         for i, arg in enumerate(args):
             if arg.rng_type and isinstance(arg.rng_type, SequenceLike):
                 sequence_indices.append(i)
-                orders.append(_auto_order(arg.rng_type))
+                orders.append(_auto_order_from(key.child("order", arg.name), arg.rng_type))
 
         if not orders:
             raise ValueError("No sequence arguments found for exhaustive generation")
@@ -1989,6 +2261,7 @@ class Parameter:
             [args[i].name for i in sequence_indices],
             [args[i].rng_type.sequence for i in sequence_indices],
         )
+        streams = _RowStreams(key, args)
         rows: list[_Row] = []
         # The rejections of one combination, and of the combinations left out
         visit = _Rejections(stats.rejected if stats is not None else None)
@@ -2015,6 +2288,9 @@ class Parameter:
                 attempts,
                 visit,
                 constraints,
+                streams,
+                pos,
+                0,
                 "exhaustive",
                 index,
                 labels,

@@ -477,16 +477,19 @@ defined at module level. IDs look like `x=1,y=2`.
 
 ## 14. Reproducibility and pytest-xdist
 
-- Each (strategy, test) pair draws from its own `random.Random`, keyed by the seed,
-  the strategy name, the test file's path relative to the rootdir and the test's
-  qualified name. A test gets the same rows (and node IDs) whether you run the whole
-  suite, one file or one test, in any order and with any `--import-mode`. Two tests
-  sharing a strategy get different random rows.
+- Each argument of a random row draws from its own `random.Random`, keyed by the
+  seed, the strategy name, the test's node ID without its parameters (its path
+  relative to the rootdir, its class and its name), the row and the argument's name.
+  A test gets the same rows (and node IDs) whether you run the whole suite, one file
+  or one test, in any order and with any `--import-mode`. Two tests sharing a
+  strategy get different random rows. A row keeps its values with more rows, when
+  its node ID runs alone and when another argument is added or changed; a
+  constraint redraws only the rows it rejects.
 - Keep the same seed, the same rootdir and the same plugin version. The rootdir is
   the directory of the ini file (`pytest.ini`, or `pyproject.toml` with
   `[tool.pytest.ini_options]`); without one it depends on the folder pytest is run
   from, so compare the `rootdir:` line of both runs. Values for a seed may differ between major versions; check the
-  CHANGELOG before comparing with a 2.x run.
+  CHANGELOG before comparing with a 3.x run (4.0.0 changed the random rows).
 - pytest-xdist works with or without `--rng-seed`: the controller sends its seed to
   the workers.
 

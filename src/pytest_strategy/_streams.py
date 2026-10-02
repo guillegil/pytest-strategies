@@ -70,6 +70,27 @@ def _part(value: Any) -> bytes:
     return tag + len(payload).to_bytes(_LENGTH_SIZE, "big") + payload
 
 
+def encode(*parts: int | str) -> bytes:
+    """
+    Return the encoding of ``parts`` in a key's path, for :meth:`StreamKey.child_seed_int`.
+
+    Raises:
+        TypeError: If a part is not an int or a str (a bool or a float included)
+    """
+    return b"".join([_part(p) for p in parts])
+
+
+def seed_part(seed: object) -> int | str:
+    """
+    Return a seed as a key's first part: an int or a str as it is, and any other
+    seed ``random`` accepts (a bool, a float or bytes, given to ``RNG.seed()``) as
+    its repr, so that building a key never fails on the seed.
+    """
+    if isinstance(seed, str) or (isinstance(seed, int) and not isinstance(seed, bool)):
+        return seed
+    return repr(seed)
+
+
 class StreamKey:
     """
     The key of one random stream: a seed and a path of int and str parts.
@@ -95,13 +116,14 @@ class StreamKey:
         return key
 
     @classmethod
-    def root(cls, seed: int, *parts: int | str) -> StreamKey:
+    def root(cls, seed: int | str, *parts: int | str) -> StreamKey:
         """
         Return the key of a stream under ``seed``.
 
         Args:
             seed: The seed the stream derives from: the run's seed, or
-                ``RNG.get_seed()`` for the streams of direct calls
+                ``RNG.get_seed()`` for the streams of direct calls, through
+                :func:`seed_part`
             *parts: The stream's path, each part an int or a str
 
         Raises:
@@ -125,6 +147,17 @@ class StreamKey:
         """Return the 128-bit int that seeds this key's stream."""
         hasher = _HASHER.copy()
         hasher.update(self._path)
+        return int.from_bytes(hasher.digest(), "big")
+
+    def child_seed_int(self, encoded: bytes) -> int:
+        """
+        Return ``self.child(*parts).seed_int()``, given ``encode(*parts)``, without
+        building that key: the row streams derive one int per row and argument, and
+        encode the argument names once.
+        """
+        hasher = _HASHER.copy()
+        hasher.update(self._path)
+        hasher.update(encoded)
         return int.from_bytes(hasher.digest(), "big")
 
     def __eq__(self, other: object) -> bool:

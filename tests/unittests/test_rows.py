@@ -24,7 +24,14 @@ from pytest_strategy import (
     TestArg,
     Vector,
 )
-from pytest_strategy.parameters import _auto_order, _describe_row, _position_keys, _Row
+from pytest_strategy._streams import StreamKey
+from pytest_strategy.parameters import (
+    _auto_order,
+    _auto_order_from,
+    _describe_row,
+    _position_keys,
+    _Row,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -655,13 +662,14 @@ class TestExhaustiveRows:
         assert sorted(row.index for row in rows) == list(range(6))
 
     def test_rows_follow_the_permutation_and_the_index_does_not(self):
-        RNG.seed(3)
-        order = RNGSequence([10, 20, 30])._get_auto_sequence()
+        key = StreamKey.root(1, "test", "s", "t.py::test")
+        sequence = RNGSequence([10, 20, 30])
+        # The permutation drawn from the argument's order stream
+        order = [value for _, value in _auto_order_from(key.child("order", "ch"), sequence)]
         assert order != [10, 20, 30]
 
-        RNG.seed(3)
-        rows = Parameter(TestArg("ch", rng_type=RNGSequence([10, 20, 30])))._generate_rows(
-            0, exhaustive=True
+        rows = Parameter(TestArg("ch", rng_type=sequence))._generate_rows(
+            0, exhaustive=True, key=key
         )
 
         assert [row.values.ch for row in rows] == order

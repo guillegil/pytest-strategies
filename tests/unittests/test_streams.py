@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 import pytest_strategy
-from pytest_strategy._streams import VERSION, StreamKey, _part
+from pytest_strategy._streams import VERSION, StreamKey, _part, encode, seed_part
 from pytest_strategy.parameters import _position_keys
 
 
@@ -224,6 +224,33 @@ class TestKeys:
         key = StreamKey.root(1, "test", "burst").child("row", 3)
 
         assert repr(key) == "StreamKey(1, 'test', 'burst', 'row', 3)"
+
+    def test_child_seed_int_is_the_childs_seed_int(self):
+        key = StreamKey.root(7, "test", "burst", "t.py::test_w").child("row")
+
+        assert key.child_seed_int(encode("ch", "i:2", 3, "addr")) == (
+            key.child("ch", "i:2", 3, "addr").seed_int()
+        )
+        assert key.child_seed_int(b"") == key.seed_int()
+        assert encode("a", 1) == _part("a") + _part(1)
+        assert encode() == b""
+
+    def test_encode_refuses_what_a_key_refuses(self):
+        with pytest.raises(TypeError, match="must be an int or a str"):
+            encode("a", 1.5)
+
+
+class TestSeedPart:
+    @pytest.mark.parametrize("seed", [0, -5, 2**100, "fast", Lane.B])
+    def test_an_int_or_a_str_is_kept(self, seed):
+        assert seed_part(seed) is seed
+
+    @pytest.mark.parametrize(
+        ("seed", "part"), [(True, "True"), (1.5, "1.5"), (b"\x00", "b'\\x00'")]
+    )
+    def test_any_other_seed_is_its_repr(self, seed, part):
+        assert seed_part(seed) == part
+        StreamKey.root(seed_part(seed), "direct")
 
 
 # ---------------------------------------------------------------------------
