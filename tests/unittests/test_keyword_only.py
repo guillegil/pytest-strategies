@@ -10,12 +10,14 @@ an existing call does.
 """
 
 import inspect
+from typing import Any
 
 import pytest
 
 from pytest_strategy import (
     RNG,
     Parameter,
+    RNGBoolean,
     RNGInteger,
     RNGType,
     Series,
@@ -57,6 +59,13 @@ class DuckTyped:
 
     def generate(self):
         return 3
+
+
+class GenerateOnly:
+    """The least an rng_type needs: generate(), without python_type."""
+
+    def generate(self):
+        return 4
 
 
 class TestSignatures:
@@ -160,12 +169,28 @@ class TestKeywordCalls:
 class TestRngTypeCheck:
     @pytest.mark.parametrize(
         "rng_type",
-        [lambda v: 1, len, 5, "abc", [1, 2], object()],
-        ids=["lambda", "function", "int", "str", "list", "object"],
+        [lambda v: 1, len, 5, "abc", [1, 2], object(), int],
+        ids=["lambda", "function", "int", "str", "list", "object", "class"],
     )
     def test_without_generate_is_a_type_error(self, rng_type):
         with pytest.raises(TypeError, match=RNG_TYPE_ERROR):
             TestArg("x", rng_type=rng_type)
+
+    @pytest.mark.parametrize(
+        "rng_type",
+        [RNGBoolean, RNGInteger, Constant, DuckTyped],
+        ids=["RNGBoolean", "RNGInteger", "RNGType subclass", "duck-typed"],
+    )
+    def test_class_instead_of_an_instance_is_a_type_error(self, rng_type):
+        """The class has generate(), but unbound: the error says to build an instance."""
+        name = rng_type.__name__
+        with pytest.raises(TypeError) as exc_info:
+            TestArg("x", rng_type=rng_type)
+
+        assert str(exc_info.value) == (
+            "TestArg 'x' rng_type must be an RNGType or have a generate() method, got the "
+            f"class {name} instead of an instance (did you mean {name}(...)?)"
+        )
 
     def test_lambda_by_position_is_a_type_error(self):
         with pytest.raises(TypeError, match=RNG_TYPE_ERROR + "<function"):
@@ -198,3 +223,14 @@ class TestRngTypeCheck:
 
         assert param.generate_vectors(2, mode="random_only") == [(expected,), (expected,)]
         assert param.arg_types == (int,)
+
+    def test_object_with_generate_only_has_type_any(self):
+        """generate() is all an rng_type needs: without python_type the type is Any."""
+        arg = TestArg("x", rng_type=GenerateOnly())
+        param = Parameter(arg)
+
+        assert param.generate_vectors(2, mode="random_only") == [(4,), (4,)]
+        assert arg.type is Any
+        assert param.arg_types == (Any,)
+        assert repr(arg) == "TestArg(name='x', type=Any)"
+        assert arg.to_dict()["rng_type"] == "GenerateOnly"

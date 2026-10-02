@@ -150,7 +150,8 @@ class TestArg:
   `validator` and `description` are keyword-only: `TestArg("x", None, 5)` raises
   `TypeError`; write `TestArg("x", value=5)`.
 - `rng_type` must be an RNG type (or an object with a `generate()` method). A bare
-  function or lambda raises `TypeError`; subclass `RNGType` instead (section 6).
+  function or lambda raises `TypeError`; subclass `RNGType` instead (section 6). So
+  does the class itself: write `RNGBoolean()`, not `RNGBoolean`.
 - `validator` runs on generated and fixed values. A value that fails it stops
   collection with `ValueError` and is not redrawn, so filter with a `predicate` on the
   RNG type instead, and use `validator` only as an assertion.

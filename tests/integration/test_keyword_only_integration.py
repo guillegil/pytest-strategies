@@ -1,7 +1,7 @@
 """
 End-to-end tests for the keyword-only options and the rng_type check of 4.0, run
 through pytester: what a user sees for a positional option, a raw strategy marker
-with a positional flag, and an rng_type that is a bare lambda.
+with a positional flag, and an rng_type that is a bare lambda or an RNG type's class.
 
 Distinct module and strategy names are used per run on purpose (see
 test_session_isolation_integration.py for rationale).
@@ -131,13 +131,36 @@ class TestRngTypeCheck:
             ]
         )
 
+    def test_rng_type_class_fails_collection_with_a_hint(self, pytester):
+        pytester.makepyfile(test_ko_class="""
+            from pytest_strategy import Parameter, RNGBoolean, TestArg, register, strategy
+
+            @register("ko_class")
+            def ko_class(nsamples):
+                return Parameter(TestArg("flag", rng_type=RNGBoolean))
+
+            @strategy("ko_class")
+            def test_flag(flag):
+                pass
+            """)
+        result = pytester.runpytest()
+
+        result.assert_outcomes(errors=1)
+        result.stdout.fnmatch_lines(
+            [
+                "In test_flag: Error calling strategy factory 'ko_class' (nsamples=10): "
+                "TypeError: TestArg 'flag' rng_type must be an RNGType or have a generate() "
+                "method, got the class RNGBoolean instead of an instance "
+                "(did you mean RNGBoolean(...)?)",
+            ]
+        )
+
     def test_object_with_generate_collects(self, pytester):
+        """generate() is enough: the object needs no python_type."""
         pytester.makepyfile(test_ko_duck="""
             from pytest_strategy import Parameter, TestArg, register, strategy
 
             class Fives:
-                python_type = int
-
                 def generate(self):
                     return 5
 

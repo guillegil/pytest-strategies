@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Options are keyword-only: `TestArg(name, rng_type=None, *, value=None, validator=None, description="")`, `strategy(name, *, validate_signature=True)`, `export_strategies(*, format="json")` and `Parameter.generate_vectors(n, *, mode="all", filter_by_name=None, filter_by_index=None)`. Passing one by position raises Python's `TypeError` (for example `strategy() takes 1 positional argument but 2 were given`), and mypy reports the call: write `TestArg("x", value=5)` and `@strategy("name", validate_signature=False)`. `pytest --markers` and the error for a malformed `strategy` marker show `strategy(name_or_factory, *, validate_signature=True)`. Options that later 4.x releases add will be keyword-only too.
-- `TestArg`'s `rng_type` must be an `RNGType` or an object with a `generate()` method. Anything else, such as a bare lambda, raises `TypeError: TestArg 'x' rng_type must be an RNGType or have a generate() method, got ...` when the `TestArg` is built, also when a `value` is given. 3.0 accepted it, and failed with an `AttributeError` only when it drew a value.
+- `TestArg`'s `rng_type` must be an `RNGType` or an object with a `generate()` method. Anything else, such as a bare lambda or a class instead of an instance (`rng_type=RNGBoolean` for `RNGBoolean()`), raises `TypeError: TestArg 'x' rng_type must be an RNGType or have a generate() method, got ...` when the `TestArg` is built, also when a `value` is given. 3.0 accepted them, and failed only when it drew a value. An object with `generate()` and no `python_type` gives `TestArg.type` `Any`.
 
 ### Removed
 The APIs deprecated in 3.0, without warnings left behind:

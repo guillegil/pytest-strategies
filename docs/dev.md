@@ -229,8 +229,10 @@ samples = arg1.generate_samples(10)        # 10 draws ([value] for a static argu
 - Integration with RNG types
 
 `value`, `validator` and `description` are keyword-only. `rng_type` must be an
-`RNGType` or have a callable `generate()`; anything else, such as a bare lambda,
-raises `TypeError` when the `TestArg` is built.
+`RNGType` or have a callable `generate()`; anything else, such as a bare lambda or
+a class instead of an instance (`RNGBoolean` for `RNGBoolean()`), raises
+`TypeError` when the `TestArg` is built. An object without `python_type` gives
+the type `Any`.
 
 **Properties:**
 - `name` - Argument name

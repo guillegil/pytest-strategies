@@ -47,7 +47,8 @@ class TestArg:
         Raises:
             ValueError: If neither value nor rng_type is provided
             TypeError: If rng_type is neither an RNGType nor has a generate() method
-                (a bare function or lambda, for example)
+                (a bare function or lambda, for example), or is a class rather than
+                an instance (RNGBoolean for RNGBoolean())
 
         Examples:
             # Pure random
@@ -66,13 +67,22 @@ class TestArg:
         if value is None and rng_type is None:
             raise ValueError(f"TestArg '{name}' must have a value or an rng_type")
         # A callable without generate() is rejected rather than called, so that a
-        # later release can give such callables a meaning of their own
-        if rng_type is not None and not (
-            isinstance(rng_type, RNGType) or callable(getattr(rng_type, "generate", None))
+        # later release can give such callables a meaning of their own. A class is
+        # rejected too: its generate() is unbound, and RNGBoolean for RNGBoolean() is
+        # the likely mistake
+        if rng_type is not None and (
+            isinstance(rng_type, type)
+            or not (isinstance(rng_type, RNGType) or callable(getattr(rng_type, "generate", None)))
         ):
+            got = repr(rng_type)
+            if isinstance(rng_type, type) and callable(getattr(rng_type, "generate", None)):
+                got = (
+                    f"the class {rng_type.__name__} instead of an instance "
+                    f"(did you mean {rng_type.__name__}(...)?)"
+                )
             raise TypeError(
                 f"TestArg '{name}' rng_type must be an RNGType or have a generate() method, "
-                f"got {rng_type!r}"
+                f"got {got}"
             )
 
     def generate(self) -> Any:
@@ -192,10 +202,11 @@ class TestArg:
         Get the Python type of this argument.
 
         Returns:
-            Python type (int, float, str, etc.) or Any if unknown
+            Python type (int, float, str, etc.) or Any if unknown, as for an
+            rng_type with a generate() method but no python_type
         """
         if self._rng_type:
-            python_type: builtins.type = self._rng_type.python_type
+            python_type: builtins.type = getattr(self._rng_type, "python_type", Any)
             return python_type
         if self._value is not None:
             return type(self._value)
