@@ -11,6 +11,7 @@ Main Components:
 - register / strategy: Decorators that register a strategy factory and apply it to a test
 - Parameter: Container for multiple test arguments (parameter vectors)
 - TestArg: Single test argument definition with type and generation rules
+- Vector: One generated row, a tuple whose fields are the argument names (v.a)
 - RNG: Random number generation with seed management
 - RNGType classes: Type-safe random generators (RNGInteger, RNGFloat, etc.)
 
@@ -72,6 +73,7 @@ __email__ = "guillegil@proton.me"
 from . import strategy as _strategy_module  # noqa: F401
 from ._api import Strategy, export_strategies, register, strategy
 from ._options import StrategyOptions
+from ._vector import Vector
 from ._warnings import PytestStrategiesWarning
 from .parameters import Parameter
 
@@ -111,6 +113,7 @@ __all__ = [
     "Parameter",
     "TestArg",
     "StrategyOptions",
+    "Vector",
     # RNG classes
     "RNG",
     "RNGType",

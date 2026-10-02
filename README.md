@@ -189,7 +189,7 @@ Parameter(
     ]
 )
 ```
-A random vector that fails a constraint is drawn again, up to `max_retries` times (a `Parameter` argument, default 100). If no valid vector turns up, collecting the test fails with "Could not generate valid vector", and the message says how many draws each constraint rejected, naming the constraint functions (a lambda is named by its position), so you can tell which one is too strict.
+A constraint receives the row as a `Vector`, a tuple whose fields are the argument names, so `lambda v: v.min < v.max` works too. A random vector that fails a constraint is drawn again, up to `max_retries` times (a `Parameter` argument, default 100). If no valid vector turns up, collecting the test fails with "Could not generate valid vector", and the message says how many draws each constraint rejected, naming the constraint functions (a lambda is named by its position), so you can tell which one is too strict.
 
 ### 5. Sequence Testing & Exhaustive Generation (New in v2.0.0)
 

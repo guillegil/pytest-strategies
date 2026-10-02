@@ -113,7 +113,7 @@ class Parameter:
         directed_vectors: dict[str, tuple] | None = None,
         test_vectors: dict[str, tuple] | None = None,
         always_include_directed: bool = True,
-        vector_constraints: list[Callable[[tuple], bool]] | None = None,
+        vector_constraints: Sequence[Callable[[Vector], object]] | None = None,
         max_retries: int = 100,
         nsamples: int | str | None = None,
         per_sequence_samples: bool = False,
@@ -123,11 +123,11 @@ class Parameter:
 
 | Argument | Meaning |
 | --- | --- |
-| `*test_args` | the arguments, in order; names must be unique (`RNGValueError` otherwise) |
+| `*test_args` | the arguments, in order; names must be unique identifiers that are not keywords and do not start with `_` (`RNGValueError` otherwise) |
 | `directed_vectors` | named rows, one value per argument in order (a tuple or list), placed before the random rows |
 | `test_vectors` | named rows used only by `--vector-mode=test` |
 | `always_include_directed` | whether `--vector-mode=mixed` includes the directed vectors |
-| `vector_constraints` | functions taking the row tuple; a random row that fails one is redrawn |
+| `vector_constraints` | functions taking the row as a `Vector` (`v.lo` or `v[0]`); a random row that fails one is redrawn |
 | `max_retries` | redraws per row before giving up (int >= 1) |
 | `nsamples` | this strategy's default count: `None`, an int >= 0 or `"auto"`; an integer `--nsamples` overrides it |
 | `per_sequence_samples` | count rows per combination of the `Series`/`RNGSequence` arguments (section 7) |
@@ -143,7 +143,12 @@ class Parameter:
   `clear_constraints()`, `get_arg(name)`, `generate_vectors(n, mode=...)`,
   `generate_exhaustive()`, `to_dict()`.
 - Properties: `arg_names`, `arg_types`, `vector_names`, `num_args`,
-  `num_directed_vectors`, `skip_reason`.
+  `num_directed_vectors`, `skip_reason`, `vector_type`.
+- The generated rows are `Vector`s: tuples whose fields are the argument names
+  (`v.lo`), equal to the plain tuple of their values, with the repr
+  `Vector(lo=0, hi=5)`. A misspelled field raises
+  `AttributeError: Vector has no argument 'hgh'; its arguments are lo, hi`. Under
+  mypy a field is `Any`, so a constraint annotated `-> bool` returns `bool(...)`.
 
 ## 5. TestArg
 

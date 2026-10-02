@@ -89,6 +89,7 @@ src/pytest_strategy/
 ├── _cli.py              # pytest-strategies skill install
 ├── strategy.py          # 2.x compatibility module (Strategy, PytestStrategiesWarning)
 ├── parameters.py        # Parameter class (vector container)
+├── _vector.py           # Vector, the class of the generated rows (a namedtuple per argument names)
 ├── test_args.py         # TestArg class (single argument definition)
 ├── rng.py               # Random number generation and RNG types
 ├── hookspecs.py         # Hooks the plugin adds (pytest_strategies_context)
@@ -253,7 +254,15 @@ redrawn, so use a predicate on the RNG type to filter values instead.
 
 ### 3. `parameters.py` - Parameter Vector Container
 
-Groups multiple `TestArg` instances into parameter vectors (tuples).
+Groups multiple `TestArg` instances into parameter vectors (tuples). Every row
+it generates is a `Vector` (`_vector.py`): `vector_type(names)` builds one
+namedtuple class per tuple of argument names, which also subclasses `Vector`, and
+caches it, so `Parameter.vector_type` is shared by Parameters with the same names
+and a prefix of the names gets a class of its own. One private `_build_row` fills
+a row in declaration order (the enumerated values are already in place, the other
+arguments are drawn), builds the Vector and hands it to the constraints, for the
+plain, Series, `per_sequence_samples` and exhaustive paths alike. Argument names
+must therefore be identifiers that are not keywords and do not start with `_`.
 
 ```python
 from pytest_strategy import Parameter, TestArg
