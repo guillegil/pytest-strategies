@@ -147,19 +147,23 @@ def ranges(nsamples):
         TestArg("mode", value="fast"),                  # fixed value
         directed_vectors={"empty": (5, 5, "fast")},     # run in the default mode; one arg: (5,)
         test_vectors={"bug_1234": (0, 100, "fast")},    # only with --vector-mode=test
-        vector_constraints=[lo_below_hi],               # each gets the row as a tuple
+        vector_constraints=[lo_below_hi],               # each gets the row as a Vector
         nsamples=25,                                    # default count; --nsamples=N overrides it
         max_retries=100,                                # redraws per row before failing
     )
 
 def lo_below_hi(v):
-    return v[0] <= v[1]
+    return v.lo <= v.hi                                 # v[0] <= v[1] works too
 ```
 
 - A predicate on an RNG type filters one argument
   (`RNGInteger(0, 100, predicate=lambda x: x % 2 == 0)`); `vector_constraints`
-  relate arguments. Prefer named functions: when retries run out, the error names
-  each constraint and how often it rejected a row.
+  relate arguments. A constraint gets the row as a `Vector`, a tuple whose fields
+  are the argument names. Constraints are named: by a function's name in a list
+  (above: `lo_below_hi`), or by the keys of a dict
+  (`{"ordered": lambda v: v.lo <= v.hi}`). When retries run out, the error counts
+  by name how often each constraint rejected a row, and
+  `--strategy-constraint-off=lo_below_hi` turns one off for a run.
 - Directed and test vectors are used as written. Predicates, constraints and
   validators do not check them, so keep them valid yourself.
 - Argument names must be unique within a `Parameter`.
@@ -310,8 +314,10 @@ To reproduce a failure:
   supported yet". With string annotations, define the dataclass at module level.
 - **Shadowing.** A subfolder that registers a name hides the parent's strategy of
   that name for its tests. Pass the factory itself when a test needs a specific one.
-- **Over-constrained strategies** fail with "Could not generate valid vector"
-  after `max_retries` redraws. Narrow the ranges rather than filtering most draws.
+- **Over-constrained strategies** fail with "Could not generate random row K after
+  max_retries=N draws" ("Could not generate valid vector" for `Series`
+  combinations), followed by the rejections per constraint name. Narrow the ranges
+  rather than filtering most draws.
 - **`--vector-name`/`--vector-index` select directed vectors only.** Strategies
   without that vector yield an empty parameter set (their tests are skipped). If no
   strategy has it, the run stops with a usage error.
