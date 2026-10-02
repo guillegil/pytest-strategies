@@ -297,6 +297,40 @@ CASES = {
             "name: parameter 'p' (Point)*",
         ],
     ),
+    "fixtures_ask_for_every_argument": (
+        """
+        @pytest.fixture
+        def both(x, y):
+            return (x, y)
+
+        @strategy("CASE_xy")
+        @pytest.mark.usefixtures("both")
+        def test_p(p: Point):
+            pass
+        """,
+        # Named mode, and the fixtures take every argument, but nothing gives p a value
+        [
+            "*In test_p: Signature validation failed for strategy 'CASE_xy': parameter 'p' "
+            "(Point) gets no value: it is not one of the strategy's arguments, and no "
+            "fixture or parametrization provides it.",
+            "*A fixture of the test asks for 'x' and 'y', so the strategy passes its "
+            "arguments by name: parameter 'p' (Point) receives the row as a record only "
+            "when no fixture asks for an argument.",
+        ],
+    ),
+    "fixtures_ask_for_every_argument_and_p_is_parametrized": (
+        """
+        @pytest.fixture
+        def both(x, y):
+            return (x, y)
+
+        @strategy("CASE_xy")
+        @pytest.mark.parametrize("p", [Point(1, 2)])
+        def test_p(p: Point, both):
+            assert p == Point(1, 2) and isinstance(both[0], int)
+        """,
+        {"passed": 3},
+    ),
     "two_exact_dataclasses": (
         """
         @dataclass
@@ -413,6 +447,27 @@ CASES = {
             "NamedTuple; record mode supports dataclasses (NamedTuple, TypedDict and pydantic "
             "models are not supported yet). Take the arguments as parameters or use a "
             "dataclass.",
+        ],
+    ),
+    "namedtuple_with_other_fields": (
+        """
+        from typing import NamedTuple
+
+        class AB(NamedTuple):
+            a: int
+            x: int
+
+        @strategy("CASE_xy")
+        def test_p(txn: AB):
+            pass
+        """,
+        # The only record parameter: its fields are listed, as for a dataclass
+        [
+            "*In test_p: Strategy 'CASE_xy': parameter 'txn' is annotated with AB, a "
+            "NamedTuple, whose fields do not match the strategy's arguments (x, y): missing "
+            "'y'; extra 'a'. Record mode supports dataclasses (NamedTuple, TypedDict and "
+            "pydantic models are not supported yet). Take the arguments as parameters or use "
+            "a dataclass with those fields.",
         ],
     ),
     "typeddict_not_supported": (

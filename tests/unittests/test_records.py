@@ -479,13 +479,22 @@ class TestNotSupportedYet:
             detect_record_param(test_fn, XY, None)
 
     def test_lone_mismatched_namedtuple(self):
-        """A NamedTuple whose fields do not match cannot be used either."""
+        """A NamedTuple whose fields do not match cannot be used either: the error lists
+        the missing and extra fields, as for a dataclass."""
 
         def test_fn(txn: PointNT):
             pass
 
-        with pytest.raises(ValueError, match="a NamedTuple; record mode supports dataclasses"):
-            detect_record_param(test_fn, ["a", "b"], None)
+        with pytest.raises(ValueError) as excinfo:
+            detect_record_param(test_fn, ["a", "x"], None)
+
+        assert str(excinfo.value) == (
+            "parameter 'txn' is annotated with PointNT, a NamedTuple, whose fields do not "
+            "match the strategy's arguments (a, x): missing 'a'; extra 'y'. Record mode "
+            "supports dataclasses (NamedTuple, TypedDict and pydantic models are not "
+            "supported yet). Take the arguments as parameters or use a dataclass with those "
+            "fields."
+        )
 
     def test_named_mode_is_left_alone(self):
         """No error when a fixture asks for the arguments: the strategy passes them by name."""
@@ -661,7 +670,7 @@ class TestResolver:
         def test_fn(p: Point, db):
             pass
 
-        argnames, values, _ = _build(test_fn, fixturenames=["p", "db"], validate=validate)
+        argnames, values, *_ = _build(test_fn, fixturenames=["p", "db"], validate=validate)
         assert (argnames, values) == ("p", [Point(1, 2)])
 
     @pytest.mark.parametrize("validate", [True, False])
@@ -669,8 +678,20 @@ class TestResolver:
         def test_fn(point: Point):
             pass
 
-        argnames, values, _ = _build(test_fn, fixturenames=["point", "x", "y"], validate=validate)
-        assert (argnames, values) == ("x,y", [(1, 2)])
+        parametrization = _build(test_fn, fixturenames=["point", "x", "y"], validate=validate)
+        assert (parametrization.argnames, parametrization.values) == ("x,y", [(1, 2)])
+        # The plugin checks, once the test is parametrized, that a fixture named
+        # point exists: the strategy gives it nothing
+        if validate:
+            [(param, message)] = parametrization.unfilled
+            assert param == "point"
+            assert message.startswith(
+                "Signature validation failed for strategy 's': parameter 'point' (Point) gets "
+                "no value: it is not one of the strategy's arguments, and no fixture or "
+                "parametrization provides it.\n  A fixture of the test asks for 'x' and 'y'"
+            )
+        else:
+            assert parametrization.unfilled == ()
 
     def test_errors_name_the_strategy(self):
         def test_fn(p: Point, q: Other):
@@ -709,7 +730,7 @@ class TestResolver:
         def test_fn(p: Sum):
             pass
 
-        argnames, values, ids = _build(test_fn)
+        argnames, values, ids, _ = _build(test_fn)
         assert argnames == "p" and ids == ["x=1,y=2"]
         assert not hasattr(values[0], "total")
 

@@ -139,8 +139,9 @@ def detect_record_param(
     fields are exactly the *argnames*. A test parameter is one that pytest fills: no
     default, not ``*args``, ``**kwargs`` or positional-only, and not ``self``,
     ``cls`` or a name in *pytest_fixtures*. When no annotation matches exactly but a
-    single parameter has a record type, that parameter is still returned, so that
-    building the records reports the missing and extra fields.
+    single parameter has a record type, the missing and extra fields are reported:
+    a dataclass parameter is still returned, so that building the records reports
+    them, as 3.0 did, and any other kind fails here.
 
     String annotations (``from __future__ import annotations`` or quoted forward
     references) are resolved in the test module's globals, so the record type must
@@ -159,7 +160,8 @@ def detect_record_param(
 
     Raises:
         ValueError: When two parameters match exactly, or when the record type is a
-            NamedTuple, TypedDict or pydantic model, which are not built yet
+            NamedTuple, TypedDict or pydantic model, which are not built yet (listing
+            the missing and extra fields of one that does not match)
     """
     asked = set(lazy_signature(test_fn).parameters) if fixturenames is None else fixturenames
     if any(name in asked for name in argnames):
@@ -180,6 +182,10 @@ def detect_record_param(
         record = exact[0]
     elif len(candidates) == 1:
         record = candidates[0]
+        if record.kind != "dataclass":
+            raise ValueError(_mismatch(record, argnames))
+        # convert_to_dataclass lists the missing and extra fields
+        return record
     else:
         return None
     if record.kind != "dataclass":
@@ -190,6 +196,25 @@ def detect_record_param(
             "parameters or use a dataclass."
         )
     return record
+
+
+def _mismatch(record: RecordParam, argnames: Sequence[str]) -> str:
+    """Describe a record type that is not a dataclass and whose fields are not the arguments."""
+    cls = record.record_type.__name__
+    missing = [name for name in argnames if name not in record.fields]
+    extra = sorted(record.fields - set(argnames))
+    problems = []
+    if missing:
+        problems.append(f"missing {_join([repr(name) for name in missing])}")
+    if extra:
+        problems.append(f"extra {_join([repr(name) for name in extra])}")
+    return (
+        f"parameter '{record.name}' is annotated with {cls}, {_KIND_NAMES[record.kind]}, "
+        f"whose fields do not match the strategy's arguments ({', '.join(argnames)}): "
+        f"{'; '.join(problems)}. Record mode supports dataclasses (NamedTuple, TypedDict "
+        "and pydantic models are not supported yet). Take the arguments as parameters or "
+        "use a dataclass with those fields."
+    )
 
 
 def record_hints(
@@ -245,6 +270,27 @@ def record_hints(
                 "it does not receive the row as a record."
             )
     return hints
+
+
+def matching_record_params(
+    test_fn: Callable[..., Any],
+    argnames: Sequence[str],
+    *,
+    pytest_fixtures: frozenset[str] | set[str] = PYTEST_FIXTURES,
+) -> list[RecordParam]:
+    """
+    Return the test parameters annotated with a record type whose fields are
+    exactly *argnames*, in signature order.
+
+    In named mode (a fixture asks for an argument) such a parameter receives
+    nothing from the strategy: a fixture or a parametrization must give it a value.
+    """
+    wanted = set(argnames)
+    return [
+        c
+        for c in _candidates(test_fn, pytest_fixtures)
+        if c.fields == wanted and c.name not in wanted
+    ]
 
 
 def _is_record_type(annotation: object) -> bool:

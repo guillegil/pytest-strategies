@@ -573,7 +573,9 @@ resolved.
 - `pytest_collectstart` - Before a test module is imported, loads the strategy
   files of its folder and the folders above it
 - `pytest_generate_tests` - Resolves the test's `strategy` markers into
-  `parametrize` markers
+  `parametrize` markers. A second, module-level implementation runs last: it
+  fails a test written for record mode whose fixtures take every argument by
+  name when no fixture or parametrization gives its record parameter a value
 - `pytest_collectreport` - Notes a test module or class that was skipped or
   failed to collect: its strategies may be unresolved, so the run counts as
   narrowed for `--strategy-constraint-off`

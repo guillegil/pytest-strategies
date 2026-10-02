@@ -23,7 +23,7 @@ import os
 import re
 import sys
 import traceback
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path, PurePath
 from types import ModuleType
 from typing import Any, get_args
@@ -46,6 +46,10 @@ from .rng import RNG
 
 # This package's folder, whose frames are left out of the errors shown for a factory
 _PACKAGE_DIR = os.path.normcase(os.path.realpath(os.path.dirname(__file__)))
+
+# A test's record parameters that its strategies, in named mode, leave to fixtures:
+# (parameter, error) pairs, checked once the test is parametrized
+_UNFILLED_RECORDS = pytest.StashKey[list[tuple[str, str]]]()
 
 # Strategy file names; a file is imported only if it also contains a registration
 _STRATEGY_FILE_PATTERNS = ("strategies.py", "strategy.py", "*_strategies.py", "*_strategy.py")
@@ -254,6 +258,7 @@ class PytestStrategyPlugin:
         from ._resolver import build_parametrization
 
         markers: list[pytest.Mark] = []
+        unfilled: list[tuple[str, str]] = []
         for mark in own_markers:
             markers.append(mark)
             if mark.name != "strategy":
@@ -296,7 +301,10 @@ class PytestStrategyPlugin:
                     parametrization.argnames, parametrization.values, ids=parametrization.ids
                 ).mark
             )
+            unfilled.extend(parametrization.unfilled)
         own_markers[:] = markers
+        if unfilled:
+            metafunc.definition.stash[_UNFILLED_RECORDS] = unfilled
 
     @pytest.hookimpl
     def pytest_collectreport(self, report: pytest.CollectReport) -> None:
@@ -1422,6 +1430,28 @@ def _collects_whole_suite(config: Config) -> bool:
         return False
     narrowing = ("lf", "stepwise", "stepwise_skip", "ignore", "ignore_glob")
     return not any(config.getoption(dest, None) for dest in narrowing)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
+    """
+    Fail the collection of a test written for record mode whose fixtures ask for
+    every strategy argument, so the strategy passes them by name, when nothing
+    gives its record parameter a value.
+
+    Runs once every other pytest_generate_tests hook has parametrized the test, so
+    a parametrization of the parameter counts. pytest would otherwise fail each
+    row at setup with "fixture 'p' not found", which says nothing of record mode.
+    """
+    unfilled = metafunc.definition.stash.get(_UNFILLED_RECORDS, None)
+    # The names pytest finds a fixture for at setup, parametrized names included. A
+    # pytest without this private attribute leaves the error to setup.
+    provided = getattr(metafunc, "_arg2fixturedefs", None)
+    if not unfilled or not isinstance(provided, Mapping):
+        return
+    for param, message in unfilled:
+        if param not in provided:
+            pytest.fail(f"In {metafunc.function.__name__}: {message}", pytrace=False)
 
 
 def pytest_addhooks(pluginmanager: pytest.PytestPluginManager) -> None:

@@ -22,7 +22,13 @@ from ._factory import FactoryInputs, call_factory
 from ._ids import generate_dataclass_ids, generate_test_ids, make_unique_ids
 from ._introspection import validate_signature
 from ._options import constraint_off_item
-from ._records import convert_to_dataclass, detect_record_param, record_hints
+from ._records import (
+    RecordParam,
+    convert_to_dataclass,
+    detect_record_param,
+    matching_record_params,
+    record_hints,
+)
 from ._registry import _describe_factory, display_path, factory_source
 from ._runtime import Resolution, runtime
 from ._warnings import PytestStrategiesWarning
@@ -40,11 +46,16 @@ DEFAULT_MAX_EXHAUSTIVE = 100_000
 
 
 class Parametrization(NamedTuple):
-    """The arguments of ``pytest.mark.parametrize`` for one test and strategy."""
+    """
+    The arguments of ``pytest.mark.parametrize`` for one test and strategy, and in
+    named mode the test parameters annotated with the strategy's record type, with
+    the error to report when no fixture or parametrization gives one a value.
+    """
 
     argnames: str
     values: list[Any]
     ids: list[str]
+    unfilled: tuple[tuple[str, str], ...] = ()
 
 
 def _id_row(sample: Any) -> Any:
@@ -472,6 +483,7 @@ def build_parametrization(
 
         # Validate signature if requested. An argument that a fixture of the test asks
         # for is taken by that fixture.
+        unfilled: tuple[tuple[str, str], ...] = ()
         if validate:
             try:
                 validate_signature(
@@ -492,6 +504,16 @@ def build_parametrization(
                 raise ValueError(
                     f"Signature validation failed for strategy '{name}': {e}{hints}"
                 ) from e
+            # A test written for record mode whose fixtures ask for every argument
+            # passes the check above, but its record parameter gets nothing from the
+            # strategy. The plugin reports it once the test is parametrized, unless a
+            # fixture or a parametrization gives it a value.
+            records = matching_record_params(test_fn, argnames, pytest_fixtures=pytest_fixtures)
+            if records:
+                why = record_hints(test_fn, argnames, fixturenames, pytest_fixtures=pytest_fixtures)
+                unfilled = tuple(
+                    (record.name, _unfilled_message(name, record, why)) for record in records
+                )
 
         # Create comma-separated string of parameter names for pytest.mark.parametrize
         argstr = ",".join(argnames)
@@ -513,7 +535,20 @@ def build_parametrization(
             ]
         samples, ids = _unique_ids(samples, ids, config)
 
-        return Parametrization(argstr, samples, ids)
+        return Parametrization(argstr, samples, ids, unfilled)
+
+
+def _unfilled_message(name: str, record: RecordParam, hints: list[str]) -> str:
+    """
+    Describe a record parameter that no fixture or parametrization gives a value,
+    in a test whose fixtures take the strategy's arguments by name.
+    """
+    return (
+        f"Signature validation failed for strategy '{name}': parameter '{record.name}' "
+        f"({record.record_type.__name__}) gets no value: it is not one of the strategy's "
+        "arguments, and no fixture or parametrization provides it.\n"
+        + "".join(f"  {hint}\n" for hint in hints)
+    )
 
 
 def _rootpath(config: pytest.Config | None) -> Path | None:
