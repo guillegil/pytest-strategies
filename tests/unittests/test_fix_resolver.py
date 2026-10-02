@@ -10,7 +10,7 @@ import json
 import textwrap
 import warnings
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import DEFAULT, MagicMock
 
 import pytest
 
@@ -19,7 +19,7 @@ from pytest_strategy._factory import FactoryInputs, call_factory
 from pytest_strategy._resolver import resolve_and_parametrize
 from pytest_strategy._runtime import runtime
 from pytest_strategy.parameters import Parameter
-from pytest_strategy.rng import RNGChoice, Series
+from pytest_strategy.rng import RNGChoice, RNGValueError, Series
 from pytest_strategy.strategy import PytestStrategiesWarning
 from pytest_strategy.test_args import TestArg
 
@@ -28,12 +28,17 @@ from pytest_strategy.test_args import TestArg
 # ---------------------------------------------------------------------------
 
 
-def _make_config(**options):
-    """Return a mock pytest.Config whose getoption() serves the given CLI options."""
+def _make_config(*, ids=None, **options):
+    """
+    Return a mock pytest.Config whose getoption() serves the given CLI options, and
+    whose getini() serves ``ids`` as the strategies_ids ini option when it is given.
+    """
     values = {"nsamples": None, "vector_mode": "all", "vector_name": None, "vector_index": None}
     values.update(options)
     config = MagicMock()
     config.getoption.side_effect = lambda opt, default=None: values.get(opt, default)
+    if ids is not None:
+        config.getini.side_effect = lambda name: ids if name == "strategies_ids" else DEFAULT
     return config
 
 
@@ -573,29 +578,40 @@ class TestExportStrategiesFactoryCalling:
 
 
 class TestSingleArgumentIds:
-    """IDs are built from the values passed to parametrize, unwrapped exactly once."""
+    """
+    In the values format, IDs are built from the values passed to parametrize,
+    unwrapped exactly once.
+    """
 
     def test_tuple_valued_directed_vectors(self):
         param = Parameter(
             TestArg("pt", rng_type=RNGChoice([(1, 2)])),
             directed_vectors={"a": ((1, 2),), "b": ((1, 3),)},
         )
-        _, samples, ids = _resolve(lambda nsamples: param, ["pt"], vector_mode="directed_only")
+        _, samples, ids = _resolve(
+            lambda nsamples: param, ["pt"], vector_mode="directed_only", ids="values"
+        )
         assert samples == [(1, 2), (1, 3)]
         assert ids == ["pt=(1, 2)", "pt=(1, 3)"]
 
     def test_tuple_valued_random_samples(self):
         param = Parameter(TestArg("pt", rng_type=RNGChoice([(7, 8)])))
         _, samples, ids = _resolve(
-            lambda nsamples: param, ["pt"], nsamples=2, vector_mode="random_only"
+            lambda nsamples: param, ["pt"], nsamples=2, vector_mode="random_only", ids="values"
         )
         assert samples == [(7, 8), (7, 8)]
         # Repeated rows are suffixed as pytest would, so strict IDs accept them
         assert ids == ["pt=(7, 8)0", "pt=(7, 8)1"]
 
+    def test_the_names_format_does_not_read_the_values(self):
+        param = Parameter(TestArg("pt", rng_type=RNGChoice([(7, 8)])))
+        _, samples, ids = _resolve(lambda nsamples: param, ["pt"], nsamples=2)
+        assert samples == [(7, 8), (7, 8)]
+        assert ids == ["rand-0", "rand-1"]
+
 
 # ---------------------------------------------------------------------------
-# pytest.param vectors: marks and ids are kept, IDs are built from the values
+# pytest.param vectors: marks are kept, and the vector's name is its ID
 # ---------------------------------------------------------------------------
 
 
@@ -608,16 +624,16 @@ class TestPytestParamVectors:
             TestArg("x", rng_type=RNGInteger(0, 9)),
             directed_vectors={
                 "one": pytest.param(1, marks=xfail),
-                "five": pytest.param(5, id="five"),
+                "five": {"x": 5},
                 "two": (2,),
             },
             nsamples=0,
         )
         _, samples, ids = _resolve(lambda nsamples: param, ["x"])
         assert samples[0] == pytest.param(1, marks=xfail)
-        assert samples[1] == pytest.param(5, id="five")
+        assert samples[1] == 5
         assert samples[2] == 2
-        assert ids == ["x=1", "x=5", "x=2"]
+        assert ids == ["directed-one", "directed-five", "directed-two"]
 
     def test_pytest_param_multi_arg_ids_use_values(self):
         xfail = pytest.mark.xfail(strict=True)
@@ -627,21 +643,28 @@ class TestPytestParamVectors:
             directed_vectors={"unequal": pytest.param(1, 2, marks=xfail), "equal": (3, 3)},
             nsamples=0,
         )
-        _, samples, ids = _resolve(lambda nsamples: param, ["a", "b"])
+        _, samples, ids = _resolve(lambda nsamples: param, ["a", "b"], ids="values")
         assert samples == [pytest.param(1, 2, marks=xfail), (3, 3)]
         assert ids == ["a=1,b=2", "a=3,b=3"]
 
-    def test_pytest_param_id_repeating_another_row_is_suffixed(self):
+    def test_pytest_param_repeating_another_row_is_suffixed(self):
         xfail = pytest.mark.xfail(strict=True)
         param = Parameter(
             TestArg("x", rng_type=RNGInteger(0, 9)),
-            directed_vectors={"one": (1,), "two": pytest.param(2, id="x=1", marks=xfail)},
+            directed_vectors={"one": (1,), "two": pytest.param(1, marks=xfail)},
             nsamples=0,
         )
-        _, samples, ids = _resolve(lambda nsamples: param, ["x"])
-        # The row keeps its marks; its ids entry, which pytest ignores, is unchanged
-        assert samples == [1, pytest.param(2, id="x=1_1", marks=xfail)]
-        assert ids == ["x=1_0", "x=2"]
+        _, samples, ids = _resolve(lambda nsamples: param, ["x"], ids="values")
+        # The row keeps its marks; its ID is in the ids list
+        assert samples == [1, pytest.param(1, marks=xfail)]
+        assert ids == ["x=1_0", "x=1_1"]
+
+    def test_pytest_param_with_an_id_fails(self):
+        with pytest.raises(RNGValueError, match="the vector's name is its ID"):
+            Parameter(
+                TestArg("x", rng_type=RNGInteger(0, 9)),
+                directed_vectors={"five": pytest.param(5, id="five")},
+            )
 
 
 # ---------------------------------------------------------------------------

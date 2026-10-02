@@ -17,7 +17,7 @@ import typing
 from dataclasses import InitVar, dataclass, field
 from pathlib import Path
 from typing import Annotated, Generic, NamedTuple, NotRequired, Optional, TypedDict, TypeVar
-from unittest.mock import MagicMock
+from unittest.mock import DEFAULT, MagicMock
 
 import pytest
 
@@ -672,11 +672,12 @@ def _xy(nsamples):
     return Parameter(TestArg("x", value=1), TestArg("y", value=2), nsamples=1)
 
 
-def _build(test_fn, *, fixturenames=None, validate=True):
+def _build(test_fn, *, fixturenames=None, validate=True, ids="names"):
     config = MagicMock()
     config.getoption.side_effect = lambda opt, default=None: {"vector_mode": "all"}.get(
         opt, default
     )
+    config.getini.side_effect = lambda name: ids if name == "strategies_ids" else DEFAULT
     return build_parametrization(
         "s",
         _xy,
@@ -771,8 +772,16 @@ class TestResolver:
         def test_fn(p: Sum):
             pass
 
-        argnames, values, ids, _ = _build(test_fn)
+        argnames, values, ids, _ = _build(test_fn, ids="values")
         assert argnames == "p" and ids == ["x=1,y=2"]
+        assert not hasattr(values[0], "total")
+
+    def test_names_ids_do_not_read_the_record(self):
+        def test_fn(p: Sum):
+            pass
+
+        argnames, values, ids, _ = _build(test_fn)
+        assert argnames == "p" and ids == ["rand-0"]
         assert not hasattr(values[0], "total")
 
 

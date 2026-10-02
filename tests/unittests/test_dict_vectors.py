@@ -341,12 +341,12 @@ class TestPytestParamVectors:
             _addr_len(test_vectors={"z": pytest.param({"addr": 1}, marks=XFAIL)})
 
     def test_values_are_positional_otherwise(self):
-        param = _addr_len(directed_vectors={"p": pytest.param(1, 2, marks=XFAIL, id="p")})
+        param = _addr_len(directed_vectors={"p": pytest.param(1, 2, marks=XFAIL)})
 
         stored = param.get_vector_by_index(0)
 
         assert type(stored.values) is param.vector_type
-        assert stored == pytest.param(1, 2, marks=XFAIL, id="p")
+        assert stored == pytest.param(1, 2, marks=XFAIL)
 
     def test_a_string_value_is_one_value(self):
         param = _param("x", directed_vectors={"s": pytest.param("ab")})

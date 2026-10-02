@@ -385,7 +385,7 @@ created with `skip_if_empty` that has no values, or `None`. When it is set,
 drawing random values (an invalid `n` still raises). `filter_by_name`/`filter_by_index` still raise
 `KeyError`/`IndexError` for a missing vector, so the CLI can tell whether a
 filter matched. The resolver then parametrizes the test with a single
-`pytest.param(None, ..., marks=pytest.mark.skip(reason=...), id="skipped")` row,
+`pytest.param(None, ..., marks=pytest.mark.skip(reason=...))` row, whose ID is `skipped`,
 also in dataclass mode, where no instance is built but the dataclass fields are
 still checked against the strategy's arguments. `skip_if_empty` is keyword-only,
 and a non-callable `predicate` (such as a reason passed positionally) raises.
@@ -396,8 +396,9 @@ caller's dicts and lists. Every directed and test vector goes through
 `_normalize_vector()` (in `__init__` and the `add_*` methods), which stores it
 as a `Vector` in declaration order: a dict or a namedtuple by name, a tuple, list
 or other iterable by position, and a `pytest.param` rebuilt around the `Vector`
-with its marks and id. Strings, bytes, scalars and record instances fail there,
-and so do names that are not non-empty strings. `directed_vectors` and
+with its marks. Strings, bytes, scalars, record instances and a `pytest.param`
+with an `id=` (the vector's name is its ID) fail there, and so do names that are
+not non-empty strings. `directed_vectors` and
 `test_vectors` are read-only `MappingProxyType` views of the private dicts.
 
 **Key Features:**
@@ -521,7 +522,10 @@ parametrized, so a fixture asking for an argument would find nothing.
 - Automatic pytest parametrization
 - A random stream of its own for each strategy and test
 - CLI option integration
-- Readable test IDs. A value whose repr contains a memory address is shown by
+- Test IDs that name the row (`directed-zeros`, `rand-3`, `ch=2-rand-1`, built by
+  `names_id()` from the row's kind, name, j and labels), the same for every seed.
+  The ini option `strategies_ids=values` gives the 3.0 IDs built from the values
+  instead: there a value whose repr contains a memory address is shown by
   its type name, and set elements are sorted (also inside tuples, lists,
   dicts, and dataclass and namedtuple values that keep their generated repr),
   so IDs are the same on every run and on every xdist worker.

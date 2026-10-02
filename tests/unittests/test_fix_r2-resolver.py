@@ -731,7 +731,7 @@ class TestConvertCustomInit:
             test_rect,
         )
         assert [(r.width, r.height) for r in samples] == [(1, 2)]
-        assert ids == ["width=1,height=2"]
+        assert ids == ["rand-0"]
 
 
 # ---------------------------------------------------------------------------
@@ -740,9 +740,9 @@ class TestConvertCustomInit:
 
 
 class TestDataclassModePytestParam:
-    """A pytest.param sample is converted from its values and keeps its marks and id."""
+    """A pytest.param sample is converted from its values and keeps its marks."""
 
-    def test_values_marks_and_id_are_kept(self):
+    def test_values_and_marks_are_kept(self):
         slow = pytest.mark.slow
 
         def test_point(p: Point):
@@ -755,7 +755,7 @@ class TestDataclassModePytestParam:
                 directed_vectors={
                     "plain": (1, 2),
                     "slow": pytest.param(3, 4, marks=slow),
-                    "custom": pytest.param(5, 6, id="custom"),
+                    "custom": {"y": 6, "x": 5},
                 },
                 nsamples=0,
             ),
@@ -765,8 +765,9 @@ class TestDataclassModePytestParam:
         assert argstr == "p"
         assert samples[0] == Point(1, 2)
         assert samples[1] == pytest.param(Point(3, 4), marks=slow)
-        assert samples[2] == pytest.param(Point(5, 6), id="custom")
-        assert ids == ["x=1,y=2", "x=3,y=4", "x=5,y=6"]
+        assert samples[2] == Point(5, 6)
+        # The vector's name is its ID
+        assert ids == ["directed-plain", "directed-slow", "directed-custom"]
 
     def test_parameter_rows_are_still_converted(self):
         """Guards behaviour that already worked for rows that are not pytest.param."""
@@ -785,7 +786,7 @@ class TestDataclassModePytestParam:
             config=_make_config(vector_mode="directed_only"),
         )
         assert samples == [Point(0, 0)]
-        assert ids == ["x=0,y=0"]
+        assert ids == ["directed-origin"]
 
 
 # ---------------------------------------------------------------------------

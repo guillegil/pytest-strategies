@@ -5,6 +5,7 @@ Each test here failed before its fix. Runs that depend on the process (environme
 working directory, pyc cache, xdist) use a subprocess; the others run in-process.
 """
 
+import json
 import random
 import re
 import shutil
@@ -33,6 +34,25 @@ def _restore_global_state():
 def _ids(result, test_name):
     """The parametrization IDs of ``test_name`` in a --collect-only -q run."""
     return re.findall(rf"{test_name}\[(.*)\]", result.stdout.str())
+
+
+# A conftest that writes the parameter values of every collected row, in collection
+# order, to values.json, or to values-<worker>.json on a pytest-xdist worker. Node IDs
+# name the rows, so runs are compared by their values.
+DUMP_VALUES = """
+import json
+
+def pytest_collection_modifyitems(session, config, items):
+    worker = getattr(config, "workerinput", {}).get("workerid")
+    rows = [[item.nodeid, repr(item.callspec.params)] for item in items if hasattr(item, "callspec")]
+    name = f"values-{worker}.json" if worker else "values.json"
+    (config.rootpath / name).write_text(json.dumps(rows))
+"""
+
+
+def _values(pytester, name="values.json"):
+    """Return the [node ID, values] of each row the last run collected (DUMP_VALUES)."""
+    return json.loads((pytester.path / name).read_text())
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +293,7 @@ class TestDataclassTypedFixture:
 
 
 class TestIdsInRealRuns:
-    """IDs keep string data and do not depend on PYTHONHASHSEED."""
+    """IDs in the values format keep string data and do not depend on PYTHONHASHSEED."""
 
     def test_strings_containing_at_0x_keep_their_value(self, pytester):
         pytester.makepyfile(fault_strategies="""
@@ -311,7 +331,7 @@ class TestIdsInRealRuns:
                 pass
             """)
 
-        result = pytester.runpytest_inprocess("--collect-only", "-q")
+        result = pytester.runpytest_inprocess("--collect-only", "-q", "-o", "strategies_ids=values")
 
         assert _ids(result, "test_parse") == ["line='segfault at 0x0'", "line='jump at 0x401000'"]
         assert _ids(result, "test_pairs") == [
@@ -350,7 +370,9 @@ class TestIdsInRealRuns:
         collected = []
         for hash_seed in ("1", "2", "3"):
             monkeypatch.setenv("PYTHONHASHSEED", hash_seed)
-            result = pytester.runpytest_subprocess("--collect-only", "-q", "--rng-seed=1")
+            result = pytester.runpytest_subprocess(
+                "--collect-only", "-q", "--rng-seed=1", "-o", "strategies_ids=values"
+            )
             collected.append(_ids(result, "test_perms"))
 
         assert len(collected[0]) == 11
@@ -364,7 +386,9 @@ class TestIdsInRealRuns:
         pytester.makepyfile(set_strategies=self.SET_STRATEGIES)
         pytester.makepyfile(test_sets=self.SET_TESTS)
 
-        result = pytester.runpytest_subprocess("-n", "3", "--rng-seed=1")
+        result = pytester.runpytest_subprocess(
+            "-n", "3", "--rng-seed=1", "-o", "strategies_ids=values"
+        )
 
         result.stdout.no_fnmatch_line("*Different tests were collected*")
         result.assert_outcomes(passed=11)
@@ -413,9 +437,9 @@ class TestDataclassModeSamples:
         result = pytester.runpytest_inprocess("-v")
 
         result.assert_outcomes(passed=2)
-        result.stdout.fnmatch_lines(["*test_rect[[]width=1,height=2[]] PASSED*"])
+        result.stdout.fnmatch_lines(["*test_rect[[]directed-small[]] PASSED*"])
 
-    def test_pytest_param_marks_and_id(self, pytester):
+    def test_pytest_param_marks_and_names(self, pytester):
         pytester.makeini("[pytest]\nmarkers =\n    slow: slow tests\n")
         pytester.makepyfile(point_strategies="""
             import pytest
@@ -432,7 +456,7 @@ class TestDataclassModeSamples:
                         "slow": pytest.param(3, 4, marks=pytest.mark.slow),
                         "strict_xfail": pytest.param(5, 6, marks=pytest.mark.xfail(strict=True)),
                         "skipped": pytest.param(7, 8, marks=pytest.mark.skip),
-                        "custom": pytest.param(9, 10, id="custom"),
+                        "custom": {"y": 10, "x": 9},
                     },
                     nsamples=0,
                 )
@@ -456,7 +480,8 @@ class TestDataclassModeSamples:
         result = pytester.runpytest_inprocess("-v")
         result.assert_outcomes(passed=3, xfailed=1, skipped=1)
         result.stdout.fnmatch_lines(
-            ["*test_dc[[]x=3,y=4[]] PASSED*", "*test_dc[[]custom[]] PASSED*"], consecutive=False
+            ["*test_dc[[]directed-slow[]] PASSED*", "*test_dc[[]directed-custom[]] PASSED*"],
+            consecutive=False,
         )
 
         slow = pytester.runpytest_inprocess("-m", "slow")
@@ -497,9 +522,11 @@ class TestStreamKeyIgnoresImportMode:
             "    pass\n"
         )
 
+        pytester.makeconftest(DUMP_VALUES)
+
         def collect(*args):
-            result = pytester.runpytest_subprocess("--collect-only", "-q", "--rng-seed=7", *args)
-            return _ids(result, "test_b")
+            pytester.runpytest_subprocess("--collect-only", "-q", "--rng-seed=7", *args)
+            return [row for row in _values(pytester) if "::test_b[" in row[0]]
 
         prepend = collect("--import-mode=prepend")
         runs = {

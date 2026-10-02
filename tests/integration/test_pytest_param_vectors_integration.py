@@ -1,7 +1,7 @@
 """
 End-to-end tests for pytest.param(*values, marks=...) as a directed or test vector,
-run through pytester: the row keeps its marks and id, and a vector whose values do
-not match the arguments fails collection.
+run through pytester: the row keeps its marks and its name is its ID, and a vector
+whose values do not match the arguments, or that has an id=, fails collection.
 
 Distinct module and strategy names are used per run on purpose (see
 test_session_isolation_integration.py for rationale).
@@ -68,7 +68,23 @@ class TestMarkedVectors:
 
         result.assert_outcomes(xfailed=1)
 
-    def test_explicit_id_is_the_test_id(self, pytester):
+    def test_the_vectors_name_is_the_test_id(self, pytester):
+        pytester.makepyfile(
+            test_pp_name=_two_arg_module(
+                "pp_name",
+                "directed_vectors={'named': pytest.param(1, 2, marks=pytest.mark.slow)}",
+                "pass",
+            )
+        )
+
+        result = pytester.runpytest_inprocess("--collect-only", "-q", "--nsamples=0")
+
+        assert [line for line in result.outlines if "::" in line] == [
+            "test_pp_name.py::test_ab[directed-named]"
+        ]
+
+    def test_an_explicit_id_fails_collection(self, pytester):
+        """3.0 used the id as the test ID; in 4.0 the vector's name is its ID."""
         pytester.makepyfile(
             test_pp_id=_two_arg_module(
                 "pp_id", "directed_vectors={'named': pytest.param(1, 2, id='x')}", "pass"
@@ -77,7 +93,14 @@ class TestMarkedVectors:
 
         result = pytester.runpytest_inprocess("--collect-only", "-q", "--nsamples=0")
 
-        assert [line for line in result.outlines if "::" in line] == ["test_pp_id.py::test_ab[x]"]
+        assert result.ret == 2
+        result.stdout.fnmatch_lines(
+            [
+                "*In test_ab: *Directed vector 'named' is a pytest.param with id='x', but the "
+                "vector's name is its ID (directed-named). Remove id=, and name the vector "
+                "after the ID it should have*"
+            ]
+        )
 
     def test_one_argument_strategy(self, pytester):
         pytester.makepyfile(test_pp_single="""

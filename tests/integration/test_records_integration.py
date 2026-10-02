@@ -68,7 +68,8 @@ HEADER = """
 
 # Each case: the test module (after HEADER, unless it starts with
 # "from __future__"), then the outcomes or the error lines expected. "CASE_xy"
-# has 3 rows: the directed vector "zeros" (ID x=0,y=0) and 2 random rows.
+# has 3 rows: the directed vector "zeros" (ID directed-zeros, or x=0,y=0 in the
+# values format) and 2 random rows.
 CASES = {
     "future_annotations": (
         """
@@ -180,8 +181,8 @@ CASES = {
         def test_p(p: Sum):
             assert not hasattr(p, "total")
         """,
-        # The ID lists the init=True fields only: 3.0 crashed reading p.total
-        {"passed": 3, "lines": ["*::test_p[[]x=0,y=0[]] PASSED*"]},
+        # 3.0 crashed reading p.total for the ID (see test_init_false_field_in_ids)
+        {"passed": 3, "lines": ["*::test_p[[]directed-zeros[]] PASSED*"]},
     ),
     "extra_defaulted_field": (
         """
@@ -603,16 +604,7 @@ def test_record_mode_rule(pytester, case):
     for module, cases in NEEDS.items():
         if case in cases:
             pytest.importorskip(module)
-    source, expected = CASES[case]
-    source = textwrap.dedent(source)
-    if not source.lstrip().startswith("from __future__"):
-        source = textwrap.dedent(HEADER) + source
-    pytester.makepyfile(
-        **{
-            f"rec_{case}_strategies": textwrap.dedent(STRATEGIES).replace("CASE", case),
-            f"test_rec_{case}": source.replace("CASE", case),
-        }
-    )
+    expected = _make_case(pytester, case)
 
     result = pytester.runpytest("-p", "no:cacheprovider", "-v", "-rs")
 
@@ -623,3 +615,33 @@ def test_record_mode_rule(pytester, case):
     else:
         assert result.ret == pytest.ExitCode.INTERRUPTED
         result.stdout.fnmatch_lines([line.replace("CASE", case) for line in expected])
+
+
+def _make_case(pytester, case):
+    """Write the strategies and the test module of ``case``; return what it expects."""
+    source, expected = CASES[case]
+    source = textwrap.dedent(source)
+    if not source.lstrip().startswith("from __future__"):
+        source = textwrap.dedent(HEADER) + source
+    pytester.makepyfile(
+        **{
+            f"rec_{case}_strategies": textwrap.dedent(STRATEGIES).replace("CASE", case),
+            f"test_rec_{case}": source.replace("CASE", case),
+        }
+    )
+    return expected
+
+
+@pytest.mark.parametrize(("ids", "row"), [("names", "directed-zeros"), ("values", "x=0,y=0")])
+def test_init_false_field_in_ids(pytester, ids, row):
+    """
+    The values format lists the record's init=True fields only: 3.0 read every
+    field, and crashed on one that __init__ does not set. The names format reads
+    no field.
+    """
+    _make_case(pytester, "init_false_without_default")
+
+    result = pytester.runpytest("-p", "no:cacheprovider", "-v", "-o", f"strategies_ids={ids}")
+
+    result.assert_outcomes(passed=3)
+    result.stdout.fnmatch_lines([f"*::test_p[[]{row}[]] PASSED*"])

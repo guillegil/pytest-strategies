@@ -58,15 +58,17 @@ class TestAutoModeIntegration:
         result = pytester.runpytest("--nsamples=auto", "-v")
         # seq: corner + 3x2 product; noseq (no sequence args): edge + 4 random
         result.assert_outcomes(passed=7 + 5)
-        result.stdout.fnmatch_lines(["*test_seq[[]x=99,y='z'[]] PASSED*"])
-        result.stdout.fnmatch_lines(["*test_noseq[[]code=500[]] PASSED*"])
+        result.stdout.fnmatch_lines(["*test_seq[[]directed-corner[]] PASSED*"])
+        result.stdout.fnmatch_lines(["*test_seq[[]x=3-y=b[]] PASSED*"])
+        result.stdout.fnmatch_lines(["*test_noseq[[]directed-edge[]] PASSED*"])
+        result.stdout.fnmatch_lines(["*test_noseq[[]rand-3[]] PASSED*"])
 
     def test_auto_test_mode_runs_only_test_vectors(self, pytester):
         pytester.makepyfile(test_fix_auto=_unique_names(AUTO_MODULE, "fix_auto_", pytester))
         result = pytester.runpytest("--nsamples=auto", "--vector-mode=test", "-v")
         result.assert_outcomes(passed=2)
         result.stdout.fnmatch_lines(
-            ["*test_seq[[]x=42,y='t'[]] PASSED*", "*test_noseq[[]code=200[]] PASSED*"]
+            ["*test_seq[[]test-tv[]] PASSED*", "*test_noseq[[]test-ok[]] PASSED*"]
         )
 
     def test_auto_directed_only_mode(self, pytester):
@@ -74,7 +76,7 @@ class TestAutoModeIntegration:
         result = pytester.runpytest("--nsamples=auto", "--vector-mode=directed_only", "-v")
         result.assert_outcomes(passed=2)
         result.stdout.fnmatch_lines(
-            ["*test_seq[[]x=99,y='z'[]] PASSED*", "*test_noseq[[]code=500[]] PASSED*"]
+            ["*test_seq[[]directed-corner[]] PASSED*", "*test_noseq[[]directed-edge[]] PASSED*"]
         )
 
     def test_auto_vector_name_filters_across_strategies(self, pytester):
@@ -82,7 +84,7 @@ class TestAutoModeIntegration:
         result = pytester.runpytest("--nsamples=auto", "--vector-name=corner", "-v")
         # Only fix_auto_seq has "corner"; fix_auto_noseq gets an empty parameter set
         result.assert_outcomes(passed=1, skipped=1)
-        result.stdout.fnmatch_lines(["*test_seq[[]x=99,y='z'[]] PASSED*"])
+        result.stdout.fnmatch_lines(["*test_seq[[]directed-corner[]] PASSED*"])
 
 
 INDEX_MODULE = """
@@ -128,7 +130,7 @@ class TestVectorIndexIntegration:
         result = pytester.runpytest("--vector-index=1", "-v")
         # fix_idx_two has index 1 and test_plain is unaffected; the others are skipped
         result.assert_outcomes(passed=2, skipped=2)
-        result.stdout.fnmatch_lines(["*test_two[[]y=10[]] PASSED*"])
+        result.stdout.fnmatch_lines(["*test_two[[]directed-ten[]] PASSED*"])
 
     def test_index_zero_with_strategy_without_directed_vectors(self, pytester):
         pytester.makepyfile(test_fix_idx=_unique_names(INDEX_MODULE, "fix_idx_", pytester))
@@ -146,7 +148,7 @@ class TestVectorIndexIntegration:
 
 
 class TestSingleArgumentIdsIntegration:
-    """Tuple-valued single-argument strategies get IDs showing the whole value."""
+    """In the values format, tuple-valued single-argument strategies get IDs showing the whole value."""
 
     def test_tuple_values_get_distinct_ids(self, pytester):
         pytester.makepyfile(test_fix_single_ids="""
@@ -164,7 +166,9 @@ class TestSingleArgumentIdsIntegration:
             def test_point(pt):
                 assert len(pt) == 2
             """)
-        result = pytester.runpytest("--vector-mode=directed_only", "-v")
+        result = pytester.runpytest(
+            "--vector-mode=directed_only", "-v", "-o", "strategies_ids=values"
+        )
         result.assert_outcomes(passed=3)
         result.stdout.fnmatch_lines(
             [
@@ -176,9 +180,9 @@ class TestSingleArgumentIdsIntegration:
 
 
 class TestPytestParamVectorsIntegration:
-    """pytest.param vectors keep their marks and ids, as in pytest.mark.parametrize."""
+    """pytest.param vectors keep their marks, as in pytest.mark.parametrize."""
 
-    def test_pytest_param_marks_and_ids_are_kept(self, pytester):
+    def test_pytest_param_marks_are_kept(self, pytester):
         pytester.makepyfile(test_fix_param="""
             import pytest
             from pytest_strategy import Parameter, RNGInteger, Strategy, TestArg
@@ -189,7 +193,7 @@ class TestPytestParamVectorsIntegration:
                     TestArg("x", rng_type=RNGInteger(1, 5)),
                     directed_vectors={
                         "one": pytest.param(1, marks=pytest.mark.xfail(strict=True)),
-                        "five": pytest.param(5, id="five"),
+                        "five": {"x": 5},
                         "two": (2,),
                     },
                     nsamples=0,
@@ -219,11 +223,11 @@ class TestPytestParamVectorsIntegration:
         result.assert_outcomes(passed=3, xfailed=2)
         result.stdout.fnmatch_lines(
             [
-                "*test_one[[]x=1[]] XFAIL*",
-                "*test_one[[]five[]] PASSED*",
-                "*test_one[[]x=2[]] PASSED*",
-                "*test_two[[]a=1,b=2[]] XFAIL*",
-                "*test_two[[]a=3,b=3[]] PASSED*",
+                "*test_one[[]directed-one[]] XFAIL*",
+                "*test_one[[]directed-five[]] PASSED*",
+                "*test_one[[]directed-two[]] PASSED*",
+                "*test_two[[]directed-unequal[]] XFAIL*",
+                "*test_two[[]directed-equal[]] PASSED*",
             ]
         )
 

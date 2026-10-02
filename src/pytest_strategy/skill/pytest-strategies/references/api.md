@@ -144,7 +144,8 @@ class Parameter:
   one argument is written `({"a": 1},)` or `{"cfg": {"a": 1}}` (in a `pytest.param`,
   only `pytest.param({"cfg": {"a": 1}}, marks=...)`). Dataclass and
   pydantic model instances are not supported as vectors yet; use a dict.
-  `pytest.param(..., marks=...)` wraps any of these forms. Vectors are not
+  `pytest.param(..., marks=...)` wraps any of these forms (an `id=` fails: the
+  vector's name is its test ID). Vectors are not
   checked by predicates, constraints or validators.
 - The `Parameter` stores each vector as a `Vector` (a `pytest.param` keeps its
   marks, with a `Vector` as its values). `directed_vectors` and `test_vectors`
@@ -339,6 +340,7 @@ usage error listing each strategy's directed vectors.
 | ini option | Meaning |
 | --- | --- |
 | `strategies_max_exhaustive` | the project's limit on exhaustive combinations (default 100000) |
+| `strategies_ids` | `names` (default: `directed-zeros`, `test-max`, `rand-3`, `ch=2-rand-1`, `ch=0-dev=b`, `skipped`; the same for every seed) or `values` (the 3.0 IDs built from the values); anything else is a usage error |
 
 Reporting:
 

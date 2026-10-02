@@ -5,7 +5,9 @@ Subprocess runs are used where a test needs a fresh process (its own RNG seed,
 its own strategy registry) or has to exit the inner session.
 """
 
+import json
 import re
+import textwrap
 
 import pytest
 
@@ -63,9 +65,23 @@ def _seed_from_header(result):
     return int(match.group(1))
 
 
-def _test_ids(result):
-    """Return the parametrized test IDs (``test_x[...]``) found in a run's output."""
-    return re.findall(r"test_\w+\[[^\]]*\]", result.stdout.str())
+# A conftest that writes the parameter values of every collected row, in collection
+# order, to values.json, or to values-<worker>.json on a pytest-xdist worker. Node IDs
+# name the rows, so runs are compared by their values.
+DUMP_VALUES = """
+import json
+
+def pytest_collection_modifyitems(session, config, items):
+    worker = getattr(config, "workerinput", {}).get("workerid")
+    rows = [[item.nodeid, repr(item.callspec.params)] for item in items]
+    name = f"values-{worker}.json" if worker else "values.json"
+    (config.rootpath / name).write_text(json.dumps(rows))
+"""
+
+
+def _values(pytester, name="values.json"):
+    """Return the [node ID, values] of each row the last run collected (DUMP_VALUES)."""
+    return json.loads((pytester.path / name).read_text())
 
 
 class TestUnseededRunReproducibility:
@@ -97,13 +113,15 @@ class TestUnseededRunReproducibility:
                 pass
             """)
 
+        pytester.makeconftest(DUMP_VALUES)
+
         unseeded = pytester.runpytest_subprocess("--collect-only")
         seed = _seed_from_header(unseeded)
-        reproduced = pytester.runpytest_subprocess("--collect-only", f"--rng-seed={seed}")
+        unseeded_values = _values(pytester)
+        pytester.runpytest_subprocess("--collect-only", f"--rng-seed={seed}")
 
-        unseeded_ids = _test_ids(unseeded)
-        assert len(unseeded_ids) == 3
-        assert _test_ids(reproduced) == unseeded_ids
+        assert len(unseeded_values) == 3
+        assert _values(pytester) == unseeded_values
 
 
 class TestXdistSeedSharing:
@@ -111,6 +129,7 @@ class TestXdistSeedSharing:
 
     def test_unseeded_xdist_run_collects_the_same_tests_on_every_worker(self, pytester):
         pytest.importorskip("xdist")
+        pytester.makeconftest(DUMP_VALUES)
         pytester.makepyfile(strategies=STRATEGIES)
         pytester.makepyfile(test_xdist=TESTS)
 
@@ -118,27 +137,30 @@ class TestXdistSeedSharing:
 
         result.stdout.no_fnmatch_line("*Different tests were collected*")
         result.assert_outcomes(passed=6)
+        # The node IDs do not show the values: the workers drew the same ones
+        assert len(_values(pytester, "values-gw0.json")) == 6
+        assert _values(pytester, "values-gw0.json") == _values(pytester, "values-gw1.json")
 
     def test_worker_uses_seed_from_workerinput(self, pytester):
         """Without --rng-seed, a worker takes the seed the controller sent."""
-        pytester.makeconftest("""
+        pytester.makeconftest(textwrap.dedent("""
             import pytest
 
             @pytest.hookimpl(tryfirst=True)
             def pytest_configure(config):
                 # Stand in for an xdist worker (workerinput is set before configure).
                 config.workerinput = {"pytest_strategies_seed": 4242}
-            """)
+            """) + DUMP_VALUES)
         pytester.makepyfile(strategies=STRATEGIES)
         pytester.makepyfile(test_worker=TESTS)
 
         worker = pytester.runpytest_subprocess("-p", "no:xdist", "--collect-only")
-        seeded = pytester.runpytest_subprocess(
-            "-p", "no:xdist", "--collect-only", "--rng-seed=4242"
-        )
+        worker_values = _values(pytester)
+        pytester.runpytest_subprocess("-p", "no:xdist", "--collect-only", "--rng-seed=4242")
 
         assert _seed_from_header(worker) == 4242
-        assert _test_ids(worker) == _test_ids(seeded)
+        assert len(worker_values) == 6
+        assert _values(pytester) == worker_values
 
     def test_plugin_works_without_xdist(self, pytester):
         """The optional xdist hook must not break a run where xdist is absent."""
@@ -166,12 +188,14 @@ class TestPerTestRandomStreams:
         """
 
     @staticmethod
-    def _ids_by_test(result):
-        """Map each test name to the list of IDs it was collected with."""
-        ids = {}
-        for test_id in _test_ids(result):
-            ids.setdefault(test_id.split("[")[0], []).append(test_id.split("[", 1)[1])
-        return ids
+    def _values_by_test(pytester, *args):
+        """Collect with ``args`` and map each test name to its rows' values, in order."""
+        pytester.makeconftest(DUMP_VALUES)
+        pytester.runpytest_subprocess("--collect-only", *args)
+        values = {}
+        for nodeid, params in _values(pytester):
+            values.setdefault(nodeid.split("::")[1].split("[")[0], []).append(params)
+        return values
 
     @staticmethod
     def _test_module(*names):
@@ -190,28 +214,24 @@ class TestPerTestRandomStreams:
             )
         )
 
-        ids = self._ids_by_test(pytester.runpytest_subprocess("--collect-only", "--rng-seed=42"))
+        values = self._values_by_test(pytester, "--rng-seed=42")
 
         # Same strategy, different tests: different values.
-        assert ids["test_one"] != ids["test_two"]
+        assert values["test_one"] != values["test_two"]
         # Identical strategy definitions under different names: different values.
-        assert ids["test_one"] != ids["test_three"]
+        assert values["test_one"] != values["test_three"]
 
     def test_values_do_not_depend_on_collection_order(self, pytester):
         pytester.makepyfile(twin_strategies=self.TWIN_STRATEGIES)
         pytester.makepyfile(
             test_twins=self._test_module(("test_one", "twin_a"), ("test_two", "twin_b"))
         )
-        forward = self._ids_by_test(
-            pytester.runpytest_subprocess("--collect-only", "--rng-seed=42")
-        )
+        forward = self._values_by_test(pytester, "--rng-seed=42")
 
         pytester.makepyfile(
             test_twins=self._test_module(("test_two", "twin_b"), ("test_one", "twin_a"))
         )
-        backward = self._ids_by_test(
-            pytester.runpytest_subprocess("--collect-only", "--rng-seed=42")
-        )
+        backward = self._values_by_test(pytester, "--rng-seed=42")
 
         assert len(forward["test_one"]) == 3
         assert forward == backward

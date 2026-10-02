@@ -515,6 +515,8 @@ Control test generation directly from the command line:
 
 The ini option `strategies_max_exhaustive` (default `100000`) sets the most rows `--nsamples=auto` or `per_sequence_samples=True` may generate for one strategy.
 
+The ini option `strategies_ids` sets the test IDs of strategy rows. `names`, the default, names each row, and the IDs are the same for every seed: `directed-zeros` and `test-max` for directed and test vectors, `rand-3` for a random row, `ch=2-rand-1` when the row enumerates a `Series` value, `ch=0-dev=b` for a row of `--nsamples=auto`, and `skipped` for a `skip_if_empty` row. `-k zeros` selects the directed vector `zeros`, and `pytest "test_x.py::test_x[rand-3]" --rng-seed=S` reruns one row. `values` gives the 3.0 IDs, built from the values (`addr=0,len=1`); a run can switch with `-o strategies_ids=values`. Any other value is a usage error. A `pytest.param` vector cannot have an `id=`, because the vector's name is its ID.
+
 `--vector-name` and `--vector-index` take precedence over `--vector-mode` and `--nsamples`. A strategy without the requested directed vector yields no vectors, so the tests that use it are skipped ("got empty parameter set"). If no strategy in the run has the vector, for example because of a typo or an index that is out of range everywhere, pytest stops with a usage error that lists each strategy's directed vectors. It does not skip every test.
 
 ## 🔄 Reproducibility

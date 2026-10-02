@@ -1538,9 +1538,24 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default="100000",
     )
 
+    parser.addini(
+        "strategies_ids",
+        "Test IDs of strategy rows: names (the default: directed-zeros, rand-3, "
+        "ch=2-rand-1, the same for every seed) or values (the 3.0 format, built from "
+        "the row's values)",
+        type="string",
+        default="names",
+    )
+
 
 def pytest_configure(config: Config) -> None:
     """Register the plugin instance and open a runtime session for this config."""
+    # A bad ini value stops the run with a usage error (exit code 4), before the
+    # session starts
+    from ._resolver import check_ids_format
+
+    check_ids_format(config)
+
     # --list-strategies prints from pytest_collection_finish and exits. Under
     # pytest-xdist only the workers collect, and a worker's exit crashes the
     # controller (INTERNALERROR), so list in-process instead, as xdist does for

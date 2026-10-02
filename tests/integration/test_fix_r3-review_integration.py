@@ -7,8 +7,8 @@ strategy files with the warning turned into an error, an empty --vector-name,
 list vectors, and discovery below symlinks and norecursedirs path patterns.
 """
 
+import json
 import os
-import re
 
 import pytest
 
@@ -40,12 +40,23 @@ def r3_modes(nsamples):
 """
 
 
-def _node_ids(result, test_name):
-    return sorted(
-        line.strip()
-        for line in result.outlines
-        if re.match(rf"\s*tests/test_\w+\.py::{test_name}\[", line)
-    )
+# A conftest that writes the parameter values of every collected row, in collection
+# order, to values.json, or to values-<worker>.json on a pytest-xdist worker. Node IDs
+# name the rows, so runs are compared by their values.
+DUMP_VALUES = """
+import json
+
+def pytest_collection_modifyitems(session, config, items):
+    worker = getattr(config, "workerinput", {}).get("workerid")
+    rows = [[item.nodeid, repr(item.callspec.params)] for item in items if hasattr(item, "callspec")]
+    name = f"values-{worker}.json" if worker else "values.json"
+    (config.rootpath / name).write_text(json.dumps(rows))
+"""
+
+
+def _values(pytester, name="values.json"):
+    """Return the [node ID, values] of each row the last run collected (DUMP_VALUES)."""
+    return json.loads((pytester.path / name).read_text())
 
 
 class TestImportedStrategyFile:
@@ -75,17 +86,21 @@ class TestImportedStrategyFile:
         )
         return pytester
 
-    def test_same_node_ids_for_the_whole_suite_and_one_file(self, project):
+    def test_same_values_for_the_whole_suite_and_one_file(self, project):
         """The import used to run the file again and redraw OFFSET for later tests."""
         args = ("-p", "no:cacheprovider", "--rng-seed=1", "--collect-only", "-q")
+        project.makeconftest(DUMP_VALUES)
 
-        full = project.runpytest_subprocess(*args)
-        alone = project.runpytest_subprocess(*args, "tests/test_b.py")
-        reversed_order = project.runpytest_subprocess(*args, "tests/test_b.py", "tests/test_a.py")
+        def test_b_rows(*paths):
+            project.runpytest_subprocess(*args, *paths)
+            return [row for row in _values(project) if "::test_b[" in row[0]]
 
-        assert _node_ids(full, "test_b")
-        assert _node_ids(full, "test_b") == _node_ids(alone, "test_b")
-        assert _node_ids(full, "test_b") == _node_ids(reversed_order, "test_b")
+        full = test_b_rows()
+        alone = test_b_rows("tests/test_b.py")
+        reversed_order = test_b_rows("tests/test_b.py", "tests/test_a.py")
+
+        assert len(full) == 2
+        assert full == alone == reversed_order
 
     def test_importing_test_gets_the_strategy_classes_and_values(self, project):
         result = project.runpytest_subprocess("-p", "no:cacheprovider", "--rng-seed=3")
@@ -196,7 +211,7 @@ class TestVectorOptions:
 
             @Strategy.strategy("r3_single")
             def test_single(x):
-                assert isinstance(x, int), repr(x)
+                assert isinstance(x, int) and x in (5, 6), repr(x)
             """)
         return pytester
 
@@ -206,12 +221,15 @@ class TestVectorOptions:
         assert result.ret == pytest.ExitCode.USAGE_ERROR
         result.stderr.fnmatch_lines(["*--vector-name= matched no directed vector*"])
 
-    @pytest.mark.parametrize("args", [("--nsamples=0",), ("--vector-mode=test",)])
-    def test_list_vector_gives_the_element(self, project, args):
+    @pytest.mark.parametrize(
+        ("args", "row"),
+        [(("--nsamples=0",), "directed-five"), (("--vector-mode=test",), "test-six")],
+    )
+    def test_list_vector_gives_the_element(self, project, args, row):
         result = project.runpytest_subprocess("-p", "no:cacheprovider", "-v", *args)
 
         result.assert_outcomes(passed=1)
-        result.stdout.fnmatch_lines(["*test_single[[]x=[56][]] PASSED*"])
+        result.stdout.fnmatch_lines([f"*test_single[[]{row}[]] PASSED*"])
 
 
 class TestDiscoveryScope:

@@ -193,9 +193,9 @@ class TestListVectors:
         assert param.directed_vectors == {"a": (1,)}
         assert param.test_vectors == {"b": (2,)}
 
-    def test_pytest_param_vector_keeps_its_marks_and_id(self):
-        """4.0 rebuilds a pytest.param around a Vector of its values, with its marks and id."""
-        vector = pytest.param(1, 2, 3, marks=pytest.mark.xfail, id="pp")
+    def test_pytest_param_vector_keeps_its_marks(self):
+        """4.0 rebuilds a pytest.param around a Vector of its values, with its marks."""
+        vector = pytest.param(1, 2, 3, marks=pytest.mark.xfail)
         param = Parameter(
             TestArg("x", rng_type=RNGInteger(0, 10)),
             TestArg("y", rng_type=RNGInteger(0, 10)),
@@ -210,7 +210,7 @@ class TestListVectors:
         assert isinstance(stored.values, Vector)
         assert stored.values._fields == ("x", "y", "z")
         assert stored.marks == vector.marks
-        assert stored.id == "pp"
+        assert stored.id is None
 
 
 class TestEmptyVectorName:

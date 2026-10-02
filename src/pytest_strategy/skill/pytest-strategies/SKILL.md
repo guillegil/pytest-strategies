@@ -88,9 +88,9 @@ same module object the plugin loaded.
   `@strategy(..., validate_signature=False)` turns the check off). Its other
   parameters are fixtures, as usual. Or use dataclass mode (see Traps).
 - Rows: the directed vectors, then `nsamples` random rows (10 by default). Test IDs
-  are built from the values, such as `test_charge[amount=17,currency='EUR']`. A
-  directed vector's name is not part of its ID: select it with `--vector-name`, not
-  `-k`.
+  name the row, the same for every seed: `test_charge[directed-zeros]`,
+  `test_charge[rand-3]`, and `ch=2-rand-1` when a `Series` value is enumerated.
+  Select a directed vector with `-k zeros` or `--vector-name=zeros`.
 
 ## Where strategies live
 
@@ -264,9 +264,9 @@ To reproduce a failure:
 1. Take the seed from the failing run: the line `reproduce with --rng-seed=S` after
    the tracebacks (also printed under `-q`), or the header
    (`pytest-strategies: RNG seed = S`).
-2. Rerun with it: `pytest tests/payments/test_charge.py --rng-seed=S`. Node IDs
-   contain generated values, so a failing ID exists only under its seed: pass both,
-   `pytest "tests/payments/test_charge.py::test_charge[amount=17,currency='EUR']" --rng-seed=S`.
+2. Rerun with it: `pytest tests/payments/test_charge.py --rng-seed=S`. A node ID
+   names the row and the seed gives its values, so pass both:
+   `pytest "tests/payments/test_charge.py::test_charge[rand-3]" --rng-seed=S`.
 3. The same seed, rootdir and plugin version give the same rows whether you run the
    suite, one file or one test, in any order, with or without xdist. The test's path
    relative to the rootdir is part of its random stream: compare the `rootdir:` line
@@ -276,9 +276,7 @@ To reproduce a failure:
 4. Once fixed, add the failing values as a directed vector (`"bug_1234": (17, "EUR")`;
    one argument needs a trailing comma, `(-2,)`) so they run every time, not only
    under that seed. Run it with `--vector-name=bug_1234`, which needs no seed. Its ID
-   is built from the values, not the name, and when it equals a random row's ID
-   pytest adds suffixes (`[n=-2_0]`, `[n=-2_1]`), so the old node ID no longer
-   matches under that seed.
+   is `directed-bug_1234`.
 
 ## Traps
 

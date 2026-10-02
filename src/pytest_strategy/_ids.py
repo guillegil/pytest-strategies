@@ -1,5 +1,14 @@
 """
 Test ID generation for parametrized strategies.
+
+Two formats, chosen with the ``strategies_ids`` ini option:
+
+- ``names`` (the default) names each row by its kind and number, and by the values
+  of the arguments the row enumerates: ``directed-zeros``, ``test-max``, ``rand-3``,
+  ``ch=2-rand-1``, ``ch=0-dev=b``, ``skipped`` (``names_id``). An ID does not
+  depend on the seed.
+- ``values`` is the 3.0 format, built from the row's values (``generate_test_ids``,
+  ``generate_dataclass_ids``).
 """
 
 import re
@@ -9,9 +18,47 @@ from collections.abc import Sequence
 from dataclasses import dataclass, fields, is_dataclass
 from typing import Any
 
+# The values of the strategies_ids ini option, the default first
+ID_FORMATS = ("names", "values")
+
 # The memory address in a default repr (``<Foo object at 0x7f...>``, a function, a
 # bound method or a container of such objects) is directly followed by ``>``.
 _ADDRESS = re.compile(r" at 0x[0-9a-fA-F]+>")
+
+
+def names_id(kind: str, name: str | None, j: int | None, labels: Sequence[str]) -> str:
+    """
+    Return a row's test ID in the ``names`` format.
+
+    ======================================  ==========================
+    Row                                     ID
+    ======================================  ==========================
+    directed vector ``zeros``               ``directed-zeros``
+    test vector ``max``                     ``test-max``
+    random row j, nothing enumerated        ``rand-3``
+    random row j of an enumerated value     ``ch=2-rand-1``
+    exhaustive row (``--nsamples=auto``)    ``ch=2``, ``ch=0-dev=b``
+    the row of an empty skip_if_empty arg   ``skipped``
+    ======================================  ==========================
+
+    The IDs of one strategy's rows are unique by construction: vector names are
+    dict keys, a random row's j is unique within its combination, the labels of one
+    argument are unique (``ARG=TEXT``, ``ARG=TEXT~m`` for a repeat, ``ARG<position>``),
+    a label's text has no ``=``, and an argument name has no ``-``.
+
+    Args:
+        kind: "directed", "test", "random", "exhaustive" or "skipped"
+        name: The directed or test vector's name
+        j: The random row's number within its combination
+        labels: The labels of the enumerated arguments, in declaration order
+    """
+    if kind == "directed" or kind == "test":
+        return f"{kind}-{name}"
+    if kind == "random":
+        return "-".join([*labels, f"rand-{j}"])
+    if kind == "exhaustive":
+        return "-".join(labels)
+    return "skipped"
 
 
 @dataclass

@@ -75,6 +75,12 @@ def _normalize_vector(kind: str, name: object, raw: object, arg_names: tuple[str
 
     if isinstance(raw, _ParameterSet):
         # A ParameterSet is itself a namedtuple of (values, marks, id), so it comes first
+        if raw.id is not None:
+            raise RNGValueError(
+                f"{where} is a pytest.param with id={raw.id!r}, but the vector's name is "
+                f"its ID ({kind}-{name}). Remove id=, and name the vector after the ID it "
+                "should have"
+            )
         given = raw.values
         if len(given) == 1 and isinstance(given[0], Mapping):
             row = _vector_by_name(where, given[0], "dict", arg_names, row_type, in_param=True)

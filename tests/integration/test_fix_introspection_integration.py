@@ -118,7 +118,7 @@ class TestDataclassConversion:
 
 
 class TestStableIds:
-    """Node IDs must not embed memory addresses, so reruns by node ID work."""
+    """Node IDs in the values format must not embed memory addresses, so reruns by node ID work."""
 
     def test_default_repr_values_give_stable_node_ids(self, pytester):
         pytester.makepyfile(fi_ids_a_strategies="""
@@ -144,7 +144,7 @@ class TestStableIds:
             def test_codec(codec):
                 pass
             """)
-        result = pytester.runpytest_inprocess("--collect-only", "-q")
+        result = pytester.runpytest_inprocess("--collect-only", "-q", "-o", "strategies_ids=values")
         node_ids = [line for line in result.outlines if "::" in line]
         assert node_ids == [
             "test_fi_ids_a.py::test_codec[codec=Codec0]",

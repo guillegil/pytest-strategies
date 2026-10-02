@@ -19,7 +19,13 @@ from typing import Any, NamedTuple, cast
 import pytest
 
 from ._factory import FactoryInputs, call_factory
-from ._ids import generate_dataclass_ids, generate_test_ids, make_unique_ids
+from ._ids import (
+    ID_FORMATS,
+    generate_dataclass_ids,
+    generate_test_ids,
+    make_unique_ids,
+    names_id,
+)
 from ._introspection import validate_signature
 from ._options import constraint_off_item
 from ._records import (
@@ -38,7 +44,7 @@ from .parameters import (
     _ConstraintsExhausted,
     _forget_constraint_failure,
     _GenerationStats,
-    _ParameterSet,
+    _Row,
 )
 from .rng import RNG, SequenceLike
 
@@ -59,17 +65,9 @@ class Parametrization(NamedTuple):
     unfilled: tuple[tuple[str, str], ...] = ()
 
 
-def _id_row(sample: Any) -> Any:
-    """Return the values generate_test_ids builds the ID of a generated row from."""
-    if isinstance(sample, _ParameterSet):
-        # Build the ID from the values; pytest still prefers an explicit id
-        return sample.values
-    return sample
-
-
 def _skipped_param(reason: str, width: int) -> Any:
     """Return the single skipped row that stands in for a strategy without values."""
-    return pytest.param(*([None] * width), marks=pytest.mark.skip(reason=reason), id="skipped")
+    return pytest.param(*([None] * width), marks=pytest.mark.skip(reason=reason))
 
 
 class _attributed_warnings:
@@ -125,35 +123,56 @@ class _attributed_warnings:
                 warnings.warn_explicit(w.message, w.category, w.filename, w.lineno, source=w.source)
 
 
-def _unique_ids(
-    rows: list[Any], ids: list[str], config: pytest.Config | None
-) -> tuple[list[Any], list[str]]:
+def _unique_ids(ids: list[str], config: pytest.Config | None) -> list[str]:
     """
-    Return the rows and ids to parametrize with, giving every row a unique test ID.
+    Return the test IDs to parametrize with, each duplicate suffixed.
 
-    Rows can repeat, and pytest's strict_parametrization_ids makes duplicate IDs a
-    collection error instead of suffixing them. The ID of a ``pytest.param(...,
-    id=...)`` row overrides its ``ids`` entry, so duplicates are suffixed among these
-    effective IDs, and such a row is rebuilt with its new ID.
+    The rows of one strategy have unique IDs in the names format, but the values
+    format repeats the ID of a repeated row, and pytest's strict_parametrization_ids
+    makes duplicate IDs a collection error instead of suffixing them.
     """
-    effective = [
-        row.id if isinstance(row, _ParameterSet) and row.id is not None else row_id
-        for row, row_id in zip(rows, ids)
-    ]
     escape = config is None or not config.getini(
         "disable_test_id_escaping_and_forfeit_all_rights_to_community_support"
     )
-    unique_rows: list[Any] = []
-    unique_ids: list[str] = []
-    for row, row_id, unique_id in zip(rows, ids, make_unique_ids(effective, escape=escape)):
-        if isinstance(row, _ParameterSet) and row.id is not None:
-            if unique_id != row.id:
-                row = row._replace(id=unique_id)
-            # pytest ignores the ids entry of this row: keep the one built from its values
-            unique_id = row_id
-        unique_rows.append(row)
-        unique_ids.append(unique_id)
-    return unique_rows, unique_ids
+    return make_unique_ids(ids, escape=escape)
+
+
+def ids_format(config: pytest.Config | None) -> str:
+    """
+    Return the format of the test IDs: the strategies_ids ini option, "names" or
+    "values". The plugin checks the option in pytest_configure.
+
+    Without a config, or for a config without the plugin's ini options (a test's
+    stand-in), it is "names".
+    """
+    if config is None:
+        return "names"
+    try:
+        raw = config.getini("strategies_ids")
+    except ValueError:
+        # The plugin's ini options are not registered (a config without the plugin)
+        return "names"
+    # Anything but "values" is "names": a real config's other values were rejected
+    return "values" if isinstance(raw, str) and raw.strip() == "values" else "names"
+
+
+def check_ids_format(config: pytest.Config) -> None:
+    """
+    Check the strategies_ids ini option.
+
+    Raises:
+        pytest.UsageError: For a value other than "names" or "values"
+    """
+    raw = config.getini("strategies_ids")
+    if not isinstance(raw, str) or raw.strip() not in ID_FORMATS:
+        raise pytest.UsageError(
+            f"strategies_ids must be {' or '.join(repr(f) for f in ID_FORMATS)}, got {raw!r}"
+        )
+
+
+def _row_ids(rows: list[_Row]) -> list[str]:
+    """Return the rows' test IDs in the names format."""
+    return [names_id(row.kind, row.name, row.j, row.labels) for row in rows]
 
 
 def _test_location(test_fn: Callable[..., Any], config: pytest.Config | None) -> str:
@@ -306,8 +325,9 @@ def build_parametrization(
         ValueError: With a message naming the strategy when the factory, the
             generation or the signature check fails
     """
-    # The CLI options, read once per session
+    # The CLI options, read once per session, and the format of the test IDs
     options = runtime.strategy_options(name, config)
+    id_format = ids_format(config)
     vector_mode = options.mode
     vector_name = options.vector_name
     vector_index = options.vector_index
@@ -384,7 +404,6 @@ def build_parametrization(
     # Generate the rows with the CLI options. "auto" replaces only the random rows
     # with the exhaustive ones: CLI filters, vector modes and directed vectors apply
     # exactly as they do for a finite count.
-    samples: list[Any]
     # The rejections per constraint (and the combinations "auto" left out), for -v
     stats = _GenerationStats()
     auto = effective_nsamples == "auto"
@@ -421,7 +440,7 @@ def build_parametrization(
         # Filtering by name (KeyError) or index (IndexError) for a vector this
         # strategy doesn't have gives it no rows, so CLI filtering works across
         # strategies. The plugin reports a filter that no strategy in the run matches.
-        samples = []
+        rows = []
         runtime.record_vector_filter(name, False, list(param.directed_vectors))
     else:
         if filtered:
@@ -429,10 +448,10 @@ def build_parametrization(
         # A skipped Parameter gives one "skipped" row, which stands in for its values
         # below. A vector filter that names none of its vectors keeps the empty set,
         # as for any strategy.
-        samples = [row.sample for row in rows if row.kind != "skipped"]
+        rows = [row for row in rows if row.kind != "skipped"]
         skip_reason = param.skip_reason
 
-    _count_rows(resolution, param, samples, vector_mode, filtered)
+    _count_rows(resolution, param, rows, vector_mode, filtered)
     resolution.constraints = constraint_names
     resolution.rejected = dict(stats.rejected)
     if exhaustive:
@@ -470,29 +489,28 @@ def build_parametrization(
                 ) from e
             return Parametrization(dc_param, [_skipped_param(skip_reason, 1)], ["skipped"])
         try:
-            # A pytest.param() sample is converted from its values; its marks and id
-            # are re-attached to the instance below
             dataclass_samples = convert_to_dataclass(
-                [tuple(s.values) if isinstance(s, _ParameterSet) else s for s in samples],
-                argnames,
-                dc_type,
+                [row.values for row in rows], argnames, dc_type
             )
         except Exception as e:
             raise ValueError(
                 f"Error converting samples to dataclass for strategy '{name}': {e}"
             ) from e
 
-        # Generate test IDs for dataclass mode
-        ids = generate_dataclass_ids(dataclass_samples, dc_type)
+        if id_format == "names":
+            ids = _row_ids(rows)
+        else:
+            # The 3.0 format: the record's init=True fields and their values
+            ids = generate_dataclass_ids(dataclass_samples, dc_type)
 
+        # A pytest.param() vector's marks go on its instance
         params = [
-            pytest.param(inst, marks=s.marks, id=s.id) if isinstance(s, _ParameterSet) else inst
-            for s, inst in zip(samples, dataclass_samples)
+            pytest.param(inst, marks=row.param.marks) if row.param is not None else inst
+            for row, inst in zip(rows, dataclass_samples)
         ]
-        params, ids = _unique_ids(params, ids, config)
 
         # Parametrize the dataclass parameter chosen by detection
-        return Parametrization(dc_param, params, ids)
+        return Parametrization(dc_param, params, _unique_ids(ids, config))
 
     else:
         # NAMED PARAMETERS MODE: Standard behavior
@@ -534,24 +552,25 @@ def build_parametrization(
         # Create comma-separated string of parameter names for pytest.mark.parametrize
         argstr = ",".join(argnames)
 
+        samples: list[Any]
         if skip_reason is not None:
             samples = [_skipped_param(skip_reason, len(argnames))]
+            ids = ["skipped"]
+        else:
+            if id_format == "names":
+                ids = _row_ids(rows)
+            else:
+                # The 3.0 format, from the rows' values. generate_test_ids unwraps a
+                # single-argument row once, so a tuple value keeps its full ID.
+                ids = generate_test_ids(argnames, [row.values for row in rows])
+            # A pytest.param() vector is passed as it is, to keep its marks. For a
+            # single parameter, each other row passes its one value.
+            if len(argnames) == 1:
+                samples = [row.values[0] if row.param is None else row.param for row in rows]
+            else:
+                samples = [row.sample for row in rows]
 
-        # Generate test IDs for better test output readability, from the rows' values.
-        # generate_test_ids unwraps a single-argument row once, so a tuple value
-        # keeps its full ID.
-        ids = generate_test_ids(argnames, [_id_row(s) for s in samples])
-
-        # For single parameters, unwrap the tuples. A pytest.param() sample is a tuple
-        # too (ParameterSet); it is passed through unchanged to keep its marks and id.
-        if len(argnames) == 1:
-            samples = [
-                s[0] if isinstance(s, tuple) and not isinstance(s, _ParameterSet) else s
-                for s in samples
-            ]
-        samples, ids = _unique_ids(samples, ids, config)
-
-        return Parametrization(argstr, samples, ids, unfilled)
+        return Parametrization(argstr, samples, _unique_ids(ids, config), unfilled)
 
 
 def _unfilled_message(name: str, record: RecordParam, hints: list[str]) -> str:
@@ -581,10 +600,10 @@ def _where(factory: Callable[..., Any], config: pytest.Config | None) -> str:
 
 
 def _count_rows(
-    resolution: Resolution, param: Parameter, samples: list[Any], mode: str, filtered: bool
+    resolution: Resolution, param: Parameter, rows: list[_Row], mode: str, filtered: bool
 ) -> None:
     """Split a Parameter's generated rows into directed, random and test rows."""
-    total = len(samples)
+    total = len(rows)
     if filtered or mode == "directed_only":
         resolution.directed = total
     elif mode == "test":
