@@ -308,7 +308,7 @@ json_data = export_strategies(format="json")
 print(json_data)
 ```
 
-In a pytest session every strategy file is imported first. A name registered in several folders is exported once, for the registration made last.
+In a pytest session every strategy file is imported first. A name registered in several folders is exported once, for the registration made last. Each factory gets the inputs it declares, as at collection, with the session's options: `nsamples` is the `--nsamples` value, `"auto"`, or 10 without the option.
 
 ### 7. Test Values (New in v2.0.0)
 

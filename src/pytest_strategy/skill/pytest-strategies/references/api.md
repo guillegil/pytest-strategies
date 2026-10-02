@@ -63,7 +63,8 @@ def strategy(name_or_factory, *, validate_signature=True): ...  # decorator for 
   spellings are aliases, with no warning.
 - `Strategy.export_strategies(format="json")` returns a JSON string describing every
   registered strategy (arguments, RNG types, vectors). It loads every strategies file
-  and passes the same `ctx` as the hook.
+  and calls each factory as at collection: the same `ctx` as the hook, and the
+  session's `nsamples` (10 without `--nsamples`) and `options`.
 - Apply `@strategy` to test functions and methods, not to classes or modules.
 
 ## 3. Factories

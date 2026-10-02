@@ -16,6 +16,7 @@ import pytest
 from pytest_strategy import RNG, RNGInteger, Strategy, StrategyOptions
 from pytest_strategy._factory import FactoryInputs, call_factory
 from pytest_strategy._resolver import resolve_and_parametrize
+from pytest_strategy._runtime import runtime
 from pytest_strategy.parameters import Parameter
 from pytest_strategy.rng import RNGChoice, Series
 from pytest_strategy.strategy import PytestStrategiesWarning
@@ -412,7 +413,7 @@ class TestResolverFactoryCalling:
 
 
 class TestExportStrategiesFactoryCalling:
-    """export_strategies calls factories the same way the resolver does."""
+    """export_strategies calls factories as the resolver does, with the session's options."""
 
     def test_keyword_only_var_keyword_and_zero_arg_factories(self, restore_registry):
         received = []
@@ -432,10 +433,76 @@ class TestExportStrategiesFactoryCalling:
 
         data = json.loads(Strategy.export_strategies())
 
-        assert received == [1]
+        # The session's count: 10 without --nsamples (3.0 passed 1)
+        assert received == [10]
         assert data["fix_export_kwonly"]["arguments"][0]["name"] == "x"
         assert data["fix_export_varkw"]["arguments"][0]["name"] == "x"
         assert data["fix_export_noargs"]["arguments"][0]["name"] == "x"
+
+    def test_rng_and_options_factory(self, restore_registry):
+        received = []
+
+        @Strategy.register("fix_export_rng_options")
+        def rng_options(rng, options):
+            received.append((rng, options))
+            return Parameter(TestArg("x", rng_type=RNGInteger(0, 9)))
+
+        data = json.loads(Strategy.export_strategies())
+
+        assert data["fix_export_rng_options"]["arguments"][0]["name"] == "x"
+        [(rng, options)] = received
+        assert rng is RNG.generator()
+        # The instance the session's collection gives the strategy
+        assert options is runtime.strategy_options("fix_export_rng_options", runtime.current.config)
+        assert options.strategy == "fix_export_rng_options"
+        assert (options.nsamples, options.nsamples_source) == (10, "default")
+
+    def test_without_a_session_the_defaults_apply(self, monkeypatch, restore_registry):
+        monkeypatch.setattr(runtime, "_stack", [])
+        received = []
+
+        @Strategy.register("fix_export_no_session")
+        def no_session(nsamples, options):
+            received.append((nsamples, options))
+            return Parameter(TestArg("x", rng_type=RNGInteger(0, 9)))
+
+        data = json.loads(Strategy.export_strategies())
+
+        assert "error" not in data["fix_export_no_session"]
+        assert received == [(10, StrategyOptions(strategy="fix_export_no_session"))]
+
+    def test_only_a_ctx_factory_asks_for_the_context(self, monkeypatch, restore_registry):
+        # Only this test's factories: another registered one may declare ctx
+        Strategy._registry.clear()
+        asked = []
+
+        def strategy_context():
+            asked.append(True)
+            return "bench"
+
+        monkeypatch.setattr(runtime, "strategy_context", strategy_context)
+
+        @Strategy.register("fix_export_without_ctx")
+        def without_ctx(nsamples, rng, options):
+            return Parameter(TestArg("x", rng_type=RNGInteger(0, 9)))
+
+        data = json.loads(Strategy.export_strategies())
+
+        assert "error" not in data["fix_export_without_ctx"]
+        assert asked == []
+
+        received = []
+
+        @Strategy.register("fix_export_with_ctx")
+        def with_ctx(ctx):
+            received.append(ctx)
+            return Parameter(TestArg("x", rng_type=RNGInteger(0, 9)))
+
+        data = json.loads(Strategy.export_strategies())
+
+        assert "error" not in data["fix_export_with_ctx"]
+        assert received == ["bench"]
+        assert asked == [True]
 
     def test_factory_error_is_still_recorded(self, restore_registry):
         @Strategy.register("fix_export_broken")

@@ -102,6 +102,10 @@ def export_strategies(*, format: str = "json") -> str:
 
     In a pytest session, every strategies file is loaded first. A name
     registered in several directories is reported for the one registered last.
+    Each factory is called once with the inputs it declares, as at collection,
+    and gets the session's options for its strategy: its ``nsamples`` is the
+    ``--nsamples`` value, ``"auto"``, or 10 without the option or outside a
+    session. The context hook runs only for a factory that declares ``ctx``.
 
     Args:
         format: Export format (currently only "json" is supported), keyword-only
@@ -112,7 +116,6 @@ def export_strategies(*, format: str = "json") -> str:
     import json
 
     from ._factory import FactoryInputs, call_factory
-    from ._options import StrategyOptions
     from ._resolver import check_factory_result
     from .rng import RNG
 
@@ -125,9 +128,9 @@ def export_strategies(*, format: str = "json") -> str:
     for name in registry.names():
         factory = registry.registrations(name)[-1].factory
         try:
-            # Instantiate parameter with dummy count to get metadata
+            # The session's options for this strategy, the instance collection uses
             inputs = FactoryInputs(
-                options=StrategyOptions(strategy=name, nsamples=1),
+                options=runtime.strategy_options(name, config),
                 rng=RNG.generator(),
                 ctx=runtime.strategy_context,
             )
