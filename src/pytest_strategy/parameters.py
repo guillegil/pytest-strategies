@@ -16,7 +16,7 @@ import warnings
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any
+from typing import Any, cast
 
 import pytest
 
@@ -26,16 +26,11 @@ from ._warnings import PytestStrategiesWarning
 from .rng import RNGValueError, SequenceLike, Series
 from .test_args import TestArg
 
-if TYPE_CHECKING:
-    from _pytest.mark.structures import ParameterSet
-
 # pytest.param() returns a ParameterSet (a NamedTuple), which pytest does not export
 _ParameterSet = type(pytest.param())
 
 
-def _normalize_vector(
-    kind: str, name: object, raw: object, arg_names: tuple[str, ...]
-) -> Vector | ParameterSet:
+def _normalize_vector(kind: str, name: object, raw: object, arg_names: tuple[str, ...]) -> Vector:
     """
     Turn a directed or test vector, as given, into the row it stands for.
 
@@ -62,7 +57,7 @@ def _normalize_vector(
 
     Returns:
         A Vector with the values in declaration order, or for a pytest.param(...)
-        vector the ParameterSet with that Vector as its values
+        vector the ParameterSet with that Vector as its values, typed as a Vector
 
     Raises:
         RNGValueError: If the name is not a non-empty str, or the vector does not
@@ -81,7 +76,10 @@ def _normalize_vector(
             row = _vector_by_name(where, given[0], "dict", arg_names, row_type)
         else:
             row = _vector_by_position(where, given, row_type)
-        return raw._replace(values=row)
+        # Typed as a Vector, like every row: the API types its rows as Vectors, as
+        # 3.0 typed them as tuples, so typed code that unpacks a row or reads its
+        # fields type-checks. The ParameterSet's .values is the Vector.
+        return cast(Vector, raw._replace(values=row))
 
     if isinstance(raw, Mapping):
         return _vector_by_name(where, raw, "dict", arg_names, row_type)
@@ -188,9 +186,11 @@ def _vector_by_name(
     return tuple.__new__(row_type, [values[arg] for arg in arg_names])
 
 
-def _vector_values(vector: Vector | ParameterSet) -> Sequence[Any]:
+def _vector_values(vector: object) -> Sequence[Any]:
     """Return the values of a stored directed or test vector (a pytest.param's values)."""
-    return vector.values if isinstance(vector, _ParameterSet) else vector
+    if isinstance(vector, _ParameterSet):
+        return vector.values
+    return cast(Vector, vector)
 
 
 def _check_arg_name(name: Any) -> None:
@@ -563,17 +563,17 @@ class Parameter:
         self.max_exhaustive = max_exhaustive
 
     @property
-    def directed_vectors(self) -> Mapping[str, Vector | ParameterSet]:
+    def directed_vectors(self) -> Mapping[str, Vector]:
         """
         The directed vectors by name, as Vectors (a pytest.param(...) vector keeps its
-        marks, with a Vector as its values).
+        marks, with a Vector as its values; it is typed as a Vector, as every row is).
 
         Read-only: add_directed_vector() and remove_directed_vector() change it.
         """
         return MappingProxyType(self._directed_vectors)
 
     @property
-    def test_vectors(self) -> Mapping[str, Vector | ParameterSet]:
+    def test_vectors(self) -> Mapping[str, Vector]:
         """
         The test vectors by name, as for directed_vectors.
 
@@ -858,7 +858,7 @@ class Parameter:
             raise KeyError(f"No test vector named '{name}'")
         del self._test_vectors[name]
 
-    def get_test_vector(self, name: str) -> Vector | ParameterSet:
+    def get_test_vector(self, name: str) -> Vector:
         """
         Get a specific test vector by name.
 
@@ -867,6 +867,7 @@ class Parameter:
 
         Returns:
             The test vector: a Vector, or the pytest.param(...) whose values are one
+            (typed as a Vector, as every row is)
 
         Raises:
             KeyError: If vector name doesn't exist
@@ -875,7 +876,7 @@ class Parameter:
             raise KeyError(f"No test vector named '{name}'")
         return self._test_vectors[name]
 
-    def get_directed_vector(self, name: str) -> Vector | ParameterSet:
+    def get_directed_vector(self, name: str) -> Vector:
         """
         Get a specific directed vector by name.
 
@@ -883,7 +884,8 @@ class Parameter:
             name: Name of the vector
 
         Returns:
-            The directed vector: a Vector, or the pytest.param(...) whose values are one
+            The directed vector: a Vector, or the pytest.param(...) whose values are
+            one (typed as a Vector, as every row is)
 
         Raises:
             KeyError: If vector name doesn't exist
@@ -1045,7 +1047,7 @@ class Parameter:
         filter_by_index: int | None = None,
         constraints_off: Iterable[str] = (),
         _stats: _GenerationStats | None = None,
-    ) -> list[Vector | ParameterSet]:
+    ) -> list[Vector]:
         """
         Generate parameter vectors.
 
@@ -1069,8 +1071,10 @@ class Parameter:
 
         Returns:
             List of parameter vectors, each a Vector, or for a pytest.param(...)
-            directed or test vector the ParameterSet whose values are a Vector. Empty
-            when skip_reason is set.
+            directed or test vector the ParameterSet whose values are a Vector. Every
+            row is typed as a Vector, so typed code can unpack the rows and read their
+            fields; code that keeps pytest.param rows tells them apart with
+            isinstance(row, Vector). Empty when skip_reason is set.
 
         Raises:
             KeyError / IndexError: If filter_by_name / filter_by_index names no
@@ -1107,7 +1111,7 @@ class Parameter:
             # Get specific vector by index
             samples = param.generate_vectors(0, filter_by_index=0)
         """
-        samples: list[Vector | ParameterSet] = []
+        samples: list[Vector] = []
         constraints = self._evaluated(constraints_off)
 
         # Handle CLI filters first (override mode). A missing vector raises even when
@@ -1439,7 +1443,7 @@ class Parameter:
     # CLI Support
     # ====
 
-    def get_vector_by_name(self, name: str) -> Vector | ParameterSet:
+    def get_vector_by_name(self, name: str) -> Vector:
         """
         Get directed vector by name (for -vn CLI argument).
 
@@ -1447,7 +1451,8 @@ class Parameter:
             name: Name of the directed vector
 
         Returns:
-            The directed vector: a Vector, or the pytest.param(...) whose values are one
+            The directed vector: a Vector, or the pytest.param(...) whose values are
+            one (typed as a Vector, as every row is)
 
         Raises:
             KeyError: If vector name doesn't exist
@@ -1457,7 +1462,7 @@ class Parameter:
             raise KeyError(f"No directed vector named '{name}'. " f"Available: {available}")
         return self.directed_vectors[name]
 
-    def get_vector_by_index(self, index: int) -> Vector | ParameterSet:
+    def get_vector_by_index(self, index: int) -> Vector:
         """
         Get directed vector by index (for -vi CLI argument).
 
@@ -1465,7 +1470,8 @@ class Parameter:
             index: Index of the directed vector (0-based)
 
         Returns:
-            The directed vector: a Vector, or the pytest.param(...) whose values are one
+            The directed vector: a Vector, or the pytest.param(...) whose values are
+            one (typed as a Vector, as every row is)
 
         Raises:
             IndexError: If index is out of range

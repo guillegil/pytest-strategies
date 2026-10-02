@@ -169,6 +169,9 @@ class Parameter:
   `Vector(lo=0, hi=5)`. A misspelled field raises
   `AttributeError: Vector has no argument 'hgh'; its arguments are lo, hi`. Under
   mypy a field is `Any`, so a constraint annotated `-> bool` returns `bool(...)`.
+  The generators and the `get_*_vector()` methods are typed as returning `Vector`s;
+  a `pytest.param(...)` vector comes back as the `pytest.param` whose `.values` is
+  the Vector.
 
 ## 5. TestArg
 

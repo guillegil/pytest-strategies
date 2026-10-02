@@ -121,6 +121,33 @@ def test_vector_fields_type_check() -> None:
     assert aligned(row) and first_small((row.addr, row.len))
 
 
+def test_rows_unpack_and_read_fields_as_in_3_0() -> None:
+    """
+    Every row is typed as a Vector, also where a pytest.param(...) vector could come
+    back, so code typed for 3.0's tuple rows unpacks them, and fields type-check.
+    """
+    param = Parameter(
+        TestArg("addr", rng_type=RNGInteger(0, 63)),
+        TestArg("len", rng_type=RNGInteger(1, 16)),
+        directed_vectors={"zeros": (0, 1)},
+        test_vectors={"max": {"addr": 63, "len": 16}},
+    )
+
+    total = 0
+    for addr, length in param.generate_vectors(3):
+        total += int(addr) + int(length)
+    rows = assert_type(param.generate_vectors(3, mode="random_only"), list[Vector])
+    addrs: list[int] = [int(v.addr) for v in rows]
+    a, b = param.get_directed_vector("zeros")
+    c, d = param.get_vector_by_name("zeros")
+    e, f = param.get_vector_by_index(0)
+    g, h = param.get_test_vector("max")
+    first = param.directed_vectors["zeros"]
+    assert_type(first, Vector)
+    assert (a, b) == (c, d) == (e, f) == tuple(first) == (0, 1) and (g, h) == (63, 16)
+    assert total > 0 and len(addrs) == 3 and int(first[0]) + int(first.len) == 1
+
+
 def test_constraint_lists_typed_for_tuples_still_type_check() -> None:
     """Constraints written for 3.0's tuple rows are accepted, also in a typed list."""
     constraints: list[Callable[[tuple[Any, ...]], bool]] = [lambda v: v[0] >= 0]
