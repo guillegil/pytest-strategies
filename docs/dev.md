@@ -967,6 +967,20 @@ constraint (a strategy file imported there) puts the ambient generator back and
 does not trigger it. A generator an RNG type creates for itself is not the
 plugin's, so the guard cannot see it.
 
+**Golden values:** `tests/golden/seed1.json` holds the values of streams v1 for
+`--rng-seed=1`: every row of a small project that draws with every built-in RNG
+type, with predicates and under a constraint, in `Series` and
+`per_sequence_samples` rows and in an `RNGSequence` permutation under
+`--nsamples=auto`, with values that a factory, a strategy file and the context
+hook drew. `tests/integration/test_golden_values_integration.py` checks them on
+every CI cell (Linux and Windows, Python 3.11 to 3.14, pytest 8 and 9), under
+two `PYTHONHASHSEED` values. A change that fails it gives every recorded seed
+other values, so it belongs in a major release, with a new `_streams.VERSION`.
+The values also rest on `random.Random`'s `randint`, `choice`, `choices` and
+`sample`, which CPython may change; a CPython that does gets rows of its own in
+the file, keyed by its version. A built-in RNG type added later gets a strategy
+and a test of its own in the project, which adds rows and changes none.
+
 **Import time:** `pytest_configure` restarts the generator from the seed. A
 strategy file is imported on its file stream and a test module on its module
 stream, so their import-time draws do not depend on what was collected before,
