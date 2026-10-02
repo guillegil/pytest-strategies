@@ -134,8 +134,8 @@ CASES = {
         """,
         [
             "*In test_p: Signature validation failed for strategy 'CASE_xy'*",
-            "*Parameter 'p' is annotated with Optional[[]*Point[]], a union, which is not a "
-            "record type.",
+            # Python 3.14 shows Optional[Point] as "Point | None"
+            "*Parameter 'p' is annotated with *Point*, a union, which is not a record type.",
         ],
     ),
     "generic": (
