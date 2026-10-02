@@ -743,7 +743,9 @@ class SequenceLike(RNGType[T]):
         the order of ``_auto_positions()``.
 
         A subclass that overrides this instead of ``_auto_positions()`` gets each
-        value's position found in the sequence.
+        value's position found in the sequence, so it must return values of its
+        sequence, each at most as often as the sequence lists it: any other value
+        fails ``--nsamples=auto`` with ``RNGValueError``.
         """
         return [self.sequence[position] for position in self._auto_positions()]
 

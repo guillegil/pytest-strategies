@@ -168,6 +168,23 @@ class TestParameterNsamplesAuto:
         assert len(samples) == 1 + 3
 
 
+class TestParameterNsamplesReassigned:
+    """A Parameter.nsamples reassigned to a non-int count fails instead of being converted."""
+
+    @pytest.mark.parametrize("nsamples", [2.5, True, "5"])
+    def test_a_non_int_count_fails(self, nsamples):
+        with pytest.raises(ValueError) as excinfo:
+            _resolve(lambda: _with_nsamples(_random_param(), nsamples), ["code"])
+        assert str(excinfo.value) == (
+            f"Error generating samples for strategy 'strat': n must be an int, got {nsamples!r}"
+        )
+
+    def test_an_int_count_is_used(self):
+        """Guards behaviour that already worked in the resolver."""
+        _, samples, _ = _resolve(lambda: _with_nsamples(_random_param(), 2), ["code"])
+        assert len(samples) == 1 + 2
+
+
 # ---------------------------------------------------------------------------
 # Decorated factories
 # ---------------------------------------------------------------------------

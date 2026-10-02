@@ -1512,9 +1512,11 @@ class Parameter:
             constraints_off: The names of constraints not to evaluate in this call
                 (``--strategy-constraint-off``); names the Parameter does not have
                 are ignored. The Parameter keeps its constraints.
-            _stats: Private: counts the rejections per constraint, for the plugin
+            _stats: Private: counts the rejections per constraint
 
-        The arguments after n are keyword-only.
+        The arguments after n are keyword-only. The plugin does not call this
+        method: it generates a test's rows with the same code, so a subclass that
+        overrides it does not change the tests' rows.
 
         Returns:
             List of parameter vectors, each a Vector, or for a pytest.param(...)
@@ -1915,14 +1917,15 @@ class Parameter:
         For non-sequence arguments, generate a random value for each combination.
 
         A combination the constraints still reject after max_retries draws of its
-        random arguments is left out.
+        random arguments is left out. The plugin does not call this method, as for
+        generate_vectors().
 
         Args:
             constraints_off: The names of constraints not to evaluate in this call
                 (``--strategy-constraint-off``); names the Parameter does not have
                 are ignored. The Parameter keeps its constraints.
             _stats: Private: counts the rejections per constraint and the
-                combinations left out, for the plugin
+                combinations left out
 
         Returns:
             List of Vectors. Empty when skip_reason is set.

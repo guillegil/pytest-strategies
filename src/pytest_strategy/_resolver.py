@@ -529,8 +529,10 @@ def build_parametrization(
     try:
         # Warnings raised while generating name the strategy and the test
         with _attributed_warnings(name, test_fn):
+            # A count is passed as it is: a Parameter.nsamples reassigned to a
+            # non-int after construction fails here, naming the value
             rows = param._generate_rows(
-                0 if auto else int(effective_nsamples),
+                0 if auto else cast(int, effective_nsamples),
                 exhaustive=auto,
                 mode=vector_mode,
                 filter_by_name=vector_name,

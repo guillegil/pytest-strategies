@@ -25,6 +25,11 @@ class Level(enum.IntEnum):
     HIGH = 2
 
 
+class Perm(enum.Flag):
+    R = 1
+    W = 2
+
+
 def _double(x):
     return 2 * x
 
@@ -228,6 +233,7 @@ class TestLabels:
             pytest.param(["x" * 40], ["v=" + "x" * 40], id="40-characters"),
             pytest.param([Color.RED, Color.GREEN], ["v=RED", "v=GREEN"], id="Enum"),
             pytest.param([Level.LOW, 2], ["v=LOW", "v=2"], id="IntEnum"),
+            pytest.param([Perm.R | Perm.W, Perm.R, Perm(0)], ["v=R|W", "v=R", "v2"], id="Flag"),
             pytest.param([Color, _double, len], ["v=Color", "v=_double", "v=len"], id="__name__"),
             pytest.param([1, 1, 2, 1], ["v=1", "v=1~1", "v=2", "v=1~2"], id="repeats"),
             pytest.param([1, "1", 2], ["v0", "v1", "v=2"], id="equal-text"),

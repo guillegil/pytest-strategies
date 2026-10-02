@@ -6,6 +6,7 @@ enumerated argument its label and token.
 
 import enum
 import numbers
+import sys
 import warnings
 from fractions import Fraction
 
@@ -41,6 +42,11 @@ class Mode(enum.StrEnum):
     SLOW = "slow"
 
 
+class Perm(enum.Flag):
+    R = 1
+    W = 2
+
+
 class Word:
     """A numbers.Integral that is not an int, as numpy's integers are."""
 
@@ -55,6 +61,20 @@ class Word:
 
 
 numbers.Integral.register(Word)
+
+
+class NoIndex:
+    """A numbers.Integral whose __index__ raises."""
+
+    def __index__(self):
+        raise TypeError("no index")
+
+
+numbers.Integral.register(NoIndex)
+
+
+class Text(str):
+    """A str subclass that is not an Enum."""
 
 
 def helper():
@@ -126,6 +146,34 @@ class TestPositionKeys:
 
     def test_a_real_that_is_not_a_float_goes_through_float(self):
         assert keys("r", [Fraction(1, 2)]) == [("r=0.5", "f:0x1.0000000000000p-1")]
+
+    def test_a_flag_combination_is_a_member_and_a_flag_value_without_a_name_is_positional(self):
+        assert keys("p", [Perm.R | Perm.W, Perm.R, Perm(0)]) == [
+            ("p=R|W", "e:Perm.R|W"),
+            ("p=R", "e:Perm.R"),
+            ("p2", "#2"),
+        ]
+
+    def test_an_integral_whose_index_raises_is_keyed_by_position(self):
+        assert keys("w", [NoIndex(), 1]) == [("w0", "#0"), ("w=1", "i:1")]
+
+    def test_a_real_float_cannot_hold_is_keyed_by_position(self):
+        assert keys("r", [Fraction(10**400), Fraction(1, 2)]) == [
+            ("r0", "#0"),
+            ("r=0.5", "f:0x1.0000000000000p-1"),
+        ]
+
+    def test_an_int_with_more_digits_than_str_allows_is_keyed_by_position(self):
+        limit = sys.get_int_max_str_digits()
+        sys.set_int_max_str_digits(640)
+        try:
+            big = 10**700
+            assert keys("n", [big, big, 1]) == [("n0", "#0"), ("n1", "#1"), ("n=1", "i:1")]
+        finally:
+            sys.set_int_max_str_digits(limit)
+
+    def test_a_str_subclass_is_a_str(self):
+        assert keys("s", [Text("a"), "a"]) == [("s=a", "s:a"), ("s=a~1", "s:a~1")]
 
     def test_floats_are_keyed_by_their_hex(self):
         assert keys("f", [0.1, -0.0, 0.0, float("inf"), float("nan")]) == [
