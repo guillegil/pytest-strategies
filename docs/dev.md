@@ -439,7 +439,8 @@ plugin's. `--full-trace` shows the full traceback.
 **Factory inputs:** `_factory.analyse()` reads the factory's signature into a
 `CallPlan` without calling anything, and `call_factory()` follows it. The
 signature of the callable that is called decides; when it has none or only
-`*args`/`**kwargs`, the `__wrapped__` signature decides, and without one the
+`*args`/`**kwargs`, the `__wrapped__` signature decides (also behind a partial,
+a callable object's `__call__` or a class's `__init__`), and without one the
 factory is called with no arguments. Each parameter named `nsamples`, `ctx`,
 `rng` or `options` gets that input (positional-only ones by position, the
 others by keyword, or all by position for a `functools.wraps` wrapper that has

@@ -371,6 +371,34 @@ class TestPartials:
         received = call_factory("s", functools.partial(factory, **{name: "bound"}), inputs)
         assert received == {"nsamples": 3, "rng": RNG.generator(), "options": inputs.options}
 
+    def test_partial_of_a_wraps_wrapper(self):
+        # The partial has no __wrapped__ of its own: the wrapped signature is its func's
+        def factory(nsamples, width=8):
+            return nsamples, width
+
+        @functools.wraps(factory)
+        def wrapper(*args, **kwargs):
+            return factory(*args, **kwargs)
+
+        assert _call(functools.partial(wrapper, width=16)) == (3, 16)
+
+    def test_partial_of_a_wraps_wrapper_with_only_args(self):
+        def factory(width, nsamples, ctx=None):
+            return width, nsamples, ctx
+
+        @functools.wraps(factory)
+        def wrapper(*args):
+            return factory(*args)
+
+        assert _call(functools.partial(wrapper, 16), Hook("bench")) == (16, 3, "bench")
+
+    def test_partial_of_a_cached_factory(self):
+        @functools.cache
+        def factory(nsamples, width):
+            return nsamples, width
+
+        assert _call(functools.partial(factory, width=16)) == (3, 16)
+
 
 class TestWrappers:
     def test_wraps_wrapper_with_args_and_kwargs_gets_keywords(self):
@@ -546,6 +574,42 @@ class TestMockPatch:
         assert "so 'nsamples' would receive a mock. Put the mock parameters first" in message
         assert calls == []
 
+    def test_patch_multiple_passes_mocks_by_keyword(self):
+        @mock.patch.multiple("os", getcwd=mock.DEFAULT)
+        def factory(nsamples, getcwd=None):
+            return nsamples, isinstance(getcwd, mock.MagicMock)
+
+        assert _call(factory) == (3, True)
+
+    def test_patch_multiple_with_a_patch(self):
+        @mock.patch.multiple("os", getcwd=mock.DEFAULT)
+        @mock.patch("os.getpid", return_value=7)
+        def factory(getpid, nsamples, getcwd=None):
+            return nsamples, os.getpid(), isinstance(getcwd, mock.MagicMock)
+
+        assert _call(factory) == (3, 7, True)
+
+    def test_partial_of_a_patched_factory(self):
+        @mock.patch("os.getcwd", return_value="/fake")
+        def factory(getcwd, nsamples, width=8):
+            return nsamples, width, os.getcwd()
+
+        assert _call(functools.partial(factory, width=16)) == (3, 16, "/fake")
+
+    def test_patched_call_and_init(self):
+        class Factory:
+            @mock.patch("os.getcwd", return_value="/fake")
+            def __call__(self, getcwd, nsamples):
+                return nsamples, os.getcwd()
+
+        class Made:
+            @mock.patch("os.getcwd", return_value="/fake")
+            def __init__(self, getcwd, nsamples):
+                self.made = nsamples, os.getcwd()
+
+        assert _call(Factory()) == (3, "/fake")
+        assert _call(Made).made == (3, "/fake")
+
     def test_unknown_name_in_a_patched_factory(self):
         @mock.patch("os.getcwd", return_value="/fake")
         def factory(getcwd, other, nsamples):
@@ -555,8 +619,39 @@ class TestMockPatch:
             _call(factory)
         message = str(excinfo.value)
         assert "has a parameter 'other'" in message
-        assert "decorated with mock.patch" in message
-        assert "put the mock parameters first" in message
+        assert message.endswith(
+            "Rename it, or give it a default if the plugin should leave it alone. The factory "
+            "is decorated with mock.patch, which passes its mocks to its first parameters "
+            "('getcwd')."
+        )
+
+    def test_nsamples_by_position_in_a_patched_factory(self):
+        # The mocks come first already: the hint is the one for 3.0's nsamples
+        @mock.patch("os.getcwd", return_value="/fake")
+        def factory(getcwd, n):
+            pass
+
+        with pytest.raises(ValueError) as excinfo:
+            _call(factory)
+        message = str(excinfo.value)
+        assert "has a parameter 'n'" in message
+        assert "Did you mean 'nsamples'? Since 4.0" in message
+        assert "passes its mocks to its first parameters ('getcwd')." in message
+        assert "put the mock parameters first" not in message
+
+    def test_unknown_name_after_an_input_in_a_patched_factory(self):
+        @mock.patch("os.getcwd", return_value="/fake")
+        def factory(width, nsamples, getcwd):
+            pass
+
+        with pytest.raises(ValueError) as excinfo:
+            _call(factory)
+        message = str(excinfo.value)
+        assert "has a parameter 'getcwd'" in message
+        assert message.endswith(
+            "passes its mocks to its first parameters ('width'): if 'getcwd' is a mock "
+            "parameter, put the mock parameters first, before the ones the plugin passes."
+        )
 
     def test_positional_only_input_after_a_mock(self):
         @mock.patch("os.getcwd", return_value="/fake")
@@ -600,6 +695,27 @@ class TestCallableKinds:
 
         assert isinstance(_call(Bus), Bus)
 
+    def test_wraps_decorated_call_and_init(self):
+        def passthrough(fn):
+            @functools.wraps(fn)
+            def wrapper(*args, **kwargs):
+                return fn(*args, **kwargs)
+
+            return wrapper
+
+        class Factory:
+            @passthrough
+            def __call__(self, nsamples, ctx):
+                return "callable", nsamples, ctx
+
+        class Made:
+            @passthrough
+            def __init__(self, nsamples):
+                self.nsamples = nsamples
+
+        assert _call(Factory()) == ("callable", 3, BENCH)
+        assert _call(Made).nsamples == 3
+
 
 # ---------------------------------------------------------------------------
 # async factories
@@ -618,7 +734,8 @@ class TestAsyncFactories:
             calls.append("wrapper")
             return factory(*args, **kwargs)
 
-        for candidate in (factory, wrapper, functools.partial(factory, 3)):
+        candidates = (factory, wrapper, functools.partial(factory, 3), functools.partial(wrapper))
+        for candidate in candidates:
             with pytest.raises(ValueError, match="async factories are not supported"):
                 _call(candidate)
         assert calls == []
@@ -687,12 +804,26 @@ KINDS_STRATEGIES = """
             super().__init__(TestArg("x", value=(options.strategy, nsamples)))
 
 
+    def passthrough(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            return fn(*args, **kwargs)
+
+        return wrapper
+
+
+    @passthrough
+    def decorated(nsamples, width=8):
+        return _param(("decorated", width), nsamples)
+
+
     register("kinds_callable")(Callable())
     register("kinds_bound")(Factories().bound)
     register("kinds_classmethod")(Factories.from_class)
     register("kinds_staticmethod")(Factories.static)
     register("kinds_class")(Bus)
     register("kinds_cached")(functools.cache(lambda nsamples, rng: _param("cached", nsamples)))
+    register("kinds_partial")(functools.partial(decorated, width=16))
     """
 
 KINDS_TESTS = """
@@ -725,6 +856,10 @@ KINDS_TESTS = """
     @strategy("kinds_cached")
     def test_cached(x):
         assert x == ("cached", 2)
+
+    @strategy("kinds_partial")
+    def test_partial(x):
+        assert x == (("decorated", 16), 2)
     """
 
 
@@ -734,7 +869,7 @@ class TestProjects:
 
         result = pytester.runpytest_inprocess("--nsamples=2")
 
-        result.assert_outcomes(passed=7 * 2)
+        result.assert_outcomes(passed=8 * 2)
 
     def test_collection_error_names_the_factory_relative_to_the_rootdir(self, pytester):
         pytester.makepyfile(

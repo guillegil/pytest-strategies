@@ -136,9 +136,18 @@ def _mock_count(factory: Callable[..., Any]) -> int:
     Return how many mocks ``unittest.mock.patch`` decorators pass the factory.
 
     pytest's own rule for test functions: each patch without ``new=`` (and not
-    ``patch.multiple``) appends one mock to the positional arguments.
+    ``patch.multiple``) appends one mock to the positional arguments. The
+    decorated function is looked for where the factory's signature comes from:
+    a partial's function, a callable object's ``__call__`` or a class's ``__init__``.
     """
-    patchings = getattr(factory, "patchings", None)
+    fn: Any = factory
+    while isinstance(fn, functools.partial):
+        fn = fn.func
+    if inspect.isclass(fn):
+        fn = fn.__init__
+    elif callable(fn) and not inspect.isroutine(fn):
+        fn = type(fn).__call__
+    patchings = getattr(fn, "patchings", None)
     if not patchings:
         return 0
     sentinels = [
@@ -153,16 +162,23 @@ def _mock_count(factory: Callable[..., Any]) -> int:
 
 
 def _unknown(
-    param: inspect.Parameter, *, first_positional: bool, patched: bool, has_nsamples: bool
+    param: inspect.Parameter,
+    *,
+    first_positional: bool,
+    after_input: bool,
+    mocked: tuple[str, ...],
+    has_nsamples: bool,
 ) -> str:
     """
     Describe a parameter without a default that the plugin does not provide.
 
     Args:
         param: The parameter
-        first_positional: Whether it is the first positional parameter, which 3.0
-            passed nsamples to
-        patched: Whether mock.patch decorates the factory
+        first_positional: Whether it is the first positional parameter after
+            the ones that receive mocks, which 3.0 passed nsamples to
+        after_input: Whether it is positional and comes after an input, where
+            a mock parameter is out of place
+        mocked: The parameters mock.patch passes its mocks to
         has_nsamples: Whether the factory declares nsamples
     """
     name = param.name
@@ -181,20 +197,29 @@ def _unknown(
             f" '{name}' is a pytest fixture, but factories run at collection, before fixtures "
             "exist; use ctx (the pytest_strategies_context hook's result) for configuration."
         )
-    if patched:
-        return message + (
-            " The factory is decorated with mock.patch, which passes its mocks to the first "
-            "parameters: put the mock parameters first, before the ones the plugin passes."
-        )
     if first_positional and not has_nsamples:
-        return message + (
+        message += (
             " Did you mean 'nsamples'? Since 4.0 the plugin no longer passes nsamples by "
             "position to a parameter with another name: rename it, or give it a default if "
             "the plugin should leave it alone."
         )
-    close = difflib.get_close_matches(name, INPUTS, n=1)
-    hint = f" Did you mean '{close[0]}'?" if close else ""
-    return message + hint + " Rename it, or give it a default if the plugin should leave it alone."
+    else:
+        close = difflib.get_close_matches(name, INPUTS, n=1)
+        hint = f" Did you mean '{close[0]}'?" if close else ""
+        message += hint + " Rename it, or give it a default if the plugin should leave it alone."
+    if mocked:
+        names = ", ".join(f"'{m}'" for m in mocked)
+        message += (
+            " The factory is decorated with mock.patch, which passes its mocks to its first "
+            f"parameters ({names})"
+        )
+        message += (
+            f": if '{name}' is a mock parameter, put the mock parameters first, before the "
+            "ones the plugin passes."
+            if after_input
+            else "."
+        )
+    return message
 
 
 def analyse(factory: Callable[..., Any]) -> CallPlan:
@@ -203,8 +228,10 @@ def analyse(factory: Callable[..., Any]) -> CallPlan:
 
     The signature of the callable that is called decides (a decorator's wrapper,
     not the function it wraps). When it has none, or only ``*args``/``**kwargs``,
-    the signature of the function it wraps (``__wrapped__``) decides; when there
-    is none either, the factory is opaque and is called with no arguments.
+    the signature of the function it wraps (``__wrapped__``, also behind a
+    partial, a callable object's ``__call__`` or a class's ``__init__``) decides;
+    when there is none either, the factory is opaque and is called with no
+    arguments.
 
     Each parameter named after an input gets that input. Any other parameter
     with a default keeps it, and ``*args``/``**kwargs`` receive nothing.
@@ -229,12 +256,13 @@ def analyse(factory: Callable[..., Any]) -> CallPlan:
     from_wrapped = own is None or _only_var_args(own)
     sig = own
     if from_wrapped:
-        sig = _signature(factory, follow_wrapped=True) if hasattr(factory, "__wrapped__") else None
+        sig = _signature(factory, follow_wrapped=True)
     if sig is None or _only_var_args(sig):
         return CallPlan(opaque=True)
 
     params = list(sig.parameters.values())
     mocks = _mock_count(factory) if from_wrapped else 0
+    taken: list[inspect.Parameter] = []
     if mocks:
         taken = [p for p in params if p.kind in _POSITIONAL][:mocks]
         for p in taken:
@@ -250,6 +278,7 @@ def analyse(factory: Callable[..., Any]) -> CallPlan:
     declares = tuple(p.name for p in params if p.name in INPUTS and p.kind not in _VARIADIC)
     first_positional = next((p for p in params if p.kind in _POSITIONAL), None)
     unknown: str | None = None
+    after_input = False
     for p in params:
         if p.kind in _VARIADIC:
             continue
@@ -262,9 +291,11 @@ def analyse(factory: Callable[..., Any]) -> CallPlan:
             unknown = _unknown(
                 p,
                 first_positional=p is first_positional,
-                patched=mocks > 0,
+                after_input=after_input and p.kind in _POSITIONAL,
+                mocked=tuple(t.name for t in taken),
                 has_nsamples="nsamples" in declares,
             )
+        after_input = after_input or p.name in INPUTS
     if unknown is not None:
         return CallPlan(problem=unknown)
 
