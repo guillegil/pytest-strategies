@@ -638,6 +638,30 @@ class TestRecordHints:
 
         assert record_hints(test_fn, XY, ["p", "db"]) == []
 
+    def test_a_test_that_takes_an_argument_by_name_gets_no_hints_on_its_fixtures(self):
+        """A typo in a named-mode test: the fixtures' annotations do not explain it."""
+
+        def test_fn(x, yy, db: "Db", settings: Width | None, extra: Width = None):  # noqa: F821
+            pass
+
+        assert record_hints(test_fn, XY, ["x", "yy", "db", "settings"]) == []
+
+    def test_a_union_or_default_of_another_record_type_gets_no_hint(self):
+        def test_fn(p: Optional[Point3], q: Width = None):  # noqa: UP045
+            pass
+
+        assert record_hints(test_fn, XY, ["p"]) == []
+
+    def test_an_unresolvable_annotation_next_to_the_record_gets_no_hint(self):
+        def test_fn(p: Point, db: "Database"):  # noqa: F821
+            pass
+
+        assert record_hints(test_fn, XY, ["p", "db", "x"]) == [
+            "A fixture of the test asks for 'x', so the strategy passes its arguments by name: "
+            "parameter 'p' (Point) receives the row as a record only when no fixture asks for "
+            "an argument."
+        ]
+
 
 # ---------------------------------------------------------------------------
 # Through the resolver
@@ -692,6 +716,23 @@ class TestResolver:
             )
         else:
             assert parametrization.unfilled == ()
+
+    def test_the_unfilled_record_message_has_no_hints_on_other_fixtures(self):
+        def test_fn(point: Point, db: "Database", settings: Optional[Width]):  # noqa: F821, UP045
+            pass
+
+        parametrization = _build(test_fn, fixturenames=["point", "db", "settings", "x", "y"])
+        assert parametrization.unfilled == (
+            (
+                "point",
+                "Signature validation failed for strategy 's': parameter 'point' (Point) gets "
+                "no value: it is not one of the strategy's arguments, and no fixture or "
+                "parametrization provides it.\n"
+                "  A fixture of the test asks for 'x' and 'y', so the strategy passes its "
+                "arguments by name: parameter 'point' (Point) receives the row as a record "
+                "only when no fixture asks for an argument.\n",
+            ),
+        )
 
     def test_errors_name_the_strategy(self):
         def test_fn(p: Point, q: Other):

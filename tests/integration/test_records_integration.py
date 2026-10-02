@@ -24,8 +24,9 @@ STRATEGIES = """
 
     @register("CASE_xy")
     def xy():
+        # x is never 0 in a random row, so no random row repeats the ID of "zeros"
         return Parameter(
-            TestArg("x", rng_type=RNGInteger(0, 9)),
+            TestArg("x", rng_type=RNGInteger(1, 9)),
             TestArg("y", rng_type=RNGInteger(0, 9)),
             directed_vectors={"zeros": {"x": 0, "y": 0}},
             nsamples=2,
@@ -67,7 +68,7 @@ HEADER = """
 
 # Each case: the test module (after HEADER, unless it starts with
 # "from __future__"), then the outcomes or the error lines expected. "CASE_xy"
-# has 3 rows: the directed vector "zeros" and 2 random rows.
+# has 3 rows: the directed vector "zeros" (ID x=0,y=0) and 2 random rows.
 CASES = {
     "future_annotations": (
         """

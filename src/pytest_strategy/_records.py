@@ -229,42 +229,47 @@ def record_hints(
 
     For the signature error of a test that does not take every argument by name:
     a fixture asks for an argument, so the strategy passes its arguments by name
-    although a parameter has a record type; a parameter with a record type has a
-    default, so pytest does not fill it; or a parameter's annotation cannot be
-    resolved, or is a union.
+    although a parameter has a record type; a parameter annotated with a record
+    type whose fields are the arguments has a default, so pytest does not fill it,
+    or is annotated with a union of it; or a parameter's annotation cannot be
+    resolved, in a test that looks written for record mode. Other parameters, such
+    as a fixture annotated with a type imported under TYPE_CHECKING, get no hint.
     """
     hints: list[str] = []
     params = lazy_signature(test_fn).parameters
+    wanted = set(argnames)
+    exact = [c for c in _candidates(test_fn, pytest_fixtures) if c.fields == wanted]
     asked = [
         name
         for name in argnames
         if fixturenames is not None and name in fixturenames and name not in params
     ]
-    if asked:
-        wanted = set(argnames)
-        exact = [c for c in _candidates(test_fn, pytest_fixtures) if c.fields == wanted]
-        if exact:
-            record = exact[0]
-            hints.append(
-                f"A fixture of the test asks for {_join([repr(a) for a in asked])}, so the "
-                f"strategy passes its arguments by name: parameter '{record.name}' "
-                f"({record.record_type.__name__}) receives the row as a record only when "
-                "no fixture asks for an argument."
-            )
+    if asked and exact:
+        record = exact[0]
+        hints.append(
+            f"A fixture of the test asks for {_join([repr(a) for a in asked])}, so the "
+            f"strategy passes its arguments by name: parameter '{record.name}' "
+            f"({record.record_type.__name__}) receives the row as a record only when "
+            "no fixture asks for an argument."
+        )
+    # An annotation that cannot be resolved can only be the missing record type when
+    # the test takes no argument by name and no parameter has the record type already
+    record_mode_test = not exact and not any(name in params for name in argnames)
     for param, raw, annotation in _annotated_parameters(test_fn, pytest_fixtures):
         if annotation is _UNRESOLVED:
-            hints.append(
-                f"Parameter '{param.name}' is annotated with {_annotation_text(raw)!r}, "
-                "which cannot be resolved in the test module's globals, so it is not a "
-                "record type: define the class at module level."
-            )
+            if record_mode_test:
+                hints.append(
+                    f"Parameter '{param.name}' is annotated with {_annotation_text(raw)!r}, "
+                    "which cannot be resolved in the test module's globals, so it is not a "
+                    "record type: define the class at module level."
+                )
         elif _is_union_origin(typing.get_origin(annotation)):
-            if any(_is_record_type(arg) for arg in typing.get_args(annotation)):
+            if any(_has_fields(arg, wanted) for arg in typing.get_args(annotation)):
                 hints.append(
                     f"Parameter '{param.name}' is annotated with {_annotation_text(raw)}, "
                     "a union, which is not a record type."
                 )
-        elif param.default is not param.empty and _is_record_type(annotation):
+        elif param.default is not param.empty and _has_fields(annotation, wanted):
             hints.append(
                 f"Parameter '{param.name}' has a default, so pytest does not fill it and "
                 "it does not receive the row as a record."
@@ -293,10 +298,11 @@ def matching_record_params(
     ]
 
 
-def _is_record_type(annotation: object) -> bool:
-    """Return True when an annotation names a record type."""
+def _has_fields(annotation: object, fields: set[str]) -> bool:
+    """Return True when an annotation names a record type whose fields are ``fields``."""
     cls = record_class(annotation)
-    return cls is not None and record_kind(cls) is not None
+    kind = record_kind(cls) if cls is not None else None
+    return cls is not None and kind is not None and record_fields(cls, kind) == fields
 
 
 def _candidates(
