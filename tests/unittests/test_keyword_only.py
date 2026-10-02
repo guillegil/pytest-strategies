@@ -79,8 +79,9 @@ class TestSignatures:
             (
                 Parameter.generate_vectors,
                 ["self", "n"],
-                {"mode", "filter_by_name", "filter_by_index"},
+                {"mode", "filter_by_name", "filter_by_index", "constraints_off"},
             ),
+            (Parameter.generate_exhaustive, ["self"], {"constraints_off"}),
             (Parameter.add_constraint, ["self", "fn"], {"name"}),
             # Unchanged: 4.1 adds its options after a * as well
             (register, ["name"], set()),
@@ -90,6 +91,7 @@ class TestSignatures:
             "strategy",
             "export_strategies",
             "generate_vectors",
+            "generate_exhaustive",
             "add_constraint",
             "register",
         ],

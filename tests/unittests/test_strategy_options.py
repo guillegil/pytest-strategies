@@ -224,7 +224,13 @@ class TestSessionCache:
             assert (first.strategy, other.strategy) == ("dma_burst", "esm")
             assert (other.nsamples, other.vector_name) == (3, "zeros")
             # Read once for the session: the second name reads nothing
-            assert sorted(reads) == ["nsamples", "vector_index", "vector_mode", "vector_name"]
+            assert sorted(reads) == [
+                "nsamples",
+                "strategy_constraint_off",
+                "vector_index",
+                "vector_mode",
+                "vector_name",
+            ]
             assert config.calls == reads
             assert rt.current.strategy_options == {"dma_burst": first, "esm": other}
         finally:

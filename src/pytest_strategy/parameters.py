@@ -217,6 +217,9 @@ def _check_arg_name(name: Any) -> None:
     )
 
 
+# The constraints a generation call evaluates, as (name, function) pairs in order
+_Constraints = tuple[tuple[str, Callable[[Vector], object]], ...]
+
 # Characters a constraint name cannot contain: they separate the items of
 # --strategy-constraint-off ("S:a,b") and of the diagnostics ("a=3, b=1")
 _NAME_SEPARATORS = (":", ",", "=")
@@ -380,14 +383,42 @@ class _ConstraintError(ValueError):
 
     It is raised from the constraint's own exception, which the resolver chains
     the collection error to, so the user's frame is shown.
+
+    Attributes:
+        detail: The message without the note on the constraints turned off
+        off_before: The constraints before it in the mapping that the generation
+            call turned off (one of them may have guarded it)
     """
 
-    def __init__(self, label: str, row: Vector, index: int | None, error: Exception) -> None:
+    def __init__(
+        self,
+        label: str,
+        row: Vector,
+        index: int | None,
+        error: Exception,
+        off_before: Sequence[str] = (),
+    ) -> None:
         where = "the row" if index is None else f"random row {index},"
-        super().__init__(
+        self.detail = (
             f"Constraint {label} raised {type(error).__name__} on {where} "
             f"{_short_repr(row)}: {error}"
         )
+        self.off_before = tuple(off_before)
+        super().__init__(self.message("constraints_off"))
+
+    def message(self, turned_off_by: str) -> str:
+        """
+        Return the message, with a note naming the constraints before this one that
+        ``turned_off_by`` turned off. The resolver names ``--strategy-constraint-off``.
+        """
+        if not self.off_before:
+            return self.detail
+        names = ", ".join(repr(name) for name in self.off_before)
+        if len(self.off_before) == 1:
+            note = f"constraint {names} before it is turned off"
+        else:
+            note = f"constraints {names} before it are turned off"
+        return f"{self.detail} ({note} by {turned_off_by})"
 
 
 class Parameter:
@@ -645,14 +676,44 @@ class Parameter:
             return _constraint_origin(self._constraints[name])
         return None
 
+    def _evaluated(self, constraints_off: Iterable[str] = ()) -> _Constraints:
+        """
+        Return the constraints a generation call evaluates, in order: all of them
+        but the ones named in ``constraints_off``. The Parameter is not changed.
+
+        Raises:
+            TypeError: If constraints_off is a str instead of a collection of names
+            ValueError: If constraints_off names a constraint this Parameter does
+                not have
+        """
+        if isinstance(constraints_off, (str, bytes)):
+            raise TypeError(
+                "constraints_off must be a collection of constraint names, not a "
+                f"{type(constraints_off).__name__} ({constraints_off!r})"
+            )
+        off = dict.fromkeys(constraints_off)
+        unknown = [name for name in off if name not in self._constraints]
+        if unknown:
+            names = ", ".join(self._constraints) or "none"
+            raise ValueError(
+                f"constraints_off names no constraint {', '.join(map(repr, unknown))}. "
+                f"Constraints: {names}"
+            )
+        return tuple((name, fn) for name, fn in self._constraints.items() if name not in off)
+
     def _validate_vector(
-        self, vector: Vector, rejections: _Rejections | None = None, index: int | None = None
+        self,
+        vector: Vector,
+        constraints: _Constraints,
+        rejections: _Rejections | None = None,
+        index: int | None = None,
     ) -> bool:
         """
-        Validate a vector against all constraints, in order.
+        Validate a vector against the constraints, in order.
 
         Args:
             vector: Parameter vector to validate
+            constraints: The constraints to evaluate (``_evaluated()``)
             rejections: If given, the first constraint that rejects the vector is
                 counted in it, by name
             index: The number of the random row being drawn, for the message of a
@@ -664,19 +725,27 @@ class Parameter:
         Raises:
             _ConstraintError: If a constraint raises, chained to its exception
         """
-        for name, constraint in self._constraints.items():
+        for name, constraint in constraints:
             try:
                 result = constraint(vector)
                 rejected = not result
             except Exception as e:
                 origin = self._unnamed_origin(name)
                 label = f"{name!r} ({origin})" if origin else repr(name)
-                raise _ConstraintError(label, vector, index, e) from e
+                raise _ConstraintError(
+                    label, vector, index, e, self._off_before(name, constraints)
+                ) from e
             if rejected:
                 if rejections is not None:
                     rejections.add(name, vector, result)
                 return False
         return True
+
+    def _off_before(self, name: str, constraints: _Constraints) -> list[str]:
+        """Return the constraints before ``name`` in the mapping that ``constraints`` leaves out."""
+        evaluated = {evaluated_name for evaluated_name, _ in constraints}
+        before = itertools.takewhile(lambda other: other != name, self._constraints)
+        return [other for other in before if other not in evaluated]
 
     def _describe_rejections(self, rejections: _Rejections) -> str:
         """
@@ -857,6 +926,7 @@ class Parameter:
         drawn: Sequence[int],
         attempts: int,
         rejections: _Rejections,
+        constraints: _Constraints,
         index: int | None = None,
     ) -> Vector | None:
         """
@@ -872,6 +942,7 @@ class Parameter:
                 ``arg.generate()`` on every attempt
             attempts: How many draws of the drawn positions to try
             rejections: Counts the first constraint that rejects each attempt
+            constraints: The constraints to evaluate (``_evaluated()``)
             index: The number of the random row, for the message of a constraint
                 that raises
 
@@ -885,7 +956,7 @@ class Parameter:
                 values[i] = args[i].generate()
             # The whole row goes to the constraints, as a Vector
             row = tuple.__new__(row_type, values)
-            if self._validate_vector(row, rejections, index):
+            if self._validate_vector(row, constraints, rejections, index):
                 return row
         return None
 
@@ -904,10 +975,14 @@ class Parameter:
         Example:
             vector = param.generate_vector()  # e.g., Vector(x=5, y=3.14, mode="fast")
         """
-        return self._random_row(self.vector_type, _Rejections())
+        return self._random_row(self.vector_type, _Rejections(), self._evaluated())
 
     def _random_row(
-        self, row_type: type[Vector], rejections: _Rejections, index: int | None = None
+        self,
+        row_type: type[Vector],
+        rejections: _Rejections,
+        constraints: _Constraints,
+        index: int | None = None,
     ) -> Vector:
         """
         Draw every argument of one row, redrawing up to max_retries times (the plain
@@ -916,13 +991,20 @@ class Parameter:
         Args:
             row_type: The class of the rows
             rejections: Counts this row's rejected draws (cleared first)
+            constraints: The constraints to evaluate (``_evaluated()``)
             index: The row's number among the random rows, or None for a single row
         """
         if rejections.counts:
             rejections.clear()
         width = len(self.test_args)
         row = self._build_row(
-            row_type, [None] * width, range(width), self.max_retries, rejections, index
+            row_type,
+            [None] * width,
+            range(width),
+            self.max_retries,
+            rejections,
+            constraints,
+            index,
         )
         if row is None:
             what = "a random row" if index is None else f"random row {index}"
@@ -961,6 +1043,7 @@ class Parameter:
         mode: str = "all",
         filter_by_name: str | None = None,
         filter_by_index: int | None = None,
+        constraints_off: Iterable[str] = (),
         _stats: _GenerationStats | None = None,
     ) -> list[Vector | ParameterSet]:
         """
@@ -978,6 +1061,8 @@ class Parameter:
                 - "test": Only test vectors, ignore n and directed
             filter_by_name: Only return this directed vector (for -vn CLI)
             filter_by_index: Only return directed vector at index (for -vi CLI)
+            constraints_off: The names of constraints not to evaluate in this call
+                (``--strategy-constraint-off``). The Parameter keeps them.
             _stats: Private: counts the rejections per constraint, for the plugin
 
         The arguments after n are keyword-only.
@@ -991,6 +1076,8 @@ class Parameter:
             KeyError / IndexError: If filter_by_name / filter_by_index names no
                 directed vector (also when skip_reason is set)
             ValueError: If n is not an int >= 0 in a mode that generates samples
+            ValueError: If constraints_off names a constraint the Parameter does not
+                have (TypeError if it is a str)
             ValueError: If the vector constraints reject every draw of a random row
                 (or every combination); the message counts the rejections by the
                 name of the first failing constraint and shows the first row each
@@ -1021,6 +1108,7 @@ class Parameter:
             samples = param.generate_vectors(0, filter_by_index=0)
         """
         samples: list[Vector | ParameterSet] = []
+        constraints = self._evaluated(constraints_off)
 
         # Handle CLI filters first (override mode). A missing vector raises even when
         # the Parameter is skipped, so callers can still tell whether a filter matched.
@@ -1068,7 +1156,7 @@ class Parameter:
 
         # Generate samples (for all modes except directed_only)
         if mode != "directed_only" and self.per_sequence_samples and self._sequence_indices():
-            samples.extend(self._generate_per_sequence(n, total))
+            samples.extend(self._generate_per_sequence(n, constraints, total))
         elif mode != "directed_only":
             row_type = self.vector_type
             # Series-aware branch: if any arg uses Series, produce ordered/cycling rows
@@ -1102,7 +1190,9 @@ class Parameter:
                     # Try fresh random values for the non-Series positions
                     if visit.counts:
                         visit.clear()
-                    row = self._build_row(row_type, vec, random_indices, attempts, visit)
+                    row = self._build_row(
+                        row_type, vec, random_indices, attempts, visit, constraints
+                    )
                     if row is not None:
                         samples.append(row)
                         series_rows += 1
@@ -1144,7 +1234,7 @@ class Parameter:
             else:
                 rejections = _Rejections(total)
                 for k in range(n):
-                    samples.append(self._random_row(row_type, rejections, k))
+                    samples.append(self._random_row(row_type, rejections, constraints, k))
 
         return samples
 
@@ -1156,7 +1246,9 @@ class Parameter:
             if a.rng_type and isinstance(a.rng_type, SequenceLike)
         ]
 
-    def _generate_per_sequence(self, n: int, total: Counter[str] | None = None) -> list[Vector]:
+    def _generate_per_sequence(
+        self, n: int, constraints: _Constraints, total: Counter[str] | None = None
+    ) -> list[Vector]:
         """
         Generate n random rows for every combination of the sequence args.
 
@@ -1166,6 +1258,7 @@ class Parameter:
 
         Args:
             n: Number of rows per combination
+            constraints: The constraints to evaluate (``_evaluated()``)
             total: If given, counts every rejected draw by constraint name
 
         Returns:
@@ -1207,7 +1300,7 @@ class Parameter:
             while rows < n:
                 if visit.counts:
                     visit.clear()
-                row = self._build_row(row_type, vec, random_indices, attempts, visit)
+                row = self._build_row(row_type, vec, random_indices, attempts, visit, constraints)
                 if row is None:
                     # Further rows of this combination would most likely fail too
                     failed.merge(visit)
@@ -1244,7 +1337,9 @@ class Parameter:
 
         return samples
 
-    def generate_exhaustive(self, *, _stats: _GenerationStats | None = None) -> list[Vector]:
+    def generate_exhaustive(
+        self, *, constraints_off: Iterable[str] = (), _stats: _GenerationStats | None = None
+    ) -> list[Vector]:
         """
         Generate all combinations of sequence arguments (Cartesian product).
         For non-sequence arguments, generate a random value for each combination.
@@ -1253,6 +1348,8 @@ class Parameter:
         random arguments is left out.
 
         Args:
+            constraints_off: The names of constraints not to evaluate in this call
+                (``--strategy-constraint-off``). The Parameter keeps them.
             _stats: Private: counts the rejections per constraint and the
                 combinations left out, for the plugin
 
@@ -1260,11 +1357,15 @@ class Parameter:
             List of Vectors. Empty when skip_reason is set.
 
         Raises:
+            ValueError: If constraints_off names a constraint the Parameter does not
+                have (TypeError if it is a str)
             ValueError: If no sequence arguments are present
             ValueError: If a sequence value fails its argument's validator
             ValueError: If the vector constraints reject every combination
             ValueError: If a constraint raises, naming the constraint and the row
         """
+        constraints = self._evaluated(constraints_off)
+
         # An empty skip_if_empty sequence has no combinations to enumerate
         if self.skip_reason is not None:
             return []
@@ -1311,7 +1412,7 @@ class Parameter:
             # sequence values alone break a constraint) is dropped.
             if visit.counts:
                 visit.clear()
-            row = self._build_row(row_type, vector, random_indices, attempts, visit)
+            row = self._build_row(row_type, vector, random_indices, attempts, visit, constraints)
             if row is not None:
                 samples.append(row)
             else:

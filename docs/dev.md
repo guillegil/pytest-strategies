@@ -331,6 +331,15 @@ constraint. A constraint that raises becomes `_ConstraintError`, chained to the
 user's exception, which the resolver chains the collection error to. The private
 `_stats` keyword of `generate_vectors()` and `generate_exhaustive()` collects the
 counts (and the combinations `--nsamples=auto` left out) for the `-v` summary.
+Their keyword-only `constraints_off` names constraints the call does not
+evaluate (`_evaluated()` builds the list once per call); the `Parameter` keeps
+them, so a cached factory's `Parameter` is never changed. The resolver passes
+the names of `--strategy-constraint-off` that the `Parameter` has
+(`StrategyOptions.constraints_off` intersected with its constraint names) and
+records every resolved strategy's constraint names on the session
+(`SessionState.constraint_names`), whether or not the run evaluates them, so the
+plugin can check the items once collection ends. A raising constraint's error
+names the constraints before it that were turned off (`_ConstraintError.off_before`).
 With `Series`
 args, `n` rows are taken by cycling through the `Series` combinations. A
 combination the constraints reject is skipped, after its random args have been
@@ -512,6 +521,7 @@ Provides pytest hooks and CLI options.
 --vector-mode MODE        # Sampling mode: all, random_only, directed_only, mixed, test
 --vector-name NAME        # Run specific directed vector by name
 --vector-index INDEX      # Run specific directed vector by index
+--strategy-constraint-off [STRATEGY:]NAME[,...]  # Turn constraints off (repeatable)
 --list-strategies         # List the registered strategies and exit
 ```
 
@@ -530,6 +540,17 @@ own `nsamples`, or 10. A strategy that lacks the vector requested by
 `--vector-name` or `--vector-index` gets an empty parameter set (its tests are
 skipped). If no strategy has it, the run stops with a usage error.
 
+`--strategy-constraint-off` items are checked when the command line is parsed
+(`_options.parse_constraint_off`: whitespace, empty items, `:x` and `x:` are
+usage errors) and split at their last `:` into `(strategy, name)` pairs on
+`SessionOptions`. Once collection ends, an item that matches no constraint of a
+strategy the run resolved is a usage error when the run collected the whole
+suite (`config.args_source` is not `ARGS`, and no `--lf`, `--sw`, `--ignore` or
+`--ignore-glob`), and otherwise a red line after the collection report (on a
+pytest-xdist worker, sent with the `-v` summary and printed by the controller).
+It is not checked under `--list-strategies` or when no `Parameter` strategy was
+resolved.
+
 **Pytest Hooks:**
 - `pytest_addhooks` - Adds the `pytest_strategies_context` hook (see below)
 - `pytest_addoption` - Adds CLI options
@@ -543,9 +564,13 @@ skipped). If no strategy has it, the run stops with a usage error.
 - `pytest_generate_tests` - Resolves the test's `strategy` markers into
   `parametrize` markers
 - `pytest_collection_modifyitems` - Fails the run on a name registered twice in
-  one folder, and when `--vector-name` or `--vector-index` matched no strategy
-- `pytest_collection_finish` - Handles `--list-strategies`
-- `pytest_report_header` - Prints the seed
+  one folder, when `--vector-name` or `--vector-index` matched no strategy, and
+  when a `--strategy-constraint-off` item matched no constraint in a run of the
+  whole suite
+- `pytest_collection_finish` - Handles `--list-strategies`, and prints the
+  unmatched `--strategy-constraint-off` items of a narrowed run
+- `pytest_report_header` - Prints the seed, and the `--strategy-constraint-off`
+  items when given
 - `pytest_terminal_summary` - After a failed run, prints
   `pytest-strategies: reproduce with --rng-seed=S`; with `-v`, a Strategy
   Summary (tests and directed, random and test rows per strategy, and where
@@ -895,8 +920,8 @@ A predicate on an RNG type rejected 100 draws in a row. Either:
 The `vector_constraints` rejected every draw (or, with `Series`/`RNGSequence`
 args, every combination). The message counts the draws by the name of the first
 constraint that rejected each one, and shows the first row each rejected, so you
-can see which one is too strict. Relax it, or raise
-`Parameter(max_retries=...)`.
+can see which one is too strict. Relax it, raise `Parameter(max_retries=...)`,
+or turn it off for one run with `--strategy-constraint-off=STRATEGY:NAME`.
 The related `PytestStrategiesWarning` "Series combination (...) skipped" means
 one combination was skipped after `max_retries` redraws of its random args.
 

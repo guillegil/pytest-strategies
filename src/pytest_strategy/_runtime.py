@@ -49,6 +49,8 @@ class Resolution:
     # The Parameter's constraint names, in order, and the draws each rejected
     constraints: tuple[str, ...] = ()
     rejected: dict[str, int] = field(default_factory=dict)
+    # The constraints --strategy-constraint-off turned off, in order
+    constraints_off: tuple[str, ...] = ()
     # Under --nsamples=auto: the combinations the constraints left out
     left_out: int | None = None
 
@@ -95,6 +97,13 @@ class SessionState:
         self.vector_filter_resolved: bool = False
         self.vector_filter_matched: bool = False
         self.vector_filter_misses: dict[str, list[str]] = {}
+        # --strategy-constraint-off bookkeeping: the constraint names of every
+        # Parameter strategy resolved in this session, by strategy name, in
+        # evaluation order (a name resolved in two folders gets both sets), and
+        # the lines reporting the items that matched none of them in a run that
+        # did not collect the whole suite
+        self.constraint_names: dict[str, dict[str, None]] = {}
+        self.unmatched_constraints_off: list[str] = []
         # The options factories receive: the session-wide part, read from the
         # config on first use, and each strategy's instance, by resolved name
         self.options: SessionOptions | None = None
@@ -251,6 +260,21 @@ class StrategyRuntime:
             raise state.context_error.with_traceback(state.context_traceback)
         return state.context
 
+    def session_options(self, config: pytest.Config | None) -> SessionOptions:
+        """
+        Return the session-wide options read from ``config``.
+
+        For the active session's config they are read once and reused for the
+        rest of the session. Any other config (a unit test's stand-in) or None is
+        read again, or gives the defaults, and leaves the session's cache alone.
+        """
+        state = self.current
+        if config is None or state is None or state.config is not config:
+            return parse_session_options(config)
+        if state.options is None:
+            state.options = parse_session_options(config)
+        return state.options
+
     def strategy_options(self, name: str, config: pytest.Config | None) -> StrategyOptions:
         """
         Return the options of the strategy resolved under ``name``.
@@ -265,10 +289,18 @@ class StrategyRuntime:
             return parse_session_options(config).for_strategy(name)
         options = state.strategy_options.get(name)
         if options is None:
-            if state.options is None:
-                state.options = parse_session_options(config)
-            options = state.strategy_options[name] = state.options.for_strategy(name)
+            options = self.session_options(config).for_strategy(name)
+            state.strategy_options[name] = options
         return options
+
+    def record_constraints(self, strategy: str, names: tuple[str, ...]) -> None:
+        """
+        Record the constraint names of a Parameter strategy resolved under
+        ``strategy``, for the --strategy-constraint-off check (no-op if no session).
+        """
+        if self.current is not None:
+            known = self.current.constraint_names.setdefault(strategy, {})
+            known.update(dict.fromkeys(names))
 
     def record_vector_filter(
         self, strategy: str, matched: bool, vector_names: list[str] | None = None

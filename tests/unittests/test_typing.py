@@ -3,7 +3,7 @@ The decorators keep the decorated function's type, the keyword-only options are
 keyword-only for type checkers too, StrategyOptions is typed as frozen, a
 Vector's fields type-check by name, vectors given by name type-check next to
 tuples while the vector mappings are read-only, and constraints type-check by
-name too.
+name too, and can be turned off per generation call.
 
 CI also type-checks this file with ``mypy --strict``: ``assert_type`` fails the
 check if a decorator loses the type (a call on ``Callable[..., Any]`` returns
@@ -21,6 +21,7 @@ import pytest
 from pytest_strategy import (
     Parameter,
     RNGInteger,
+    Series,
     StrategyOptions,
     TestArg,
     Vector,
@@ -144,6 +145,20 @@ def test_named_constraints_type_check() -> None:
     param.remove_constraint("first")
     with pytest.raises(TypeError):
         param.vector_constraints["x"] = aligned  # type: ignore[index]
+
+
+def test_constraints_off_type_checks() -> None:
+    """The generators take the names to turn off as any collection of str, by keyword."""
+    param = Parameter(
+        TestArg("ch", rng_type=Series([0, 4])),
+        TestArg("addr", rng_type=RNGInteger(0, 63)),
+        vector_constraints={"aligned": aligned, "never": lambda v: False},
+    )
+    options = StrategyOptions(strategy="s", constraints_off=frozenset({"never"}))
+
+    rows = param.generate_vectors(2, mode="random_only", constraints_off=options.constraints_off)
+    assert len(rows) == 2
+    assert len(assert_type(param.generate_exhaustive(constraints_off=["never"]), list[Vector])) == 2
 
 
 def test_vectors_by_name_type_check() -> None:

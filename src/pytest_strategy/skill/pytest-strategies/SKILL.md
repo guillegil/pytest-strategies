@@ -250,6 +250,7 @@ def esm_rw(nsamples, ctx):
 | `--nsamples=N` / `--nsamples=auto` | random rows per strategy (overrides `Parameter(nsamples=)`), or enumerate `Series`/`RNGSequence` |
 | `--vector-mode=MODE` | `all` (default), `random_only`, `directed_only`, `mixed`, `test` |
 | `--vector-name=NAME` / `--vector-index=I` | only that directed vector |
+| `--strategy-constraint-off=[STRATEGY:]NAME` | turn a named constraint off for this run (comma-separated, repeatable) |
 | `--list-strategies` | list the registered names and exit |
 
 `-v` also prints per-strategy row counts and where `nsamples` came from.

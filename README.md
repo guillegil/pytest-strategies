@@ -113,7 +113,7 @@ The factory is called once for each test that uses the strategy, when pytest col
 - `nsamples`: the run's sample count, an integer (the `--nsamples` value, or 10 when the option is not given), or the string `"auto"` under `--nsamples=auto`. A factory that returns a `Parameter` does not need it, because the plugin generates the vectors itself.
 - `ctx`: the testbench context (see [Configuration-Dependent Strategies](#11-configuration-dependent-strategies-new-in-v200)).
 - `rng`: the plugin's `random.Random` (`RNG.generator()`), for draws the RNG types do not cover.
-- `options`: a frozen `StrategyOptions` with this strategy's name and the run's `--nsamples`, `--vector-mode`, `--vector-name` and `--vector-index` values.
+- `options`: a frozen `StrategyOptions` with this strategy's name and the run's `--nsamples`, `--vector-mode`, `--vector-name` and `--vector-index` values, and in `constraints_off` the constraint names `--strategy-constraint-off` turns off for this strategy.
 
 Any other parameter needs a default, which it keeps; `*args` and `**kwargs` receive nothing. A parameter without a default that is not one of these names fails collection with a message naming it (since 4.0 `def factory(n)` no longer receives `nsamples` by position), and `base`, `config` and `request` are reserved names. A factory decorated without `functools.wraps` is called with no arguments, and `mock.patch` mocks must be the first parameters.
 
@@ -190,6 +190,8 @@ Parameter(
 )
 ```
 A constraint receives the row as a `Vector`, a tuple whose fields are the argument names, so `v.min` and `v[0]` both work. Constraints are named: by the keys of a dict, or, in a list, by each function's name (`constraint_<i>` for a lambda). They run in order, and the first falsy result rejects the row. A random vector that fails a constraint is drawn again, up to `max_retries` times (a `Parameter` argument, default 100). If no valid vector turns up, collecting the test fails with "Could not generate random row K after max_retries=N draws", and the message counts the draws each constraint rejected first, by name, with the first row each one rejected, so you can tell which one is too strict. With `-v`, the Strategy Summary lists the rejections per constraint for each strategy.
+
+To turn a constraint off for one run, name it with `--strategy-constraint-off`: `--strategy-constraint-off=ordered` turns off every constraint named `ordered`, and `--strategy-constraint-off=my_strategy:ordered` only the one in that strategy. Items are separated by commas and the option can be repeated, so `--strategy-constraint-off=my_strategy:ordered,small` turns `ordered` off in `my_strategy` and `small` in every strategy. The `Parameter` keeps its constraints; directed and test vectors are never checked by constraints, so they do not change. The report header lists what is off, and `-v` adds `off: ordered` to the strategy's summary line. An item that matches no constraint of any strategy the run resolved stops a run of the whole suite with a usage error that suggests the closest name and lists the constraints by strategy; a run narrowed to some tests (paths or node IDs, `--lf`, `--sw`, `--ignore`) resolves only some strategies, so it prints that message in red and goes on.
 
 ### 5. Sequence Testing & Exhaustive Generation (New in v2.0.0)
 
@@ -506,6 +508,7 @@ Control test generation directly from the command line:
 | `--vector-name`     | Run only the directed vector with this name                             | `pytest --vector-name=edge_case_1`          |
 | `--vector-index`    | Run only the directed vector at this index (0-based, in definition order) | `pytest --vector-index=0`                 |
 | `--rng-seed`        | Set seed for reproducibility                                            | `pytest --rng-seed=42`                      |
+| `--strategy-constraint-off` | Turn named constraints off for this run: `NAME` in every strategy, `STRATEGY:NAME` in one; comma-separated, repeatable (see [Constraints](#4-constraints)) | `pytest --strategy-constraint-off=dma_burst:aligned` |
 | `--list-strategies` | List the registered strategy names and exit                             | `pytest --list-strategies`                  |
 
 The ini option `strategies_max_exhaustive` (default `100000`) sets the most rows `--nsamples=auto` or `per_sequence_samples=True` may generate for one strategy.

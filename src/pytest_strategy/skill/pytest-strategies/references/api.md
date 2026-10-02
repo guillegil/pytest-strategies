@@ -158,8 +158,10 @@ class Parameter:
   `get_directed_vector(name)`, `get_test_vector(name)`, `get_vector_by_name(name)`,
   `get_vector_by_index(i)`, `list_vector_names()`,
   `add_constraint(fn, *, name=None)` (returns the name), `remove_constraint(name)`,
-  `clear_constraints()`, `get_arg(name)`, `generate_vectors(n, mode=...)`,
-  `generate_exhaustive()`, `to_dict()`.
+  `clear_constraints()`, `get_arg(name)`,
+  `generate_vectors(n, *, mode="all", filter_by_name=None, filter_by_index=None, constraints_off=())`,
+  `generate_exhaustive(*, constraints_off=())`, `to_dict()`. `constraints_off` names
+  constraints that call does not evaluate; the `Parameter` keeps them.
 - Properties: `arg_names`, `arg_types`, `vector_names`, `num_args`,
   `num_directed_vectors`, `skip_reason`, `vector_type`.
 - The generated rows are `Vector`s: tuples whose fields are the argument names
@@ -326,6 +328,7 @@ usage error listing each strategy's directed vectors.
 | `--vector-mode=MODE` | `all`, `random_only`, `directed_only`, `mixed`, `test` |
 | `--vector-name=NAME` | only the directed vector named NAME |
 | `--vector-index=I` | only the directed vector at index I |
+| `--strategy-constraint-off=[S:]NAME[,...]` | turn the constraint NAME off for this run, in every strategy or only in strategy S; repeatable. The header lists what is off and `-v` adds `off: NAME`. An item that matches no constraint of a resolved strategy is a usage error in a whole-suite run (with "did you mean" and the constraints by strategy), and a red line in a run narrowed by paths, node IDs, `--lf`, `--sw` or `--ignore` |
 | `--list-strategies` | load every strategies file, list the registered names and exit |
 
 | ini option | Meaning |
@@ -470,7 +473,8 @@ extra names. IDs look like `x=1,y=2`.
 | `Strategy 'x' not found` | Not visible from the test's folder. Check the spelling (see "did you mean"), move the strategy to a parent folder, pass the factory with `@strategy(factory)`, or fix a strategies file that failed to load (listed). |
 | usage error naming two files for one name | Two factories with one name in the same folder. Rename one, or move it to its own folder. |
 | `Could not generate random row K after max_retries=N draws` (or `Could not generate valid vector` for combinations) | The constraints rejected every draw; the message counts the rejections by the name of the first failing constraint and shows the first row each rejected. Relax the constraint, narrow the ranges or raise `Parameter(max_retries=)`. |
-| `Constraint 'x' raised ...` | A constraint raised on the row shown (its frame follows). Fix the constraint; one before it in the mapping can guard it (`{"nonzero": ..., "ratio": ...}`). |
+| `Constraint 'x' raised ...` | A constraint raised on the row shown (its frame follows). Fix the constraint; one before it in the mapping can guard it (`{"nonzero": ..., "ratio": ...}`), and `(constraint 'nonzero' before it is turned off by --strategy-constraint-off)` says that guard was turned off. |
+| `--strategy-constraint-off=x matched no constraint` | No strategy the run resolved has a constraint named x (aimed items: in that strategy). Use a name from "Constraints by strategy". |
 | `Two constraints are named 'x'` | Two functions with one name in a constraint list. Pass a dict of names to functions. |
 | `No valid value found after N attempts` | A number predicate rejected every draw. Narrow the range. |
 | `Series combination (...) skipped` warning | One combination's random arguments failed the constraints `max_retries` times. Raise `max_retries` or relax the constraint. |

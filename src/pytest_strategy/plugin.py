@@ -32,7 +32,7 @@ import pytest
 from _pytest.pathlib import ImportPathMismatchError, import_path
 from pytest import Config, Session
 
-from ._options import VectorMode
+from ._options import VectorMode, constraint_off_item, parse_constraint_off
 from ._registry import (
     Registration,
     _contains,
@@ -302,15 +302,28 @@ class PytestStrategyPlugin:
         self, session: Session, config: Config, items: list[pytest.Item]
     ) -> None:
         """
-        Fail the run on a strategy name registered twice in one directory, and when
-        --vector-name/--vector-index matched no strategy at all.
+        Fail the run on a strategy name registered twice in one directory, when
+        --vector-name/--vector-index matched no strategy at all, and when a
+        --strategy-constraint-off item matched no constraint in a run that
+        collected the whole suite.
 
         A strategy without the requested directed vector gets an empty parameter
         set, so its tests are skipped. That is intended when another strategy has
         the vector, but when none has it (a typo, an index out of range) every
-        test would be skipped and the run would still pass.
+        test would be skipped and the run would still pass. Likewise, a misspelled
+        constraint name would leave the constraint on while the user believes it is
+        off. A run that collected only some tests resolved only some strategies, so
+        there the unmatched items are reported in red and the run goes on.
         """
         message = self._clash_error() or self._vector_filter_error(config)
+        unmatched = self._constraint_off_error(config)
+        if unmatched is not None:
+            if _collects_whole_suite(config):
+                message = message or unmatched
+            elif runtime.current is not None:
+                # Printed once pytest has reported the collection (on a pytest-xdist
+                # worker, by the controller: see pytest_terminal_summary)
+                runtime.current.unmatched_constraints_off = unmatched.splitlines()
         if message is None:
             return
         if getattr(config, "workerinput", None) is None:
@@ -359,6 +372,65 @@ class PytestStrategyPlugin:
             f"{option} matched no directed vector in any strategy. "
             f"Directed vectors by strategy: {available}"
         )
+
+    def _constraint_off_error(self, config: Config) -> str | None:
+        """
+        Describe the --strategy-constraint-off items that matched no constraint of a
+        strategy this run resolved.
+
+        An item matches when a resolved strategy it applies to (every strategy for a
+        bare name) has a constraint with its name, whether or not the run evaluates
+        the constraints.
+
+        Returns:
+            The message, or None if every item matched, the option was not given,
+            no Parameter strategy was resolved, or under --list-strategies
+        """
+        state = runtime.current
+        if state is None or config.option.list_strategies or not state.constraint_names:
+            return None
+        known = state.constraint_names
+        lines = []
+        for target, name in dict.fromkeys(runtime.session_options(config).constraints_off):
+            if any(
+                name in names
+                for strategy, names in known.items()
+                if target is None or target == strategy
+            ):
+                continue
+            item = constraint_off_item(target, name)
+            # A bare name is compared with the names, an aimed one with the aimed items
+            if target is None:
+                candidates = sorted({c for names in known.values() for c in names})
+            else:
+                candidates = sorted({f"{s}:{c}" for s, names in known.items() for c in names})
+            line = f"--strategy-constraint-off={item} matched no constraint."
+            close = difflib.get_close_matches(item, candidates, n=3)
+            if close:
+                line += " Did you mean " + " or ".join(repr(c) for c in close) + "?"
+            lines.append(line)
+        if not lines:
+            return None
+        by_strategy = "; ".join(
+            f"{strategy}: {', '.join(names) if names else 'none'}"
+            for strategy, names in sorted(known.items())
+        )
+        return "\n".join(lines) + f" Constraints by strategy: {by_strategy}"
+
+    @pytest.hookimpl(trylast=True)
+    def pytest_collection_finish(self, session: Session) -> None:
+        """
+        Print the --strategy-constraint-off items that matched no constraint in a
+        run that did not collect the whole suite, in red, after the collection report.
+
+        A pytest-xdist worker's output is not shown: the worker sends the lines
+        with its -v summary, and the controller prints them in its terminal summary.
+        """
+        state = runtime.current
+        if state is None or getattr(session.config, "workerinput", None) is not None:
+            return
+        for line in state.unmatched_constraints_off:
+            self._write_line(session.config, line, red=True)
 
     # ==== STRATEGY LOOKUP ====
 
@@ -540,8 +612,12 @@ class PytestStrategyPlugin:
 
     @pytest.hookimpl
     def pytest_report_header(self, config: Config, start_path: Path) -> list[str]:
-        """Add the RNG seed to the test report header."""
-        return [f"pytest-strategies: RNG seed = {_run_seed()}"]
+        """Add the RNG seed, and the constraints turned off, to the test report header."""
+        lines = [f"pytest-strategies: RNG seed = {_run_seed()}"]
+        items = runtime.session_options(config).constraints_off_items
+        if items:
+            lines.append(f"pytest-strategies: constraints off: {', '.join(items)}")
+        return lines
 
     @pytest.hookimpl
     def pytest_terminal_summary(
@@ -549,6 +625,10 @@ class PytestStrategyPlugin:
     ) -> None:
         """Say how to reproduce a failed run, and summarize the strategies with -v."""
         state = runtime.current
+        summary = state.worker_summary if state is not None else None
+        # Unmatched --strategy-constraint-off items a pytest-xdist worker reported
+        for line in (summary or {}).get("unmatched_constraints_off", []):
+            terminalreporter.write_line(f"pytest-strategies: {line}", red=True)
         failed = exitstatus in (pytest.ExitCode.TESTS_FAILED, pytest.ExitCode.INTERRUPTED)
         distributed = getattr(config.option, "dist", "no") != "no"
         if failed and state is not None and (state.resolutions or distributed):
@@ -559,7 +639,6 @@ class PytestStrategyPlugin:
         if self._verbosity(config) < 1:
             return
         terminalreporter.section("Strategy Summary")
-        summary = state.worker_summary if state is not None else None
         if summary is None:
             summary = _summary(state)
         if not summary["count"]:
@@ -1198,6 +1277,9 @@ def _summary(state: Any) -> dict[str, Any]:
         "count": _registration_count(),
         "lines": _summary_lines(state.resolutions) if state is not None else [],
         "names": sorted(registry.names()),
+        "unmatched_constraints_off": (
+            list(state.unmatched_constraints_off) if state is not None else []
+        ),
     }
 
 
@@ -1210,7 +1292,8 @@ def _summary_lines(resolutions: list[Any]) -> list[str]:
     """
     Summarize the resolved strategies for -v: tests and rows per strategy, and for
     a strategy with constraints the draws each rejected (and, under
-    --nsamples=auto, the combinations left out).
+    --nsamples=auto, the combinations left out) and the constraints
+    --strategy-constraint-off turned off.
     """
     by_strategy: dict[tuple[str, str], list[Any]] = {}
     for resolution in resolutions:
@@ -1227,17 +1310,23 @@ def _summary_lines(resolutions: list[Any]) -> list[str]:
         line = f"{name} ({where}): {len(entries)} test(s), {rows} rows"
         if sources:
             line += "; nsamples=" + ", ".join(sources)
+        # The constraints turned off, which reject nothing
+        off = list(dict.fromkeys(c for e in entries for c in e.constraints_off))
         # The draws each constraint rejected first, over the strategy's tests
         rejected: dict[str, int] = {}
         for e in entries:
             for constraint in e.constraints:
-                rejected[constraint] = rejected.get(constraint, 0) + e.rejected.get(constraint, 0)
+                if constraint not in off:
+                    count = e.rejected.get(constraint, 0)
+                    rejected[constraint] = rejected.get(constraint, 0) + count
         if rejected:
             line += "; rejected: " + ", ".join(f"{c}={count}" for c, count in rejected.items())
             left_out = [e.left_out for e in entries if e.left_out is not None]
             if left_out:
                 combinations = "combination" if sum(left_out) == 1 else "combinations"
                 line += f"; left out: {sum(left_out)} {combinations}"
+        if off:
+            line += "; off: " + ", ".join(off)
         lines.append(line)
     return lines
 
@@ -1272,6 +1361,37 @@ def _nsamples_type(value: str) -> int | str:
     if nsamples < 0:
         raise argparse.ArgumentTypeError(error)
     return nsamples
+
+
+def _constraint_off_type(value: str) -> str:
+    """
+    Check one --strategy-constraint-off value: ``ITEM[,ITEM...]`` with
+    ``ITEM = [STRATEGY:]NAME``.
+
+    Returns:
+        The value as given; the session's options split it into items
+
+    Raises:
+        argparse.ArgumentTypeError: For whitespace, an empty item, or an empty
+            strategy or name (``:x``, ``x:``), so pytest reports a usage error
+            when it parses the command line
+    """
+    try:
+        parse_constraint_off(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+    return value
+
+
+def _collects_whole_suite(config: Config) -> bool:
+    """
+    Check whether the run collected every test: no paths or node IDs on the
+    command line, and none of --lf, --sw, --ignore or --ignore-glob.
+    """
+    if config.args_source is Config.ArgsSource.ARGS:
+        return False
+    narrowing = ("lf", "stepwise", "stepwise_skip", "ignore", "ignore_glob")
+    return not any(config.getoption(dest, None) for dest in narrowing)
 
 
 def pytest_addhooks(pluginmanager: pytest.PytestPluginManager) -> None:
@@ -1328,6 +1448,20 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         type=int,
         default=None,
         help="Run only the directed vector at this index",
+    )
+
+    group.addoption(
+        "--strategy-constraint-off",
+        action="append",
+        type=_constraint_off_type,
+        default=None,
+        dest="strategy_constraint_off",
+        metavar="[STRATEGY:]NAME[,...]",
+        help=(
+            "Turn a named vector constraint off for this run: NAME in every strategy, "
+            "STRATEGY:NAME in that strategy only. Items are separated by commas, and the "
+            "option can be repeated"
+        ),
     )
 
     group.addoption(

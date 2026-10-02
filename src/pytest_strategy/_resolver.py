@@ -22,6 +22,7 @@ from ._dataclass import convert_to_dataclass
 from ._factory import FactoryInputs, call_factory
 from ._ids import generate_dataclass_ids, generate_test_ids, make_unique_ids
 from ._introspection import detect_dataclass_param, validate_signature
+from ._options import constraint_off_item
 from ._registry import _describe_factory, display_path, factory_source
 from ._runtime import Resolution, runtime
 from ._warnings import PytestStrategiesWarning
@@ -208,12 +209,11 @@ def _exhausted_message(name: str, error: _ConstraintsExhausted) -> str:
         advice = "Relax a constraint"
     if error.strictest is None:
         return f"{error.detail} {advice}."
-    # --strategy-constraint-off splits items on ",", so a strategy whose name has
-    # one cannot be targeted: the bare name turns the constraint off everywhere
-    item = error.strictest if "," in name else f"{name}:{error.strictest}"
+    # A strategy whose name has a "," or whitespace cannot be targeted: the item is
+    # then the bare name, which turns the constraint off everywhere
     return (
         f"{error.detail} {advice}, or turn one off for this run with "
-        f"--strategy-constraint-off={item}."
+        f"--strategy-constraint-off={constraint_off_item(name, error.strictest)}."
     )
 
 
@@ -283,7 +283,17 @@ def build_parametrization(
     result = call_factory(name, factory, inputs, rootpath=_rootpath(config))
     param = check_factory_result(name, factory, result)
 
-    resolution = Resolution(strategy=name, where=_where(factory, config))
+    # --strategy-constraint-off: the names this strategy turns off are the ones its
+    # Parameter has, in evaluation order. The plugin checks once collection ends that
+    # each item matched a constraint of some resolved strategy, so the names are
+    # recorded before anything can fail, whatever the run evaluates.
+    constraint_names = tuple(param.vector_constraints)
+    runtime.record_constraints(name, constraint_names)
+    constraints_off = tuple(c for c in constraint_names if c in options.constraints_off)
+
+    resolution = Resolution(
+        strategy=name, where=_where(factory, config), constraints_off=constraints_off
+    )
 
     # Set when a skip_if_empty sequence has no values: the test then runs as one
     # skipped row with this reason instead of the generated vectors
@@ -347,11 +357,14 @@ def build_parametrization(
                     mode=vector_mode,
                     filter_by_name=vector_name,
                     filter_by_index=vector_index,
+                    constraints_off=constraints_off,
                     _stats=stats,
                 )
                 if not filtered and vector_mode not in ("test", "directed_only"):
                     exhaustive = True
-                    samples.extend(param.generate_exhaustive(_stats=stats))
+                    samples.extend(
+                        param.generate_exhaustive(constraints_off=constraints_off, _stats=stats)
+                    )
             else:
                 assert isinstance(effective_nsamples, int)
                 samples = param.generate_vectors(
@@ -359,6 +372,7 @@ def build_parametrization(
                     mode=vector_mode,
                     filter_by_name=vector_name,
                     filter_by_index=vector_index,
+                    constraints_off=constraints_off,
                     _stats=stats,
                 )
     except _ConstraintsExhausted as e:
@@ -367,7 +381,10 @@ def build_parametrization(
         ) from e
     except _ConstraintError as e:
         # Chained to the constraint's own exception, so the error shows the user's frame
-        raise ValueError(f"Error generating samples for strategy '{name}': {e}") from e.__cause__
+        raise ValueError(
+            f"Error generating samples for strategy '{name}': "
+            f"{e.message('--strategy-constraint-off')}"
+        ) from e.__cause__
     except (KeyError, IndexError) as e:
         # If filtering by name (KeyError) or index (IndexError) and the vector
         # doesn't exist, return empty samples
@@ -388,7 +405,7 @@ def build_parametrization(
         skip_reason = param.skip_reason
 
     _count_rows(resolution, param, samples, vector_mode, filtered)
-    resolution.constraints = tuple(param.vector_constraints)
+    resolution.constraints = constraint_names
     resolution.rejected = dict(stats.rejected)
     if exhaustive:
         resolution.left_out = stats.left_out
