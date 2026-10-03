@@ -379,6 +379,14 @@ Reporting:
   `ctx`) and `rerun`. A test file outside the rootdir (`-c ci/pytest.ini` with
   `tests/`) gets a `note` line: its node ID depends on the command line, so pass a
   `--rootdir` that contains it to get a command that reproduces it.
+- With `--junitxml`, each failed row's failure text ends with that section, and
+  the test suite gets the properties `pytest_strategies.seed` and
+  `pytest_strategies.failed.<i>` (the failed rows' commands, from 0). With
+  `junit_family = xunit1` or `legacy`, a failed row's test case also gets
+  `pytest_strategies.strategy`, `.kind`, `.name`, `.index`, `.id`,
+  `.value.<argument>`, `.seed`, `.context`, `.constraints_off` and `.command` (run
+  from the rootdir), as `pytest_strategies.<i>.*` for stacked strategies; the
+  default `xunit2` gets none per test case.
 - `-v` adds, per strategy, the counts of directed and random rows (and of test,
   exhaustive and skipped rows when there are some) and where `nsamples` came from,
   then a "Contexts" block with each context's fingerprint.

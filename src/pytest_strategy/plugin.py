@@ -664,9 +664,17 @@ class PytestStrategyPlugin:
         failed setup or call: what the row is, its values, the seed and the command
         that runs it again (``_repro``). The report gets the command too, in its
         ``pytest_strategies`` attribute (strings only, which pytest-xdist carries to
-        the controller), for the list of failed rows in the terminal summary. A
-        failure without a traceback (an XPASS(strict)) gets no section, and a
-        teardown error gets nothing.
+        the controller), for the list of failed rows in the terminal summary and the
+        JUnit XML report's suite properties. A failure without a traceback (an
+        XPASS(strict)) gets no section, and a teardown error gets nothing.
+
+        For a ``--junitxml`` report of the ``xunit1`` or ``legacy`` family, the row's
+        JUnit properties (``_repro.testcase_properties``) go to the item's
+        ``user_properties``, which pytest copies into the reports that follow and
+        junitxml writes from the teardown report into the test case, and to this
+        report's, which junitxml reads instead when the teardown fails too. The
+        ``xunit2`` schema has no properties per test case, and junitxml would write
+        them whatever the family, so they are left out there.
 
         The guard's message that ``_check_ctx`` kept for a test's setup or call that
         raised an error goes into the same section, before the row. A report whose
@@ -684,6 +692,13 @@ class PytestStrategyPlugin:
                 repro, attribute = _repro.failure(item, infos)
                 # TestReport keeps extra attributes when pytest-xdist serializes it
                 report.pytest_strategies = attribute  # type: ignore[attr-defined]
+                if _junit_family(item.config) == "xunit1":
+                    for prop in _repro.testcase_properties(item, infos):
+                        # Once, also when a plugin runs the test again
+                        if prop not in item.user_properties:
+                            item.user_properties.append(prop)
+                        if prop not in report.user_properties:
+                            report.user_properties.append(prop)
         add = getattr(report.longrepr, "addsection", None)
         if callable(add):
             text = "\n\n".join(part for part in (message, repro) if part is not None)
@@ -996,6 +1011,24 @@ class PytestStrategyPlugin:
             terminalreporter.write_line(f"Contexts: {len(entries)}")
             for label, text in sorted(entries.items()):
                 terminalreporter.write_line(f"  {label}: {text}")
+
+    @pytest.hookimpl(tryfirst=True, specname="pytest_sessionfinish")
+    def pytest_sessionfinish_junit(self, session: Session) -> None:
+        """
+        Give the ``--junitxml`` report, of every family, the test suite properties
+        ``pytest_strategies.seed`` and ``pytest_strategies.failed.<i>``, the rerun
+        command of each failed strategy row (``_repro.suite_properties``), before
+        junitxml writes the file in its own ``pytest_sessionfinish`` (tryfirst).
+
+        Only the process that writes the report has junitxml's object: the
+        pytest-xdist controller, whose failed rows came from the workers' reports.
+        """
+        state = runtime.session_of(session.config)
+        add = getattr(_junit_xml(session.config), "add_global_property", None)
+        if state is None or not callable(add):
+            return
+        for name, value in _repro.suite_properties(state.seed(), state.failed_rows.values()):
+            add(name, value)
 
     @pytest.hookimpl
     def pytest_sessionfinish(self, session: Session) -> None:
@@ -1875,6 +1908,36 @@ def _failed_rows_lines(rows: Mapping[str, Mapping[str, str]], verbosity: int) ->
     if len(entries) > len(shown):
         lines.append(f"  ... and {len(entries) - len(shown)} more")
     return lines
+
+
+def _junit_family(config: Config) -> str | None:
+    """
+    Return the family of the run's ``--junitxml`` report, ``xunit1`` for
+    ``legacy`` (junitxml's own rule), or None without one. It is read from the
+    options and the ini file, so a pytest-xdist worker, which leaves the report to
+    the controller, gets the controller's family.
+    """
+    if not getattr(config.option, "xmlpath", None):
+        return None
+    try:
+        family = str(config.getini("junit_family"))
+    except ValueError:
+        # Without the junitxml plugin
+        return None
+    return "xunit1" if family == "legacy" else family
+
+
+def _junit_xml(config: Config) -> Any:
+    """
+    Return the object junitxml writes the run's ``--junitxml`` report with, or None
+    without one (on a pytest-xdist worker too). It is kept in a private stash key of
+    pytest's, so None when that key is gone.
+    """
+    try:
+        from _pytest.junitxml import xml_key
+    except ImportError:
+        return None
+    return config.stash.get(xml_key, None)
 
 
 def _context_entries(state: Any) -> dict[str, str]:

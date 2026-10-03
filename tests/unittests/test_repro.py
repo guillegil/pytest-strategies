@@ -1,8 +1,9 @@
 """
 Unit tests for what a failed strategy row reports (D18): the text of its
 ``pytest-strategies`` section, the options of its rerun command, how the command
-is quoted for POSIX shells and for Windows, and the list of failed rows after the
-line that says how to reproduce the run.
+is quoted for POSIX shells and for Windows, the list of failed rows after the
+line that says how to reproduce the run, and the properties of a ``--junitxml``
+report.
 """
 
 import shlex
@@ -18,11 +19,15 @@ from pytest_strategy._repro import (
     generation_options,
     outside_rootdir,
     quote,
+    rerun_command,
     rerun_nodeid,
+    rootdir_nodeid,
     section,
+    suite_properties,
+    testcase_properties,
 )
 from pytest_strategy._vector import vector_type
-from pytest_strategy.plugin import _failed_rows_lines
+from pytest_strategy.plugin import _failed_rows_lines, _junit_family, _junit_xml
 
 SEED = 1763926297314361000
 
@@ -63,6 +68,14 @@ class Config:
 
     def getoption(self, name, default=None):
         return getattr(self.option, name, default)
+
+
+def located(config, root, invocation=None, inipath=None):
+    """Give a stand-in ``config`` the rootdir ``root``, its invocation folder and its ini file."""
+    config.rootpath = root
+    config.inipath = inipath
+    config.invocation_params = Namespace(dir=invocation or root)
+    return config
 
 
 def windows_argv(line):
@@ -321,6 +334,31 @@ class TestGenerationOptions:
 
         assert generation_options(Config(), [row]) == ["--strategy-constraint-off=x"]
 
+    def test_from_another_folder_the_paths_are_relative_to_it(self, tmp_path):
+        # pytest -c ci/pytest.ini --rootdir=. started in tmp_path, run from tmp_path/ci
+        config = located(
+            Config(inifilename="ci/pytest.ini", rootdir="."),
+            tmp_path,
+            inipath=tmp_path / "ci" / "pytest.ini",
+        )
+
+        here = generation_options(config, [info()])
+        there = generation_options(config, [info()], start=tmp_path / "ci")
+
+        assert here == ["-c", "ci/pytest.ini", "--rootdir=."]
+        assert there == ["-c", "pytest.ini", "--rootdir=.."]
+
+    def test_from_the_invocation_folder_the_paths_are_kept_as_given(self, tmp_path):
+        config = located(
+            Config(inifilename=str(tmp_path / "ci" / "pytest.ini")),
+            tmp_path / "ci",
+            invocation=tmp_path,
+            inipath=tmp_path / "ci" / "pytest.ini",
+        )
+
+        assert generation_options(config, [info()]) == ["-c", str(tmp_path / "ci" / "pytest.ini")]
+        assert generation_options(config, [info()], start=tmp_path / "ci") == ["-c", "pytest.ini"]
+
 
 class TestQuote:
     @pytest.mark.parametrize(
@@ -411,6 +449,26 @@ class TestRerunNodeid:
         assert outside_rootdir(item)
         assert rerun_nodeid(item) == str(Path("tests", "test_x.py")) + "::TestA::test_a[rand-1]"
 
+    def test_from_the_rootdir_the_node_id_or_the_file_relative_to_it(self, tmp_path):
+        inside = self.item(
+            tmp_path, tmp_path / "t" / "test_x.py", "t/test_x.py::test_a", tmp_path / "t", tmp_path
+        )
+        outside = self.item(
+            tmp_path, tmp_path / "tests" / "test_x.py", "::test_a", tmp_path, tmp_path / "ci"
+        )
+
+        assert rootdir_nodeid(inside) == "t/test_x.py::test_a"
+        assert rootdir_nodeid(outside) == str(Path("..", "tests", "test_x.py")) + "::test_a"
+
+    def test_the_command(self):
+        nodeid = "t.py::test_a[it's]"
+
+        command = rerun_command(nodeid, 5, ["--nsamples=3", "--vector-name=a b"])
+
+        assert command == " ".join(
+            ["pytest", quote(nodeid), "--rng-seed=5", "--nsamples=3", quote("--vector-name=a b")]
+        )
+
 
 class TestFailedRowsLines:
     def rows(self, count):
@@ -453,3 +511,194 @@ class TestFailedRowsLines:
     @pytest.mark.parametrize("verbosity", [-2, -3])
     def test_none_under_qq(self, verbosity):
         assert _failed_rows_lines(self.rows(3), verbosity) == []
+
+
+class TestTestcaseProperties:
+    def item(self, tmp_path, nodeid="tests/test_w.py::test_w[rand-3]", **options):
+        config = located(Config(**options), tmp_path, invocation=tmp_path / "tests")
+        return Namespace(config=config, nodeid=nodeid, path=tmp_path / "tests" / "test_w.py")
+
+    def test_a_random_row(self, tmp_path):
+        properties = testcase_properties(self.item(tmp_path), [info()])
+
+        assert properties == [
+            ("pytest_strategies.strategy", "burst"),
+            ("pytest_strategies.kind", "random"),
+            ("pytest_strategies.index", "3"),
+            ("pytest_strategies.id", "rand-3"),
+            ("pytest_strategies.value.addr", "4096"),
+            ("pytest_strategies.value.len", "17"),
+            ("pytest_strategies.seed", str(SEED)),
+            ("pytest_strategies.context", "3f2a9c1e"),
+            (
+                "pytest_strategies.command",
+                f"pytest {quote('tests/test_w.py::test_w[rand-3]')} --rng-seed={SEED}",
+            ),
+        ]
+
+    def test_every_value_is_a_string(self, tmp_path):
+        row = vector_type(("n", "ok", "none", "tags"))(1, True, None, {"b", "a"})
+
+        properties = testcase_properties(self.item(tmp_path), [info(values=row)])
+
+        assert all(isinstance(value, str) for _, value in properties)
+        assert properties[4:8] == [
+            ("pytest_strategies.value.n", "1"),
+            ("pytest_strategies.value.ok", "True"),
+            ("pytest_strategies.value.none", "None"),
+            ("pytest_strategies.value.tags", "{'a', 'b'}"),
+        ]
+
+    def test_a_directed_row_has_a_name(self, tmp_path):
+        row = info(kind="directed", name="zeros", index=0, id="directed-zeros")
+
+        names = dict(testcase_properties(self.item(tmp_path), [row]))
+
+        assert names["pytest_strategies.name"] == "zeros"
+        assert names["pytest_strategies.index"] == "0"
+
+    def test_no_name_index_context_or_constraints_when_unset(self, tmp_path):
+        row = info(kind="skipped", index=None, id="skipped", context=None)
+
+        keys = [key for key, _ in testcase_properties(self.item(tmp_path), [row])]
+
+        assert keys == [
+            "pytest_strategies.strategy",
+            "pytest_strategies.kind",
+            "pytest_strategies.id",
+            "pytest_strategies.value.addr",
+            "pytest_strategies.value.len",
+            "pytest_strategies.seed",
+            "pytest_strategies.command",
+        ]
+
+    def test_the_constraints_turned_off(self, tmp_path):
+        row = info(constraints_off=("aligned", "no_4k_cross"))
+
+        names = dict(testcase_properties(self.item(tmp_path), [row]))
+
+        assert names["pytest_strategies.constraints_off"] == "aligned,no_4k_cross"
+        assert names["pytest_strategies.command"].endswith(
+            quote("--strategy-constraint-off=burst:aligned,burst:no_4k_cross")
+        )
+
+    def test_stacked_strategies_are_numbered(self, tmp_path):
+        other = info(
+            strategy="mode",
+            kind="directed",
+            name="fast",
+            index=0,
+            id="directed-fast",
+            values=vector_type(("mode",))("fast"),
+            context=None,
+        )
+
+        properties = testcase_properties(self.item(tmp_path), [info(), other])
+
+        keys = [key for key, _ in properties]
+        assert keys[:2] == ["pytest_strategies.0.strategy", "pytest_strategies.0.kind"]
+        assert keys[9:] == [
+            "pytest_strategies.1.strategy",
+            "pytest_strategies.1.kind",
+            "pytest_strategies.1.name",
+            "pytest_strategies.1.index",
+            "pytest_strategies.1.id",
+            "pytest_strategies.1.value.mode",
+            "pytest_strategies.1.seed",
+            "pytest_strategies.1.command",
+        ]
+        commands = {value for key, value in properties if key.endswith(".command")}
+        assert len(commands) == 1
+
+    def test_the_command_runs_from_the_rootdir(self, tmp_path):
+        # Started in tmp_path/tests with -c ../ci/pytest.ini --rootdir=..
+        item = self.item(tmp_path, inifilename="../ci/pytest.ini", rootdir="..", nsamples=13)
+        item.config.inipath = tmp_path / "ci" / "pytest.ini"
+
+        names = dict(testcase_properties(item, [info()]))
+
+        assert names["pytest_strategies.command"] == " ".join(
+            [
+                "pytest",
+                quote("tests/test_w.py::test_w[rand-3]"),
+                f"--rng-seed={SEED}",
+                "--nsamples=13",
+                "-c",
+                quote(str(Path("ci", "pytest.ini"))),
+                "--rootdir=.",
+            ]
+        )
+
+    def test_a_long_value_is_cut_below_vv(self, tmp_path):
+        row = vector_type(("blob",))("x" * 5000)
+
+        cut = dict(testcase_properties(self.item(tmp_path), [info(values=row)]))
+        full = dict(testcase_properties(self.item(tmp_path, verbose=2), [info(values=row)]))
+
+        assert cut["pytest_strategies.value.blob"].endswith("... (5002 characters; -vv shows all)")
+        assert full["pytest_strategies.value.blob"] == "'" + "x" * 5000 + "'"
+
+
+class TestSuiteProperties:
+    def test_the_seed_without_failed_rows(self):
+        assert suite_properties(SEED, []) == [("pytest_strategies.seed", str(SEED))]
+
+    def test_each_failed_row_s_command_from_0(self):
+        rows = [
+            {"command": "pytest 't.py::test_a[rand-1]' --rng-seed=5", "row": "burst random 1"},
+            {"row": "no command"},
+            {"command": "pytest 't.py::test_a[rand-0]' --rng-seed=5", "row": "burst random 0"},
+        ]
+
+        assert suite_properties(5, rows) == [
+            ("pytest_strategies.seed", "5"),
+            ("pytest_strategies.failed.0", "pytest 't.py::test_a[rand-1]' --rng-seed=5"),
+            ("pytest_strategies.failed.1", "pytest 't.py::test_a[rand-0]' --rng-seed=5"),
+        ]
+
+
+class TestJunitFamily:
+    class Config:
+        def __init__(self, xmlpath, family="xunit2"):
+            self.option = Namespace(xmlpath=xmlpath)
+            self.family = family
+
+        def getini(self, name):
+            assert name == "junit_family"
+            if self.family is None:
+                raise ValueError(f"unknown configuration value: {name!r}")
+            return self.family
+
+    @pytest.mark.parametrize(
+        "family, expected",
+        [("xunit2", "xunit2"), ("xunit1", "xunit1"), ("legacy", "xunit1")],
+    )
+    def test_the_family_of_the_report(self, family, expected):
+        assert _junit_family(self.Config("report.xml", family)) == expected
+
+    def test_none_without_a_report(self):
+        assert _junit_family(self.Config(None, "xunit1")) is None
+        assert _junit_family(Namespace(option=Namespace())) is None
+
+    def test_none_without_the_junitxml_plugin(self):
+        assert _junit_family(self.Config("report.xml", None)) is None
+
+
+class TestJunitXml:
+    def test_the_object_in_pytest_s_stash(self):
+        from _pytest.junitxml import xml_key
+
+        config = Namespace(stash=pytest.Stash())
+        assert _junit_xml(config) is None
+        xml = object()
+        config.stash[xml_key] = xml
+        assert _junit_xml(config) is xml
+
+    def test_none_when_pytest_has_no_such_key(self, monkeypatch):
+        from _pytest.junitxml import xml_key
+
+        config = Namespace(stash=pytest.Stash())
+        config.stash[xml_key] = object()
+        monkeypatch.delattr("_pytest.junitxml.xml_key")
+
+        assert _junit_xml(config) is None

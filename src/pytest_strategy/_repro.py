@@ -28,6 +28,12 @@ A test file outside the rootdir (``-c ci/pytest.ini`` makes ``ci`` the rootdir) 
 named by pytest relative to the path given on the command line that contains it,
 so a run of its node ID gives the row another node ID, and with it other random
 values. Its section says so (``note``).
+
+A ``--junitxml`` report gets the section in the failure text, the seed and each
+failed row's command as properties of the test suite (``suite_properties``), and,
+with the ``xunit1`` and ``legacy`` families, whose schema has properties per test
+case, what the row is as properties of its test case (``testcase_properties``),
+with a command run from the rootdir.
 """
 
 from __future__ import annotations
@@ -36,7 +42,8 @@ import json
 import os
 import re
 import shlex
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from _pytest.pathlib import bestrelpath
@@ -52,6 +59,9 @@ if TYPE_CHECKING:
 
 # The title of the section
 SECTION = "pytest-strategies"
+
+# The prefix of the JUnit XML properties
+PROPERTY = "pytest_strategies"
 
 # The characters a value's repr is cut at in the section, below -vv
 VALUE_LIMIT = 4000
@@ -96,7 +106,9 @@ def quote(arg: str, *, windows: bool | None = None) -> str:
     return '"' + "".join(quoted) + '"'
 
 
-def generation_options(config: pytest.Config, infos: Sequence[VectorInfo]) -> list[str]:
+def generation_options(
+    config: pytest.Config, infos: Sequence[VectorInfo], *, start: Path | None = None
+) -> list[str]:
     """
     Return the options of a row's rerun command after ``--rng-seed``, unquoted:
     ``--nsamples``, ``--vector-mode``, ``--vector-name`` and ``--vector-index`` when
@@ -108,6 +120,8 @@ def generation_options(config: pytest.Config, infos: Sequence[VectorInfo]) -> li
     Args:
         config: The run's config
         infos: The row's VectorInfo for each of the item's strategies
+        start: The folder the command runs from, when it is not the one pytest was
+            started in: ``-c`` and ``--rootdir`` are then relative to it
     """
     base = runtime.session_options(config).base
     args = []
@@ -130,9 +144,14 @@ def generation_options(config: pytest.Config, infos: Sequence[VectorInfo]) -> li
         args += ["-o", override]
     inifile = getattr(config.option, "inifilename", None)
     if inifile:
+        if start is not None and config.inipath is not None:
+            # The path pytest resolved from the folder it was started in
+            inifile = bestrelpath(start, config.inipath)
         args += ["-c", str(inifile)]
     rootdir = getattr(config.option, "rootdir", None)
     if rootdir:
+        if start is not None:
+            rootdir = bestrelpath(start, config.rootpath)
         args.append(f"--rootdir={rootdir}")
     items = dict.fromkeys(
         constraint_off_item(info.strategy, name) for info in infos for name in info.constraints_off
@@ -168,6 +187,25 @@ def rerun_nodeid(item: pytest.Item) -> str:
     return f"{bestrelpath(config.invocation_params.dir, item.path)}::{names}"
 
 
+def rootdir_nodeid(item: pytest.Item) -> str:
+    """
+    Return an item's node ID relative to the rootdir: its node ID, or for a file
+    outside the rootdir, the file's path from the rootdir.
+    """
+    if not outside_rootdir(item):
+        return item.nodeid
+    names = item.nodeid.partition("::")[2]
+    return f"{bestrelpath(item.config.rootpath, item.path)}::{names}"
+
+
+def rerun_command(nodeid: str, seed: int, options: Sequence[str]) -> str:
+    """
+    Return the command that runs a row again, ``pytest <node id> --rng-seed=S``
+    followed by ``options``, quoted for the platform's shell.
+    """
+    return " ".join(["pytest", quote(nodeid), f"--rng-seed={seed}", *map(quote, options)])
+
+
 def describe(infos: Sequence[VectorInfo]) -> str:
     """
     Name a row's strategies and rows for the list of failed rows: ``burst random
@@ -196,15 +234,20 @@ def _vector_line(info: VectorInfo) -> str:
     return f"{info.id} ({info.kind} row {info.index})"
 
 
+def _value_shown(value: Any, verbosity: int) -> str:
+    """Return a value's stable repr, cut at ``VALUE_LIMIT`` characters below -vv."""
+    text = _value_repr(value)
+    if verbosity < 2 and len(text) > VALUE_LIMIT:
+        text = f"{text[:VALUE_LIMIT]}... ({len(text)} characters; -vv shows all)"
+    return text
+
+
 def _value_text(name: str, value: Any, verbosity: int) -> str:
     """
     Show one value as ``name=repr``, with its stable repr, cut at ``VALUE_LIMIT``
     characters below -vv; the lines of a repr that has several are aligned.
     """
-    text = _value_repr(value)
-    if verbosity < 2 and len(text) > VALUE_LIMIT:
-        text = f"{text[:VALUE_LIMIT]}... ({len(text)} characters; -vv shows all)"
-    return f"{name}={text}".replace("\n", "\n" + " " * _LABEL)
+    return f"{name}={_value_shown(value, verbosity)}".replace("\n", "\n" + " " * _LABEL)
 
 
 def section(
@@ -259,9 +302,7 @@ def failure(item: pytest.Item, infos: Sequence[VectorInfo]) -> tuple[str, dict[s
     config = item.config
     seed = infos[0].seed
     options = generation_options(config, infos)
-    command = " ".join(
-        ["pytest", quote(rerun_nodeid(item)), f"--rng-seed={seed}", *map(quote, options)]
-    )
+    command = rerun_command(rerun_nodeid(item), seed, options)
     verbosity = int(getattr(config.option, "verbose", 0))
     row = describe(infos)
     note = None
@@ -276,3 +317,63 @@ def failure(item: pytest.Item, infos: Sequence[VectorInfo]) -> tuple[str, dict[s
         )
     attribute = {"command": command, "row": row, "seed": str(seed), "options": json.dumps(options)}
     return section(infos, command, verbosity, note), attribute
+
+
+def testcase_properties(item: pytest.Item, infos: Sequence[VectorInfo]) -> list[tuple[str, str]]:
+    """
+    Return the JUnit XML properties of a failed strategy row's test case, all
+    strings: ``pytest_strategies.strategy``, ``.kind``, ``.name`` (a directed or
+    test vector's), ``.index`` (unless None), ``.id``, ``.value.<argument>`` (each
+    value's stable repr, cut as in the section), ``.seed``, ``.context`` and
+    ``.constraints_off`` (when set; the names, joined with ``,``), and ``.command``,
+    the rerun command run from the rootdir. A test with several strategies gets
+    them for each one, as ``pytest_strategies.<i>.strategy`` and so on, in the
+    order of the node ID.
+
+    Args:
+        item: The failed row's item
+        infos: Its VectorInfo for each of its strategies
+    """
+    config = item.config
+    verbosity = int(getattr(config.option, "verbose", 0))
+    options = generation_options(config, infos, start=config.rootpath)
+    command = rerun_command(rootdir_nodeid(item), infos[0].seed, options)
+    properties = []
+    for position, info in enumerate(infos):
+        prefix = f"{PROPERTY}." if len(infos) == 1 else f"{PROPERTY}.{position}."
+        fields = [("strategy", info.strategy), ("kind", info.kind)]
+        if info.name is not None:
+            fields.append(("name", info.name))
+        if info.index is not None:
+            fields.append(("index", str(info.index)))
+        fields.append(("id", info.id))
+        names = type(info.values)._fields
+        fields += [
+            (f"value.{name}", _value_shown(value, verbosity))
+            for name, value in zip(names, info.values, strict=True)
+        ]
+        fields.append(("seed", str(info.seed)))
+        if info.context is not None:
+            fields.append(("context", info.context))
+        if info.constraints_off:
+            fields.append(("constraints_off", ",".join(info.constraints_off)))
+        fields.append(("command", command))
+        properties += [(prefix + key, value) for key, value in fields]
+    return properties
+
+
+def suite_properties(seed: int, rows: Iterable[Mapping[str, str]]) -> list[tuple[str, str]]:
+    """
+    Return the JUnit XML properties of the test suite: ``pytest_strategies.seed``,
+    the run's seed, and ``pytest_strategies.failed.<i>``, the rerun command of each
+    failed strategy row (as in the list of failed rows), from 0 in the order they
+    failed.
+
+    Args:
+        seed: The run's seed
+        rows: The failed rows' ``pytest_strategies`` report attributes
+    """
+    commands = [row["command"] for row in rows if "command" in row]
+    return [(f"{PROPERTY}.seed", str(seed))] + [
+        (f"{PROPERTY}.failed.{i}", command) for i, command in enumerate(commands)
+    ]

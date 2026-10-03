@@ -608,6 +608,17 @@ rerun     pytest 'tests/dma/test_write.py::test_write[rand-3]' --rng-seed=176392
 - pytest names a test file outside the rootdir (`pytest -c ci/pytest.ini` with the tests in `tests/`) by the path given on the command line, so a rerun of its node ID gives the row another node ID and other values. Its section then ends with a `note` line, and its row in the list with `(outside the rootdir)`: run with a `--rootdir` that contains the tests, such as `--rootdir=.`, to get a command that reproduces them.
 - A failure that pytest reports without a traceback, such as an XPASS of a `strict` xfail, is listed but gets no section. Under pytest-xdist the workers send the rows to the controller.
 
+A `--junitxml` report holds the same information, under pytest-xdist too:
+- The failure (or error) text of each failed strategy row ends with its `pytest-strategies` section.
+- The test suite gets the property `pytest_strategies.seed`, and `pytest_strategies.failed.0`, `pytest_strategies.failed.1` and so on, the commands of the list of failed rows, in the same order:
+  ```xml
+  <properties>
+    <property name="pytest_strategies.seed" value="1763926297314361000"/>
+    <property name="pytest_strategies.failed.0" value="pytest 'tests/dma/test_write.py::test_write[rand-3]' --rng-seed=1763926297314361000"/>
+  </properties>
+  ```
+- With `junit_family = xunit1` or `legacy`, each failed strategy row's test case also gets string properties: `pytest_strategies.strategy`, `.kind`, `.name` (for a directed or test vector), `.index`, `.id`, `.value.<argument>` for each value (as in the section), `.seed`, `.context` and `.constraints_off` when set, and `.command`, the command to run from the rootdir. With several `@strategy` decorators they are numbered per strategy, in the order of the node ID: `pytest_strategies.0.strategy`, `pytest_strategies.1.strategy`. pytest's default family, `xunit2`, has no properties per test case in its schema, so there the test cases get none.
+
 With `-v`, a "Strategy Summary" section lists each strategy with the number of tests that use it, their directed and random rows (and their test rows, the exhaustive rows of `--nsamples=auto` and the skipped row of an empty `skip_if_empty` sequence, when there are some), and where the sample count came from (`--nsamples`, `Parameter(nsamples=)` or the default), followed by the contexts' fingerprints.
 
 Each strategy and test pair draws from its own random streams. Each argument of a random row draws from a stream derived from the seed, the strategy name, the test's node ID without its parameters (its file path relative to the rootdir, its class and its name), the row and the argument's name. The factory draws from a stream derived from the seed, the strategy name and the test's node ID without its parameters, so its draws do not change the rows. As a result:

@@ -130,6 +130,8 @@ class TestDocumentedCliOptions:
         defined = {option for text in sources for option in DEFINED_OPTION_RE.findall(text)}
 
         known = set(OPTION_RE.findall(pytester.runpytest("--help").stdout.str()))
+        # An alias that pytest accepts but --help does not list (--junit-xml)
+        known.add("--junitxml")
         # The options of the pytest-strategies command (skill install)
         parser = _cli.build_parser()
         known.update(

@@ -687,11 +687,11 @@ strategies of its tests may not have been resolved). It is not checked under
   of each kind per strategy, where `nsamples` came from) and the Contexts block
   (label, fingerprint, tests per context). The pytest-xdist controller first
   prints the workers' context line, and in red what they generated differently
-- `pytest_sessionfinish` - Maps the failed tests to the contexts their
-  factories received. A pytest-xdist worker sends its `-v` summary and its part
-  of the check that the workers generated the same vectors; the controller
-  compares the workers' parts and turns exit status 0 or 5 into 4 when they
-  differ
+- `pytest_sessionfinish` - A tryfirst one adds the `--junitxml` suite
+  properties. The other maps the failed tests to their factories' contexts; a
+  pytest-xdist worker sends its `-v` summary and its part of the check that the
+  workers generated the same vectors, and the controller compares the workers'
+  parts and turns exit status 0 or 5 into 4 when they differ
 - `pytest_testnodedown` - (pytest-xdist only) keeps what each worker sent, by
   worker ID; a worker that crashed sent nothing
 
@@ -1163,6 +1163,29 @@ that the rerun gets another node ID, and so other values. The integration tests
 (test_repro_section_integration.py) run each printed command through the
 platform's shell from the folder of the run, so the Windows CI cells check the
 quoting.
+
+**JUnit XML (D18):** junitxml writes `str(report.longrepr)` as a failure's text,
+which includes the sections added with `addsection`, so the failure text of a
+row ends with its section. A second `pytest_sessionfinish` of the plugin
+(`specname`, `tryfirst`, so it runs before junitxml's, which writes the file)
+adds `_repro.suite_properties()` through `add_global_property` of junitxml's
+`LogXML`, found under the private `_pytest.junitxml.xml_key` (`_junit_xml()`,
+None when the key is gone): `pytest_strategies.seed` and
+`pytest_strategies.failed.<i>`, the commands of `SessionState.failed_rows` from
+0. Only the process that writes the file has a `LogXML`, which is the
+pytest-xdist controller, and its `failed_rows` come from the workers' reports.
+Per test case, junitxml writes the `user_properties` of the teardown report (of
+the failing report when the teardown fails too, as a second test case), whatever
+the family, but only `xunit1` (and `legacy`, its alias) has properties per test
+case in its schema; pytest's `record_property` warns under `xunit2`. So the
+makereport wrapper appends `_repro.testcase_properties()` to
+`item.user_properties`, which pytest copies into the reports that follow, and to
+the failing report's, only when `_junit_family()` (`config.option.xmlpath` and
+the `junit_family` ini value, which a worker has too) gives `xunit1`. The
+properties are strings, so pytest-xdist carries them. Their `command` is run
+from the rootdir: the item's node ID (`rootdir_nodeid()`), and `-c` and
+`--rootdir` relative to the rootdir (`generation_options(..., start=rootpath)`).
+test_junitxml_integration.py checks each family, under `-n 2` too.
 
 **One generator of the plugin's own:** every draw (the RNG types and the `RNG.*`
 helpers) comes from `RNG.generator()`, a `random.Random` instance. The plugin
