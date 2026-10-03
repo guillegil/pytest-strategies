@@ -86,6 +86,12 @@ class SessionState:
         self.all_loaded: bool = False
         # Strategy files imported (or attempted), by normalized real path
         self.loaded_files: set[str] = set()
+        # The files pytest or the plugin imported by their paths in this session, by
+        # normalized real path: the test modules pytest collected, the conftest.py
+        # files it loaded and the strategy files the plugin loaded. A file named like
+        # one outside the rootdir and the testpaths is keyed by its path in a fixture's
+        # or an export's stream only when it is here (_registry.source_part).
+        self.imported_files: set[str] = set()
         # Where a lookup stops going up: the rootdir and the search paths
         self.ceilings: set[str] | None = None
         # A name registered twice in the same directory: the messages, reported as

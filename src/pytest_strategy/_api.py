@@ -111,15 +111,22 @@ def export_strategies(*, format: str = "json") -> str:
     Each call draws from a random stream of its own, keyed by the run's seed, the
     strategy's name and where its factory is defined: the name of the factory's
     module, the same wherever a package is installed or checked out, or for a
-    factory in a strategy file, a test module or a ``conftest.py``, which pytest
-    imports by their paths, the file's folder, relative to the rootdir in a
-    session and absolute outside one. ``""`` when the factory's code has neither
-    a file nor a module. The file's name alone makes it a strategy file or a test
-    module, whatever the testpaths and the command line, so that every run of a
-    checkout draws the same: a package module named like one
-    (``acme/strategies.py``) is keyed by its folder in a checkout and by its
-    module's name installed, and draws other values in each; renaming it avoids
-    that.
+    factory in a strategy file, a test module or a ``conftest.py`` that pytest or
+    the plugin imports by its path, the file's folder relative to the rootdir.
+    Such a file is one inside the rootdir or below a ``testpaths`` entry, whatever
+    the command line names, or one the session imported by its path (a test
+    module collected from a folder named on the command line). A module named like
+    one elsewhere (a library's ``extacme/strategies.py`` on ``sys.path``) is keyed
+    by its module's name, and so is every module outside a session, unless
+    ``sys.modules`` does not have it under that name (then its folder's absolute
+    path). ``""`` when the factory's code has neither a file nor a module.
+
+    Two limitations follow (docs/dev.md): a package module named like a strategy
+    file or a test module inside the rootdir (``src/acme/strategies.py``) is keyed
+    by its folder in a checkout and by its module's name installed, so the two
+    draw other values (renaming it avoids that); and one outside the rootdir and
+    the testpaths is keyed by its folder only in a session that imports it by its
+    path.
 
     Args:
         format: Export format (currently only "json" is supported), keyword-only

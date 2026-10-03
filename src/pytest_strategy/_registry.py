@@ -15,7 +15,7 @@ import functools
 import inspect
 import os
 import sys
-from collections.abc import Callable, Iterator, MutableMapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, MutableMapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import Any
@@ -95,40 +95,58 @@ def source_part(
     *,
     folder: bool = False,
     test_files: Sequence[str] = TEST_FILE_PATTERNS,
+    testpaths: Iterable[str | os.PathLike[str]] = (),
+    imported: Collection[str] = frozenset(),
 ) -> str:
     """
     Return where a function or a factory is defined, as a part of a random stream's
     key that is the same wherever the code is installed or checked out. The
     fixture and export streams use it.
 
+    - The file :func:`factory_source` finds, or with ``folder`` its folder,
+      relative to the rootdir in posix form (``_streams.path_part()``), for a
+      ``conftest.py``, a test module (matched by ``test_files``, pytest's
+      ``python_files``) or a strategy file that pytest or the plugin imports by its
+      path, under a module name that depends on ``--import-mode`` and on the
+      folders' ``__init__.py`` files. Such a file counts as one when any of these
+      holds: it is inside the rootdir, by its real path or as it is spelled (a
+      folder linked into the checkout); it is below a ``testpaths`` entry; or its
+      real path is in ``imported``, the files that pytest or the plugin imported
+      by their paths in this session (the test modules pytest collected, the
+      ``conftest.py`` files it loaded and the strategy files the plugin loaded;
+      empty outside a session). Elsewhere a file with such a name is a module of a
+      library on ``sys.path`` (an editable install's, ``PYTHONPATH``'s, a ``pip
+      install`` target folder's), and the rules below apply to it as to any module.
     - The name of its module, for a module imported by that name: an installed
-      package's (in a site-packages or dist-packages folder), an editable install's
-      (whose file is in a source tree, also next to a rootdir that is a subfolder
-      of the checkout), a plugin's or a helper module's.
-    - Otherwise the file :func:`factory_source` finds, or with ``folder`` its
-      folder, relative to the rootdir in posix form (``_streams.path_part()``): for
-      a file that pytest or the plugin may import by its path, whose module name
-      depends on ``--import-mode`` and on the folders' ``__init__.py`` files (a
-      ``conftest.py``, a test module, matched by ``test_files``, pytest's
-      ``python_files``, or a strategy file); for a module that ``sys.modules`` does
-      not have under its name; and for one whose name begins with the rootdir's
-      own folder or a folder above it (a rootdir with an ``__init__.py``), which
-      another checkout may not have.
+      package's (in a site-packages or dist-packages folder, also when it is named
+      like a test module), an editable install's (whose file is in a source tree,
+      also next to a rootdir that is a subfolder of the checkout), a plugin's or a
+      helper module's.
+    - Otherwise the file or its folder as above: for a module that ``sys.modules``
+      does not have under its name, and for one whose name begins with the
+      rootdir's own folder or a folder above it (a rootdir with an
+      ``__init__.py``), which another checkout may not have.
     - The name of its module when its code has no file (``"<string>"`` for
       ``exec``'d code, which would resolve against the working directory); ``""``
       without a module either.
 
-    The file name alone decides whether a file counts as a test module or a
-    strategy file, not the testpaths or the folders named on the command line, so
-    that every run of one checkout keys it alike. A package module named like one
-    (``src/acme/test_utils.py``) therefore keeps its path in a checkout, and draws
-    other values there than installed, where it has its module's name.
+    Two limitations remain. A package module named like a test module or a
+    strategy file inside the rootdir (``src/acme/test_utils.py``) keeps its path
+    in a checkout and has its module's name installed, so the two draw different
+    values; renaming it avoids that. And a file named like one outside the rootdir
+    and the testpaths is keyed by its path only in a session that imported it by
+    its path (a run that names its folder on the command line), and by its
+    module's name in a session that imported it only by that name (another
+    module's ``import``, in a run that does not collect it).
 
     Args:
         fn: The function, factory, partial or callable object
         rootpath: The session's rootdir, or None outside a session
         folder: Return the folder of the file instead of the file
         test_files: The ``python_files`` patterns of test modules
+        testpaths: The session's ``testpaths`` entries, as folders
+        imported: The normalized real paths (``os.path.normcase(os.path.realpath())``)
+            of the files pytest or the plugin imported by their paths in this session
     """
     source = factory_source(fn)[0]
     # The module of what factory_source() read, through wrappers and partials (a
@@ -141,7 +159,7 @@ def source_part(
         source
         and os.path.isfile(source)
         and INSTALLED_FOLDERS.isdisjoint(PurePath(source).parts)
-        and not _imported_by_name(source, module, rootpath, test_files)
+        and not _imported_by_name(source, module, rootpath, test_files, testpaths, imported)
     ):
         return path_part(os.path.dirname(source) if folder else source, rootpath)
     return module
@@ -152,16 +170,20 @@ def _imported_by_name(
     module: str,
     rootpath: str | os.PathLike[str] | None,
     test_files: Sequence[str],
+    testpaths: Iterable[str | os.PathLike[str]],
+    imported: Collection[str],
 ) -> bool:
     """
     Whether the module ``module`` of the file ``source`` is keyed by its name (see
     :func:`source_part`).
     """
     name = os.path.basename(source)
-    # By the file's name only, whatever the run collects (see source_part)
-    if name == "conftest.py" or any(
-        matches_pattern(pattern, source) for pattern in (*STRATEGY_FILE_PATTERNS, *test_files)
-    ):
+    if (
+        name == "conftest.py"
+        or any(
+            matches_pattern(pattern, source) for pattern in (*STRATEGY_FILE_PATTERNS, *test_files)
+        )
+    ) and _imported_by_path(source, rootpath, testpaths, imported):
         return False
     loaded = sys.modules.get(module) if module else None
     file = getattr(loaded, "__file__", None)
@@ -182,6 +204,32 @@ def _imported_by_name(
     # when its first part is one of them; a package next to the rootdir (a flat
     # layout with the rootdir in tests/) is not
     return not _contains(first, root)
+
+
+def _imported_by_path(
+    source: str,
+    rootpath: str | os.PathLike[str] | None,
+    testpaths: Iterable[str | os.PathLike[str]],
+    imported: Collection[str],
+) -> bool:
+    """
+    Whether a file named like a ``conftest.py``, a test module or a strategy file
+    is one that pytest or the plugin imports by its path (see :func:`source_part`):
+    inside the rootdir or below a testpaths entry, by its real path or as it is
+    spelled, or imported by its path in this session.
+    """
+    real = os.path.normcase(os.path.realpath(source))
+    if real in imported:
+        return True
+    spelled = os.path.normcase(os.path.abspath(source))
+    for base in (*([rootpath] if rootpath is not None else []), *testpaths):
+        for folder in {
+            os.path.normcase(os.path.realpath(base)),
+            os.path.normcase(os.path.abspath(base)),
+        }:
+            if _contains(folder, real) or _contains(folder, spelled):
+                return True
+    return False
 
 
 def matches_pattern(pattern: str, path: str) -> bool:

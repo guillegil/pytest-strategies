@@ -925,6 +925,17 @@ class TestFileStream:
         key = StreamKey.root(99, "file", "tests_shared/strategies.py")
         assert random.Random(key.seed_int()).randint(0, 10**9) == module.DRAW
 
+    def test_a_loaded_file_is_recorded_as_imported_by_its_path(self, tmp_path, session):
+        """Its factories are then keyed by its path (definition_part), also outside the rootdir."""
+        path = tmp_path / "other" / "strategies.py"
+        path.parent.mkdir()
+        path.write_text(DRAWING_SOURCE)
+        (tmp_path / "proj").mkdir()
+
+        PytestStrategyPlugin()._load_strategy_files([path], _config(tmp_path / "proj"))
+
+        assert session.imported_files == {os.path.normcase(os.path.realpath(path))}
+
     @pytest.mark.parametrize("folder", ["site-packages", "dist-packages"])
     def test_an_installed_packages_file_is_keyed_below_its_folder(self, tmp_path, session, folder):
         path = tmp_path / "venv" / "lib" / folder / "acme" / "strategies.py"
@@ -1169,36 +1180,56 @@ class TestFixtureDefinition:
             assert definition_part(loaded.conn, config, folder=True) == ".."
 
     @pytest.mark.parametrize("name", ["test_utils.py", "utils_test.py", "strategies.py"])
-    @pytest.mark.parametrize(
-        ("rootdir", "checkout", "where"),
-        [("proj", "proj/src", "src/acme"), ("proj/tests", "proj", "../acme")],
-        ids=["src-layout", "flat-rootdir-in-tests"],
-    )
     def test_a_package_module_named_like_a_test_module_keeps_its_path_in_a_checkout(
-        self, tmp_path, name, rootdir, checkout, where
+        self, tmp_path, name
     ):
         """
-        The file's name alone makes a test module or a strategy file, so
-        src/acme/test_utils.py, which pytest never collects with testpaths = tests,
-        is keyed by its path in a checkout, inside the rootdir or next to it, and by
-        its module's name installed: the two draw different values (the limitation
-        docs/dev.md states; renaming the module avoids it).
+        A file named like a test module or a strategy file inside the rootdir is keyed
+        by its path, so src/acme/test_utils.py, which pytest never collects with
+        testpaths = tests, is keyed by its path in a checkout and by its module's
+        name installed: the two draw different values (the limitation docs/dev.md
+        states; renaming the module avoids it).
         """
         module = "acme." + name.removesuffix(".py")
         found = []
         for folder in (
-            tmp_path / checkout,
+            tmp_path / "proj" / "src",
             tmp_path / "proj" / ".venv" / "lib" / "python3.11" / "site-packages",
         ):
             path = folder / "acme" / name
             path.parent.mkdir(parents=True)
             path.write_text(FIXTURES_SOURCE)
             with imported(path, module) as loaded:
-                config = _ini_config(tmp_path / rootdir, testpaths=["tests"])
+                config = _ini_config(tmp_path / "proj", testpaths=["tests"])
                 found.append(_fixture_definition(loaded.conn, config)[0])
                 found.append(definition_part(loaded.conn, config, folder=True))
 
-        assert found == [f"{where}/{name}", where, module, module]
+        assert found == [f"src/acme/{name}", "src/acme", module, module]
+
+    @pytest.mark.parametrize("name", ["test_utils.py", "utils_test.py", "strategies.py"])
+    def test_a_package_module_named_like_a_test_module_next_to_the_rootdir_has_its_name(
+        self, tmp_path, name
+    ):
+        """
+        A flat layout run with its rootdir in tests/: acme/test_utils.py is outside
+        the rootdir and the testpaths, and the session did not import it by its path,
+        so it is named by its module in the checkout as installed.
+        """
+        module = "acme." + name.removesuffix(".py")
+        found = []
+        for folder in (
+            tmp_path / "proj",
+            tmp_path / "proj" / ".venv" / "lib" / "python3.11" / "site-packages",
+        ):
+            path = folder / "acme" / name
+            path.parent.mkdir(parents=True)
+            path.write_text(FIXTURES_SOURCE)
+            with imported(path, module) as loaded:
+                config = _ini_config(tmp_path / "proj" / "tests", testpaths=["unit"])
+                found.append(_fixture_definition(loaded.conn, config)[0])
+                found.append(definition_part(loaded.conn, config, folder=True))
+
+        assert found == [module] * 4
 
     @pytest.mark.parametrize(
         "folder",
@@ -1208,21 +1239,18 @@ class TestFixtureDefinition:
             # Folders pytest does not enter (norecursedirs, hidden)
             "build/acme",
             ".cache/acme",
-            # Outside the rootdir: a testpaths entry, or a folder next to the rootdir
-            "../shared/acme",
-            "../acme",
         ],
     )
     @pytest.mark.parametrize("name", ["test_utils.py", "strategies.py", "conftest.py"])
-    def test_a_test_module_is_named_by_its_path_whatever_the_session_searches(
+    def test_inside_the_rootdir_a_test_module_is_named_by_its_path_in_every_run(
         self, tmp_path, folder, name
     ):
         """
-        A conftest.py, a file named like a test module or a strategy file is keyed by
-        its path whatever the testpaths, norecursedirs and the folders named on the
-        command line, which differ between a full run and a run of one node ID or of
-        a folder outside the testpaths: pytest imports it by its path in some of
-        them, under a module name that depends on --import-mode.
+        A conftest.py, a file named like a test module or a strategy file inside the
+        rootdir is keyed by its path whatever the testpaths, norecursedirs and the
+        folders named on the command line, which differ between a full run and a run
+        of one node ID or of a folder outside the testpaths: pytest imports it by its
+        path in some of them, under a module name that depends on --import-mode.
         """
         path = tmp_path / "proj" / folder / name
         path.parent.mkdir(parents=True)
@@ -1236,6 +1264,122 @@ class TestFixtureDefinition:
                 found.add(definition_part(loaded.conn, config, folder=True))
 
         assert found == {f"{folder}/{name}", folder}
+
+    @pytest.mark.parametrize(
+        ("testpaths", "keyed"),
+        [
+            (["../shared"], True),
+            (["../sh*"], True),
+            (["tests", "../shared/acme"], True),
+            ([], False),
+            (["tests"], False),
+            (["../shared/other"], False),
+        ],
+    )
+    @pytest.mark.parametrize("name", ["test_utils.py", "strategies.py", "conftest.py"])
+    def test_outside_the_rootdir_a_testpaths_entry_keys_it_by_its_path(
+        self, tmp_path, name, testpaths, keyed
+    ):
+        """
+        Outside the rootdir, a file below a testpaths entry (testpaths = ../shared) is
+        keyed by its path in every run. One that is not is a module of a library on
+        sys.path, named by its module, when the session did not import it by its path.
+        """
+        path = tmp_path / "shared" / "acme" / name
+        path.parent.mkdir(parents=True)
+        (tmp_path / "shared" / "other").mkdir()
+        (tmp_path / "proj").mkdir()
+        path.write_text(FIXTURES_SOURCE)
+        module = "acme." + name.removesuffix(".py")
+
+        with imported(path, module) as loaded:
+            config = _ini_config(tmp_path / "proj", testpaths=testpaths)
+            found = [
+                _fixture_definition(loaded.conn, config)[0],
+                definition_part(loaded.conn, config, folder=True),
+            ]
+
+        assert found == (
+            [f"../shared/acme/{name}", "../shared/acme"] if keyed else [module, module]
+        )
+
+    @pytest.mark.parametrize("name", ["test_utils.py", "strategies.py", "conftest.py"])
+    def test_outside_the_rootdir_a_file_the_session_imported_by_its_path_has_its_path(
+        self, tmp_path, name
+    ):
+        """
+        A test module that pytest collected from a folder named on the command line
+        outside the rootdir and the testpaths, its folder's conftest.py, or a strategy
+        file the plugin loaded there: the session imported it by its path, under a
+        module name that depends on --import-mode, so its path keys it.
+        """
+        path = tmp_path / "other" / name
+        path.parent.mkdir()
+        path.write_text(FIXTURES_SOURCE)
+        root = tmp_path / "proj"
+        root.mkdir()
+        module = name.removesuffix(".py")
+
+        with imported(path, module) as loaded:
+            found = [
+                source_part(loaded.conn, root),
+                source_part(loaded.conn, root, imported={os.path.normcase(os.path.realpath(path))}),
+                source_part(
+                    loaded.conn,
+                    root,
+                    folder=True,
+                    imported={os.path.normcase(os.path.realpath(path))},
+                ),
+            ]
+
+        assert found == [module, f"../other/{name}", "../other"]
+
+    def test_the_files_the_session_imported_count_for_its_own_config_only(self, tmp_path):
+        """
+        definition_part() reads the files the active session imported by their paths
+        for that session's config; another config (or none) sees none of them.
+        """
+        path = tmp_path / "other" / "test_utils.py"
+        path.parent.mkdir()
+        path.write_text(FIXTURES_SOURCE)
+        config = _ini_config(tmp_path / "proj")
+        state = runtime.push(config)
+        try:
+            state.imported_files.add(os.path.normcase(os.path.realpath(path)))
+            with imported(path, "test_utils") as loaded:
+                found = [
+                    definition_part(loaded.conn, config),
+                    definition_part(loaded.conn, _ini_config(tmp_path / "proj")),
+                    definition_part(loaded.conn, None),
+                ]
+        finally:
+            runtime.pop()
+
+        assert found == ["../other/test_utils.py", "test_utils", "test_utils"]
+
+    def test_a_folder_linked_into_the_rootdir_is_inside_it_as_spelled(self, tmp_path):
+        """
+        A file reached through a folder linked into the checkout from a place that
+        does not move with it is inside the rootdir as it is spelled, so it is keyed
+        by that path; reached by its real path, it is outside.
+        """
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        path = shared / "test_utils.py"
+        path.write_text(FIXTURES_SOURCE)
+        proj = tmp_path / "deep" / "proj"
+        proj.mkdir(parents=True)
+        try:
+            os.symlink(shared, proj / "linked", target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks are not available")
+
+        found = []
+        for spelled in (proj / "linked" / "test_utils.py", path):
+            with imported(spelled, "test_utils") as loaded:
+                found.append(definition_part(loaded.conn, _ini_config(proj)))
+
+        assert found == ["linked/test_utils.py", "test_utils"]
 
     def test_a_partial_counts_as_the_function_it_wraps(self, tmp_path):
         path = tmp_path / "conftest.py"
@@ -1290,6 +1434,51 @@ class TestFixtureBase:
         assert _fixture_base(SimpleNamespace(node=None, baseid="")) == ""
 
 
+class TestImportedFiles:
+    """
+    The files a session records as imported by their paths
+    (SessionState.imported_files): its test modules (tests/integration), its
+    conftest.py files and the strategy files the plugin loaded (TestFileStream).
+    """
+
+    def test_a_conftest_registered_under_its_path_is_recorded(self, tmp_path):
+        path = tmp_path / "other" / "conftest.py"
+        path.parent.mkdir()
+        path.write_text("")
+        manager = object()
+        state = runtime.push(SimpleNamespace(pluginmanager=manager))
+        try:
+            conftest = load(path, "conftest")
+            hook = PytestStrategyPlugin().pytest_plugin_registered
+            # A plugin registered by its module's name (-p acme.conftest), another
+            # session's plugin manager, and a plugin that is not a module
+            hook(plugin=conftest, plugin_name="acme.conftest", manager=manager)
+            hook(plugin=conftest, plugin_name=str(path), manager=object())
+            hook(plugin=SimpleNamespace(__file__=str(path)), plugin_name=str(path), manager=manager)
+            before = set(state.imported_files)
+            hook(plugin=conftest, plugin_name=str(path), manager=manager)
+        finally:
+            runtime.pop()
+
+        assert before == set()
+        assert state.imported_files == {os.path.normcase(os.path.realpath(path))}
+
+    def test_only_a_conftest_counts(self, tmp_path):
+        """A plugin module named otherwise is imported by its name (pytest_plugins, -p)."""
+        path = tmp_path / "helpers.py"
+        path.write_text("")
+        manager = object()
+        state = runtime.push(SimpleNamespace(pluginmanager=manager))
+        try:
+            PytestStrategyPlugin().pytest_plugin_registered(
+                plugin=load(path, "helpers"), plugin_name=str(path), manager=manager
+            )
+        finally:
+            runtime.pop()
+
+        assert state.imported_files == set()
+
+
 class TestSourcePart:
     """Where a factory is defined, as the export stream's folder."""
 
@@ -1301,6 +1490,28 @@ class TestSourcePart:
 
         assert source_part(module.conn, tmp_path, folder=True) == "tests/a"
         assert source_part(module.conn, tmp_path) == "tests/a/strategies.py"
+
+    def test_outside_a_session_a_module_is_named_by_its_module(self, tmp_path):
+        """
+        Without a session there is no rootdir, testpaths or file imported by its
+        path: a strategy file imported by its module's name has that name, and one
+        that sys.modules does not have under its name its folder's absolute path.
+        """
+        path = tmp_path / "strategies.py"
+        path.write_text(FIXTURES_SOURCE)
+
+        with imported(path, "strategies") as module:
+            named = (
+                source_part(module.conn, None, folder=True),
+                definition_part(module.conn, None),
+            )
+        loaded = load(path, "ps_unit_outside_a_session")
+
+        assert named == ("strategies", "strategies")
+        assert (
+            source_part(loaded.conn, None, folder=True)
+            == Path(os.path.realpath(tmp_path)).as_posix()
+        )
 
     @pytest.mark.parametrize("folder", ["site-packages", "dist-packages"])
     def test_an_installed_package_is_named_by_its_module(self, tmp_path, folder):

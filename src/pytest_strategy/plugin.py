@@ -232,6 +232,30 @@ class PytestStrategyPlugin:
         """
         node.workerinput["pytest_strategies_seed"] = _run_seed()
 
+    @pytest.hookimpl
+    def pytest_plugin_registered(self, plugin: object, plugin_name: str, manager: Any) -> None:
+        """
+        Record a ``conftest.py`` that pytest imported by its path in this session, so
+        its fixtures and factories are keyed by its path (``definition_part``), also
+        outside the rootdir and the testpaths.
+
+        pytest registers a conftest module under its path. The hook is historic:
+        when the plugin registers, in ``pytest_configure``, it is called for every
+        plugin registered before, the initial conftest.py files among them.
+        """
+        state = runtime.current
+        if state is None or state.config is None or manager is not state.config.pluginmanager:
+            return
+        file = getattr(plugin, "__file__", None)
+        if (
+            isinstance(plugin, ModuleType)
+            and isinstance(file, str)
+            and os.path.basename(file) == "conftest.py"
+            and os.path.isabs(plugin_name)
+            and _file_key(plugin_name) == _file_key(file)
+        ):
+            state.imported_files.add(_file_key(file))
+
     # ==== COLLECTION HOOKS ====
 
     @pytest.hookimpl
@@ -260,9 +284,16 @@ class PytestStrategyPlugin:
         module level) are then the same whether it is collected alone or with other
         modules, in any order. The module is imported here, after pytest_collectstart
         loaded its folder's strategy files. The key is built only if the module draws.
+
+        The module's path is recorded as one pytest imported by its path, so its
+        fixtures are keyed by it (``definition_part``).
         """
-        if not isinstance(collector, pytest.Module) or runtime.current is None:
+        state = runtime.current
+        if not isinstance(collector, pytest.Module) or state is None:
             return (yield)
+        # pytest imports the module by its path: its fixtures are keyed by it
+        # (definition_part), also outside the rootdir and the testpaths
+        state.imported_files.add(_file_key(collector.path))
         seed = seed_part(_run_seed())
         path, rootpath = collector.path, collector.config.rootpath
         with _Stream(lambda: StreamKey.root(seed, "module", file_part(path, rootpath))):
@@ -828,19 +859,7 @@ class PytestStrategyPlugin:
         Returns:
             List of directories to search
         """
-        rootdir = Path(config.rootpath)
-        testpaths = config.getini("testpaths")
-
-        search_paths: list[Path] = []
-        for entry in testpaths:
-            if any(char in entry for char in "*?["):
-                # pytest expands wildcards in testpaths (e.g. "pkgs/*/tests")
-                matches = sorted(glob.glob(entry, root_dir=rootdir, recursive=True))
-                search_paths.extend(rootdir / match for match in matches)
-            else:
-                search_paths.append(rootdir / entry)
-        if not testpaths:
-            search_paths.append(rootdir)
+        search_paths = _testpaths(config) if config.getini("testpaths") else [Path(config.rootpath)]
 
         # Paths named on the command line (or the testpaths pytest collects) may
         # lie outside the search paths, or inside a directory the search skips.
@@ -1171,6 +1190,9 @@ class PytestStrategyPlugin:
         state = runtime.current
         if state is not None:
             state.strategy_modules[_file_key(file_path)] = module
+            # A strategy file of the session: its factories are keyed by its path
+            # (definition_part), also outside the rootdir and the testpaths
+            state.imported_files.add(_file_key(file_path))
         runtime.record_discovered_file(file_path)
 
         # Optionally log in verbose mode
@@ -1432,10 +1454,11 @@ def _fixture_definition(func: Callable[..., Any], config: Config | None) -> tupl
     package defines (a plugin's, or a helper module's) is named by its module, so
     it draws the same whether the package is installed, installed in editable
     mode or checked out next to the tests, unless the module's file is named like
-    a test module or a strategy file (``test_utils.py``), which a checkout keys by
-    its path. One whose code has no file
-    (``exec``'d code) is named by its module too: its file would resolve against
-    the working directory.
+    a test module or a strategy file (``test_utils.py``) and is inside the rootdir,
+    below a testpaths entry or imported by its path in the session, which keys it
+    by its path (``definition_part``). One whose code has no file (``exec``'d
+    code) is named by its module too: its file would resolve against the working
+    directory.
     """
     return (definition_part(func, config), factory_source(func)[1] or "")
 
@@ -1443,16 +1466,55 @@ def _fixture_definition(func: Callable[..., Any], config: Config | None) -> tupl
 def definition_part(fn: Callable[..., Any], config: Config | None, *, folder: bool = False) -> str:
     """
     Return ``source_part()`` of a fixture or a factory for the session of ``config``:
-    relative to its rootdir, with its ``python_files`` patterns. Whether a file is
-    a test module or a strategy file depends on its name only, not on the
-    testpaths or the command line, so every run of a checkout keys it alike.
+    relative to its rootdir, with its ``python_files`` patterns, its testpaths and,
+    for the active session's config, the files pytest and the plugin imported by
+    their paths in it (``SessionState.imported_files``). A ``conftest.py``, a test
+    module or a strategy file is keyed by its path inside the rootdir, below a
+    testpaths entry, or when this session imported it by its path; elsewhere (a
+    library on ``sys.path`` with ``acme/strategies.py``) by the rules of any other
+    module, which give its module's name when ``sys.modules`` has it under that name.
     """
+    state = runtime.current
+    imported = (
+        state.imported_files
+        if state is not None and config is not None and state.config is config
+        else frozenset()
+    )
     return source_part(
         fn,
         getattr(config, "rootpath", None),
         folder=folder,
         test_files=test_file_patterns(config),
+        testpaths=_ini_testpaths(config),
+        imported=imported,
     )
+
+
+def _testpaths(config: Config) -> list[Path]:
+    """
+    Return the testpaths ini entries as folders, relative to the rootdir, with glob
+    patterns expanded as pytest does (``pkgs/*/tests``).
+    """
+    rootdir = Path(config.rootpath)
+    folders: list[Path] = []
+    for entry in config.getini("testpaths"):
+        if any(char in entry for char in "*?["):
+            # pytest expands wildcards in testpaths (e.g. "pkgs/*/tests")
+            matches = sorted(glob.glob(entry, root_dir=rootdir, recursive=True))
+            folders.extend(rootdir / match for match in matches)
+        else:
+            folders.append(rootdir / entry)
+    return folders
+
+
+def _ini_testpaths(config: Config | None) -> list[Path]:
+    """``_testpaths()``, or no folders for a config without them (a unit test's stand-in)."""
+    try:
+        if config is None or not isinstance(config.getini("testpaths"), list):
+            return []
+        return _testpaths(config)
+    except (AttributeError, TypeError, ValueError):
+        return []
 
 
 def _fixture_base(fixturedef: pytest.FixtureDef[Any]) -> str:
