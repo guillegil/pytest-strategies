@@ -12,13 +12,16 @@ from __future__ import annotations
 import os
 import warnings
 from collections.abc import Callable
+from pathlib import PurePath
 from typing import Any, TypeVar
 
 import pytest
 
+from ._context import below, unloaded_conftests
 from ._introspection import PYTEST_FIXTURES as _PYTEST_FIXTURES
-from ._registry import Factory, RegistryView, _describe_factory, registry
+from ._registry import Factory, RegistryView, _describe_factory, factory_source, registry
 from ._runtime import runtime
+from ._streams import INSTALLED_FOLDERS, path_part
 from ._warnings import PytestStrategiesWarning
 
 _F = TypeVar("_F", bound=Callable[..., Any])
@@ -110,7 +113,12 @@ def export_strategies(*, format: str = "json") -> str:
     and gets the session's options for its strategy: its ``nsamples`` is the
     ``--nsamples`` value, ``"auto"``, or 10 without the option or outside a
     session. The context hook runs only for a factory that declares ``ctx``,
-    which receives the rootdir's context.
+    which receives the context of the folder its file is in, the one a test there
+    gets (the rootdir's for a file outside the rootdir or in an installed package).
+    When pytest has not loaded a ``conftest.py`` of that folder or of a folder
+    between it and the rootdir (no test there was collected), that context cannot
+    be known: such a factory is not called, and its entry is
+    ``{"unavailable": "tests/b/conftest.py was not loaded in this session"}``.
     Each call draws from a random stream of its own, keyed by the run's seed, the
     strategy's name and where its factory is defined: the name of the factory's
     module, the same wherever a package is installed or checked out, or for a
@@ -149,7 +157,7 @@ def export_strategies(*, format: str = "json") -> str:
     """
     import json
 
-    from ._factory import FactoryInputs, call_factory
+    from ._factory import FactoryInputs, analyse, call_factory
     from ._resolver import check_factory_result
     from ._streams import StreamKey, seed_part
     from .plugin import definition_part
@@ -161,7 +169,7 @@ def export_strategies(*, format: str = "json") -> str:
     runtime.load_all_strategy_files()
     config = runtime.current.config if runtime.current is not None else None
     rootpath = getattr(config, "rootpath", None)
-    strategies_data = {}
+    strategies_data: dict[str, Any] = {}
     for name in registry.names():
         factory = registry.registrations(name)[-1].factory
         # The factory's module's name, or for a strategy file, a test module or a
@@ -169,14 +177,25 @@ def export_strategies(*, format: str = "json") -> str:
         # for a fixture's key)
         folder = definition_part(factory, config, folder=True)
         stream = StreamKey.root(seed_part(runtime.run_seed()), "export", name, folder)
+        # The context of the folder the factory is registered in (or the rootdir's),
+        # computed only if the factory asks for it
+        where = _context_folder(factory, rootpath)
+        context = runtime.path_context(where)
         try:
+            if where is not None and "ctx" in analyse(factory).declares:
+                # A test there would get a context that may come from these
+                unloaded = unloaded_conftests(config, where)
+                if unloaded:
+                    strategies_data[name] = {"unavailable": _not_loaded(unloaded, rootpath)}
+                    continue
             # The session's options for this strategy, the instance collection uses,
             # and the random stream root(S, "export", name, folder) (streams v1)
             with _Stream(stream) as rng:
                 inputs = FactoryInputs(
                     options=runtime.strategy_options(name, config),
                     rng=rng,
-                    ctx=runtime.strategy_context,
+                    ctx=context,
+                    why_no_ctx=context.why_none,
                 )
                 result = call_factory(name, factory, inputs, rootpath=rootpath)
             param = check_factory_result(name, factory, result)
@@ -185,6 +204,36 @@ def export_strategies(*, format: str = "json") -> str:
             strategies_data[name] = {"error": f"Failed to inspect strategy: {str(e)}"}
 
     return json.dumps(strategies_data, indent=2)
+
+
+def _context_folder(
+    factory: Factory, rootpath: str | os.PathLike[str] | None
+) -> str | os.PathLike[str] | None:
+    """
+    Return the folder whose context ``export_strategies()`` gives a factory, the
+    context a test there gets: its file's folder, when that is inside the rootdir
+    (as it is spelled, or by its real path) and not in an installed package (a
+    ``site-packages`` or ``dist-packages`` folder, such as a virtualenv's inside
+    the rootdir, which pytest does not collect); otherwise the rootdir. None
+    without a rootdir (outside a session).
+    """
+    if rootpath is None:
+        return None
+    source = factory_source(factory)[0]
+    if not source or not os.path.isfile(source):
+        return rootpath
+    if not INSTALLED_FOLDERS.isdisjoint(PurePath(source).parts):
+        return rootpath
+    folder = os.path.dirname(os.path.abspath(source))
+    return folder if below(folder, rootpath) is not None else rootpath
+
+
+def _not_loaded(conftests: list[str], rootpath: str | os.PathLike[str] | None) -> str:
+    """Say which ``conftest.py`` files were not loaded, relative to the rootdir."""
+    names = [path_part(conftest, rootpath) for conftest in conftests]
+    if len(names) == 1:
+        return f"{names[0]} was not loaded in this session"
+    return f"{', '.join(names[:-1])} and {names[-1]} were not loaded in this session"
 
 
 def get_context(config: pytest.Config, path: str | os.PathLike[str]) -> Any:

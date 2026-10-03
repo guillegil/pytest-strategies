@@ -754,8 +754,19 @@ computes its folder's answer only when a factory that declares `ctx` is called;
 when such a factory fails with `ctx` None while another folder's conftest
 implements the hook, `FolderContext.why_none()` adds where. Each (nested)
 session and each pytest-xdist worker calls each implementation at most once.
-`export_strategies()` passes the rootdir's context. See the README for an
-example.
+`export_strategies()`, which has no test, gives a factory the path caller's
+context of the folder of its file (`_api._context_folder()`), or the rootdir's
+for a file outside the rootdir or in a `site-packages` or `dist-packages`
+folder. A factory that declares `ctx` is not called when
+`_context.unloaded_conftests()` finds a `conftest.py` that a test in that
+folder would see and pytest has not loaded: one on disk in the rootdir, the
+folder or a folder between them, that pytest considers
+(`PytestPluginManager._is_in_confcutdir()`, private; none under
+`--noconftest`) and that no registered plugin's name (`str(conftestpath)`)
+points to by its real path. Its entry is then
+`{"unavailable": "tests/b/conftest.py was not loaded in this session"}`, so the
+export never reports a context that a test there would not get. See the README
+for an example.
 
 Tests and fixtures read the same objects (D8). `strategies_ctx`, a
 session-scoped fixture defined in `plugin.py`, takes its consumers from

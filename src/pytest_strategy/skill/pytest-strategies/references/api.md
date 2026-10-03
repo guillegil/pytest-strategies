@@ -67,8 +67,8 @@ def strategy(name_or_factory, *, validate_signature=True): ...  # decorator for 
   spellings are aliases, with no warning.
 - `Strategy.export_strategies(format="json")` returns a JSON string describing every
   registered strategy (arguments, RNG types, vectors). It loads every strategies file
-  and calls each factory as at collection: the same `ctx` as the hook, and the
-  session's `nsamples` (10 without `--nsamples`) and `options`.
+  and calls each factory as at collection: the `ctx` of the factory's own folder,
+  and the session's `nsamples` (10 without `--nsamples`) and `options`.
 - Apply `@strategy` to test functions and methods, not to classes or modules.
 
 ## 3. Factories
@@ -456,7 +456,11 @@ def pytest_strategies_context(config):
   (implemented in tests/a/conftest.py; move it to a common parent conftest)`.
 - Random draws in the hook come from a stream of their own, derived from the seed and
   started anew for each implementation, and do not shift any test's rows.
-- `export_strategies()` passes the rootdir's context.
+- `export_strategies()` gives a factory the context of its own file's folder (the
+  rootdir's for a file outside the rootdir or in an installed package). A `ctx`
+  factory in a folder whose `conftest.py` the run did not load (`pytest tests/a`
+  leaves `tests/b/conftest.py` out) is not called: its entry is
+  `{"unavailable": "tests/b/conftest.py was not loaded in this session"}`.
 - After the collection (also with `-q` and `--collect-only`) the plugin prints a
   fingerprint of each context it computed, the first 8 hex characters of a SHA-256
   taken when the hook returned the object: `pytest-strategies: context 976bcfdf`,

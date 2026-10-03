@@ -12,6 +12,7 @@ folder's conftest.py, as pytest registers one.
 """
 
 import functools
+import importlib.util
 import random
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,11 +29,14 @@ from pytest_strategy import (
     get_context,
     hookspecs,
 )
+from pytest_strategy._api import _context_folder, _not_loaded
 from pytest_strategy._context import (
     NO_ANSWER,
     ContextStore,
     FolderContext,
+    below,
     call_order,
+    unloaded_conftests,
     visible_from,
 )
 from pytest_strategy._factory import FactoryInputs, call_factory
@@ -401,6 +405,149 @@ class TestVisibleFrom:
 
     def test_without_a_plugin_manager_none(self, tmp_path):
         assert visible_from(SimpleNamespace(rootpath=tmp_path), tmp_path) == []
+
+
+def _on_disk(session, *folders):
+    """Write an empty conftest.py in each of ``folders`` (relative to the rootdir)."""
+    for folder in folders:
+        (session.rootpath / folder).mkdir(parents=True, exist_ok=True)
+        (session.rootpath / folder / "conftest.py").write_text("")
+
+
+class TestUnloadedConftests:
+    """
+    The conftest.py files a folder's tests would see that pytest has not loaded, so
+    export_strategies() cannot know that folder's context.
+    """
+
+    def test_the_files_on_disk_that_are_not_registered_from_the_rootdir_down(self, session):
+        _on_disk(session, ".", "tests/b", "tests/b/c")
+        session.conftest(".", Plugin("root"))
+
+        missing = unloaded_conftests(session.config, session.rootpath / "tests/b/c/x_strategies.py")
+
+        assert missing == [
+            str(session.rootpath / "tests/b/conftest.py"),
+            str(session.rootpath / "tests/b/c/conftest.py"),
+        ]
+
+    def test_loaded_ones_and_folders_without_one_count_as_loaded(self, session):
+        _on_disk(session, ".", "tests/a")
+        session.conftest(".", Plugin("root"))
+        session.conftest("tests/a", Plugin(None))
+        # Also those that do not implement the hook
+        session.conftest("tests/a/deep", object())
+        _on_disk(session, "tests/a/deep")
+
+        assert unloaded_conftests(session.config, session.rootpath / "tests/a/deep") == []
+        assert unloaded_conftests(session.config, session.rootpath / "tests/c") == []
+
+    def test_the_rootdir_s_own(self, session):
+        _on_disk(session, ".")
+
+        assert unloaded_conftests(session.config, session.rootpath) == [
+            str(session.rootpath / "conftest.py")
+        ]
+
+    def test_a_folder_outside_the_rootdir_has_none(self, session, tmp_path_factory):
+        outside = tmp_path_factory.mktemp("shared")
+        (outside / "conftest.py").write_text("")
+
+        assert unloaded_conftests(session.config, outside) == []
+
+    def test_a_folder_reached_through_a_link_is_found_by_its_real_path(
+        self, session, tmp_path_factory
+    ):
+        _on_disk(session, "tests/b")
+        link = tmp_path_factory.mktemp("links") / "checkout"
+        try:
+            link.symlink_to(session.rootpath, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("no symlinks here")
+
+        missing = unloaded_conftests(session.config, link / "tests/b")
+
+        assert missing == [str(session.rootpath / "tests/b/conftest.py")]
+
+    def test_none_above_the_confcutdir(self, session):
+        _on_disk(session, ".", "tests", "tests/b")
+        session.pluginmanager._confcutdir = session.rootpath / "tests"
+
+        # pytest loads no conftest.py of a folder above the confcutdir
+        assert unloaded_conftests(session.config, session.rootpath / "tests/b") == [
+            str(session.rootpath / "tests/conftest.py"),
+            str(session.rootpath / "tests/b/conftest.py"),
+        ]
+
+    def test_none_under_noconftest(self, session):
+        _on_disk(session, ".", "tests/b")
+        config = SimpleNamespace(**vars(session.config), option=SimpleNamespace(noconftest=True))
+
+        assert unloaded_conftests(config, session.rootpath / "tests/b") == []
+
+    def test_without_a_plugin_manager_none(self, tmp_path):
+        (tmp_path / "conftest.py").write_text("")
+
+        assert unloaded_conftests(SimpleNamespace(rootpath=tmp_path), tmp_path) == []
+
+    def test_below(self, tmp_path):
+        assert below(tmp_path / "tests/a", tmp_path) == ("tests", "a")
+        assert below(tmp_path, tmp_path) == ()
+        assert below(tmp_path.parent, tmp_path) is None
+        assert below(tmp_path.parent / f"{tmp_path.name}x", tmp_path) is None
+
+
+def _factory_in(path):
+    """Import the file ``path`` and return its ``factory``, as a strategy file's."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("def factory(ctx):\n    return ctx\n")
+    spec = importlib.util.spec_from_file_location(f"t65_{abs(hash(str(path)))}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.factory
+
+
+class TestExportFolder:
+    """The folder whose context export_strategies() gives a factory."""
+
+    def test_the_folder_of_a_file_inside_the_rootdir(self, tmp_path):
+        factory = _factory_in(tmp_path / "tests/a/a_strategies.py")
+
+        assert _context_folder(factory, tmp_path) == str(tmp_path / "tests/a")
+
+    def test_the_rootdir_for_a_file_outside_it(self, tmp_path):
+        factory = _factory_in(tmp_path / "shared/ext.py")
+
+        assert _context_folder(factory, tmp_path / "proj") == tmp_path / "proj"
+
+    def test_the_rootdir_for_an_installed_package_inside_it(self, tmp_path):
+        site = tmp_path / ".venv/lib/python3.11/site-packages/acme"
+        factory = _factory_in(site / "strategies.py")
+
+        assert _context_folder(factory, tmp_path) == tmp_path
+
+    def test_the_rootdir_for_code_without_a_file(self, tmp_path):
+        namespace = {}
+        exec("def factory(ctx):\n    return ctx\n", namespace)
+
+        assert _context_folder(namespace["factory"], tmp_path) == tmp_path
+
+    def test_none_without_a_rootdir(self, tmp_path):
+        assert _context_folder(_factory_in(tmp_path / "x.py"), None) is None
+
+    @pytest.mark.parametrize(
+        ("names", "text"),
+        [
+            (["tests/b/conftest.py"], "tests/b/conftest.py was not loaded in this session"),
+            (
+                ["tests/b/conftest.py", "tests/b/c/conftest.py"],
+                "tests/b/conftest.py and tests/b/c/conftest.py were not loaded in this session",
+            ),
+        ],
+        ids=["one", "two"],
+    )
+    def test_the_unavailable_text(self, tmp_path, names, text):
+        assert _not_loaded([str(tmp_path / name) for name in names], tmp_path) == text
 
 
 class TestFolderContexts:

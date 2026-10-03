@@ -1,13 +1,17 @@
 """
 End-to-end tests for export_strategies() in a pytest session, run through
 pytester: each factory is called with the inputs it declares and the session's
-options, and the context hook runs only for a factory that declares ctx.
+options, and the context hook runs only for a factory that declares ctx, which
+gets the context of the folder it is registered in, or none when pytest did not
+load a conftest.py of that folder.
 
 Distinct strategy names are used per run on purpose (see
 test_session_isolation_integration.py for rationale).
 """
 
 import json
+from collections import Counter
+from textwrap import dedent
 
 import pytest
 
@@ -199,3 +203,174 @@ def test_only_a_ctx_factory_runs_the_hook(pytester):
     assert "error" not in exported["ex_ctx_ctx"], exported["ex_ctx_ctx"]
     assert {"factory": "ctx", "ctx": "bench"} in _received(pytester)
     assert _hook_calls(pytester) == 1
+
+
+# The context of each registration's folder (D7): a project in root/, with a
+# rootdir conftest.py answering "root", tests/a/conftest.py answering "A", a
+# factory in tests/a and one in tests/b, and one in a library outside the rootdir
+# (shared/, on the pythonpath), which tests/a's test module imports. Each hook call
+# is written to calls.txt and each factory call to factories.txt.
+
+FOLDER_HOOK = """
+    from pathlib import Path
+
+    def pytest_strategies_context(config):
+        with open(Path(config.rootpath, "calls.txt"), "a") as calls:
+            calls.write("{name}\\n")
+        return {value!r}
+    """
+
+FOLDER_STRATEGIES = """
+    from pathlib import Path
+
+    from pytest_strategy import Parameter, TestArg, register
+
+    @register("ex_fold_{name}")
+    def factory(ctx):
+        with open(Path(__file__).parents[{up}] / "factories.txt", "a") as out:
+            out.write("ex_fold_{name}\\n")
+        return Parameter(TestArg("name", value=ctx["name"] if ctx else None), nsamples=1)
+    """
+
+# Exports each entry's context name (the "name" argument's value), or what replaces
+# its Parameter
+FOLDER_EXPORT = """
+    import json
+    from pathlib import Path
+
+    import ext_fold_lib  # noqa: F401  (a factory outside the rootdir)
+
+    from pytest_strategy import export_strategies
+
+    def test_export(request):
+        exported = json.loads(export_strategies())
+        found = {
+            name: entry["arguments"][0]["static_value"] if "arguments" in entry else entry
+            for name, entry in exported.items()
+            if name.startswith("ex_fold_")
+        }
+        Path(request.config.rootpath, "export.json").write_text(json.dumps(found))
+    """
+
+
+def folder_project(pytester, monkeypatch, extra=None):
+    """Write the project, and go to its rootdir."""
+    files = {
+        "root/pytest.ini": "[pytest]\npythonpath = ../shared\n",
+        "root/conftest.py": FOLDER_HOOK.format(name="root", value={"name": "root"}),
+        "root/tests/a/conftest.py": FOLDER_HOOK.format(name="A", value={"name": "A"}),
+        "root/tests/a/a_strategies.py": FOLDER_STRATEGIES.format(name="a", up=2),
+        "root/tests/a/test_export.py": FOLDER_EXPORT,
+        "root/tests/b/b_strategies.py": FOLDER_STRATEGIES.format(name="b", up=2),
+        "root/tests/b/test_b.py": "def test_b():\n    pass\n",
+        "shared/ext_fold_lib.py": FOLDER_STRATEGIES.format(name="outside", up=1).replace(
+            'Path(__file__).parents[1] / "factories.txt"', '"factories.txt"'
+        ),
+        **(extra or {}),
+    }
+    for name, text in files.items():
+        path = pytester.path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(dedent(text))
+    root = pytester.path / "root"
+    monkeypatch.chdir(root)
+    return root
+
+
+def folder_run(root, pytester, *args):
+    """
+    Run pytest in the project, and return the exported contexts, the hook calls and
+    the factory calls (with how often).
+    """
+    for name in ("calls.txt", "factories.txt", "export.json"):
+        (root / name).unlink(missing_ok=True)
+    result = pytester.runpytest("-p", "no:cacheprovider", *args)
+    result.assert_outcomes(passed=1 + (not args))
+
+    def counted(name):
+        path = root / name
+        return Counter(path.read_text().split()) if path.exists() else Counter()
+
+    return (
+        json.loads((root / "export.json").read_text()),
+        counted("calls.txt"),
+        counted("factories.txt"),
+    )
+
+
+class TestEachRegistrationsFolderContext:
+    """export_strategies() gives a factory the context of the folder it is registered in."""
+
+    def test_a_factory_gets_its_folder_s_context_and_one_outside_the_rootdir_the_rootdir_s(
+        self, pytester, monkeypatch
+    ):
+        root = folder_project(pytester, monkeypatch)
+
+        for args in ((), ("tests/a",)):
+            exported, calls, factories = folder_run(root, pytester, *args)
+
+            # tests/b has no conftest.py of its own: the rootdir's answers there,
+            # also in a run that does not collect it
+            assert exported == {"ex_fold_a": "A", "ex_fold_b": "root", "ex_fold_outside": "root"}
+            assert calls == {"root": 1, "A": 1}, args
+            assert factories == {"ex_fold_a": 1, "ex_fold_b": 1, "ex_fold_outside": 1}
+
+    def test_a_folder_whose_conftest_was_not_loaded_is_unavailable(self, pytester, monkeypatch):
+        """
+        After pytest tests/a, tests/b's conftest.py, which implements the hook, was
+        never loaded: the context of tests/b cannot be known, so its ctx factory is
+        not called. Its factory without ctx is exported as usual.
+        """
+        plain = """
+            from pytest_strategy import Parameter, TestArg, register
+
+            @register("ex_fold_b_plain")
+            def plain():
+                return Parameter(TestArg("name", value="plain"), nsamples=1)
+            """
+        root = folder_project(
+            pytester,
+            monkeypatch,
+            extra={
+                "root/tests/b/conftest.py": FOLDER_HOOK.format(name="B", value={"name": "B"}),
+                "root/tests/b/plain_strategies.py": plain,
+            },
+        )
+
+        exported, calls, factories = folder_run(root, pytester, "tests/a")
+
+        assert exported == {
+            "ex_fold_a": "A",
+            "ex_fold_b": {"unavailable": "tests/b/conftest.py was not loaded in this session"},
+            "ex_fold_b_plain": "plain",
+            "ex_fold_outside": "root",
+        }
+        assert calls == {"root": 1, "A": 1}
+        assert factories == {"ex_fold_a": 1, "ex_fold_outside": 1}
+
+        # A run that collects tests/b loads it
+        exported, calls, factories = folder_run(root, pytester)
+
+        assert exported["ex_fold_b"] == "B"
+        assert calls == {"root": 1, "A": 1, "B": 1}
+        assert factories["ex_fold_b"] == 1
+
+    def test_ctx_none_in_the_folder_gets_the_migration_hint(self, pytester, monkeypatch):
+        root = folder_project(pytester, monkeypatch)
+        (root / "conftest.py").write_text("")
+        (root / "tests/b/b_strategies.py").write_text(
+            dedent(FOLDER_STRATEGIES.format(name="b", up=2)).replace(
+                'ctx["name"] if ctx else None', 'ctx["name"]'
+            )
+        )
+
+        exported, calls, factories = folder_run(root, pytester)
+
+        error = exported["ex_fold_b"]["error"]
+        assert "TypeError: 'NoneType' object is not subscriptable" in error
+        assert (
+            "ctx is None for tests/b: no pytest_strategies_context implementation in this "
+            "folder or above answered (implemented in tests/a/conftest.py; move it to a common "
+            "parent conftest)"
+        ) in error
+        assert calls == {"A": 1}

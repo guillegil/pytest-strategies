@@ -432,6 +432,27 @@ class TestExportStrategiesFactoryCalling:
         runtime.push(config).all_loaded = True
         return config
 
+    @staticmethod
+    def _watched_context(monkeypatch, value):
+        """
+        Make every folder's context ``value``, and return the list that gets an
+        entry each time a factory asks for one.
+        """
+        asked = []
+
+        class Context:
+            """The context of a folder, as runtime.path_context() returns it."""
+
+            def __call__(self):
+                asked.append(True)
+                return value
+
+            def why_none(self):
+                return None
+
+        monkeypatch.setattr(runtime, "path_context", lambda path=None: Context())
+        return asked
+
     @pytest.mark.parametrize(("options", "nsamples"), [({}, 10), ({"nsamples": 4}, 4)])
     def test_keyword_only_var_keyword_and_zero_arg_factories(
         self, monkeypatch, restore_registry, options, nsamples
@@ -496,13 +517,7 @@ class TestExportStrategiesFactoryCalling:
     def test_only_a_ctx_factory_asks_for_the_context(self, monkeypatch, restore_registry):
         # Only this test's factories: another registered one may declare ctx
         Strategy._registry.clear()
-        asked = []
-
-        def strategy_context():
-            asked.append(True)
-            return "bench"
-
-        monkeypatch.setattr(runtime, "strategy_context", strategy_context)
+        asked = self._watched_context(monkeypatch, "bench")
 
         @Strategy.register("fix_export_without_ctx")
         def without_ctx(nsamples, rng, options):
@@ -541,8 +556,7 @@ class TestExportStrategiesFactoryCalling:
         # Only this test's factories: another registered one may declare ctx
         Strategy._registry.clear()
         self._own_session(monkeypatch)
-        asked = []
-        monkeypatch.setattr(runtime, "strategy_context", lambda: asked.append(True))
+        asked = self._watched_context(monkeypatch, None)
         called = []
 
         @Strategy.register("fix_export_burst")

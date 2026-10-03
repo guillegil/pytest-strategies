@@ -1,7 +1,8 @@
 """
 The testbench context of a folder: the ``pytest_strategies_context`` implementations
-a folder sees, the order the plugin asks them in, and the store that calls each one
-at most once per session.
+a folder sees, the order the plugin asks them in, the store that calls each one at
+most once per session, and the ``conftest.py`` files a folder would see that pytest
+has not loaded (:func:`unloaded_conftests`, for ``export_strategies()``).
 
 pluggy calls a hook's implementations by registration order, last registered first,
 and pytest registers a ``conftest.py`` when it loads it: the rootdir's and those of
@@ -18,7 +19,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from pathlib import PurePath
+from pathlib import Path, PurePath
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, cast
 
@@ -118,6 +119,71 @@ def visible_from(config: Any, path: str | os.PathLike[str]) -> list[HookImpl]:
     """
     folder = folder_of(path)
     return [impl for impl in _hookimpls(config) if not is_conftest(impl) or _sees(folder, impl)]
+
+
+def below(path: str | os.PathLike[str], rootpath: str | os.PathLike[str]) -> tuple[str, ...] | None:
+    """
+    Return the names of the folders from the rootdir down to ``path`` (a folder),
+    as it is spelled or by its real path (a rootdir or a folder reached through a
+    link); ``()`` for the rootdir itself, and None for a folder outside it.
+    """
+    for inner, root in (
+        (os.path.abspath(path), os.path.abspath(rootpath)),
+        (os.path.realpath(path), os.path.realpath(rootpath)),
+    ):
+        try:
+            relative = os.path.relpath(inner, root)
+        except ValueError:
+            # Another drive on Windows
+            continue
+        if relative == os.curdir:
+            return ()
+        if relative != os.pardir and not relative.startswith(os.pardir + os.sep):
+            return PurePath(relative).parts
+    return None
+
+
+def unloaded_conftests(config: Any, path: str | os.PathLike[str]) -> list[str]:
+    """
+    Return the ``conftest.py`` files that pytest loads before it collects a test in
+    the folder of ``path`` (a file, or a folder) and that it has not loaded in this
+    session, from the rootdir down: those of the rootdir, of that folder and of
+    each folder between them, that pytest considers (none above ``--confcutdir``,
+    none under ``--noconftest``) and that no folder the session collected made it
+    load. The folder's context, as a test there would get it, may come from one of
+    them, so it cannot be known.
+
+    A folder outside the rootdir has none, and so does a config without a plugin
+    manager (a unit test's stand-in).
+    """
+    manager = getattr(config, "pluginmanager", None)
+    rootpath = getattr(config, "rootpath", None)
+    noconftest = getattr(getattr(config, "option", None), "noconftest", False)
+    if manager is None or rootpath is None or noconftest:
+        return []
+    parts = below(folder_of(path), rootpath)
+    if parts is None:
+        return []
+    loaded = {
+        os.path.normcase(os.path.realpath(name))
+        for name, plugin in manager.list_name_plugin()
+        if plugin is not None and name.endswith("conftest.py")
+    }
+    # pytest's own rule (private API): no conftest.py in a folder above the confcutdir
+    considered = getattr(manager, "_is_in_confcutdir", None)
+    missing = []
+    folder = Path(rootpath)
+    for part in (None, *parts):
+        if part is not None:
+            folder = folder / part
+        conftest = folder / "conftest.py"
+        if (
+            (considered is None or considered(folder))
+            and conftest.is_file()
+            and os.path.normcase(os.path.realpath(conftest)) not in loaded
+        ):
+            missing.append(str(conftest))
+    return missing
 
 
 def _hookimpls(config: Any) -> list[HookImpl]:

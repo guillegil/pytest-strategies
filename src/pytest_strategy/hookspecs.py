@@ -54,10 +54,12 @@ def pytest_strategies_context(config: pytest.Config) -> Any:
     runs around the others, and can change their answer.
 
     A factory registered in one folder and used by a test in another gets the
-    context of the test's folder. Tests and fixtures get the same object: the
-    ``strategies_ctx`` session fixture gives the context of the tests that use
-    it (which must share one), and ``pytest_strategy.get_context(config, path)``
-    the context of a folder, for the fixtures of that folder's ``conftest.py``.
+    context of the test's folder; ``export_strategies()``, which has no test, gives
+    it the context of the folder it is registered in. Tests and fixtures get the
+    same object: the ``strategies_ctx`` session fixture gives the context of the
+    tests that use it (which must share one), and
+    ``pytest_strategy.get_context(config, path)`` the context of a folder, for the
+    fixtures of that folder's ``conftest.py``.
 
     Each implementation is called at most once per session, the first time a
     folder that needs it asks, and only for a factory with a ``ctx`` parameter,
