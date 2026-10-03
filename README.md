@@ -479,7 +479,7 @@ Tests use the strategy as usual, with `@strategy("esm_rw")`. With two Esm channe
 - If an implementation raises, each test module that uses a factory with `ctx` in a folder that consults it fails collection with `Strategy factory '<name>' has a 'ctx' parameter, but the pytest_strategies_context hook raised <error>`. `pytest.fail()` in the hook is reported as it is. The hook can also call `pytest.skip(..., allow_module_level=True)` to skip those modules.
 - When a factory fails with `ctx` set to `None` while a `conftest.py` in another folder implements the hook, the error adds which folders implement it, so that the hook can be moved to a common parent `conftest.py`.
 - Random draws in the hook come from a stream of their own, derived from the seed and started anew for each implementation, so they are reproduced by `--rng-seed`, do not depend on which tests run, and do not change any test's vectors.
-- Under pytest-xdist every worker calls the hook, so it must return the same configuration in each, or the workers collect different tests.
+- Under pytest-xdist every worker calls the hook, so it must return the same configuration in each: a run whose workers built different contexts fails (see [pytest-xdist](#pytest-xdist) below).
 - `export_strategies()` passes the context of the rootdir.
 
 The hook only has to describe the configuration the vectors depend on. Your testbench fixture can build on the same object instead of parsing the configuration a second time:
@@ -519,10 +519,10 @@ pytest-strategies: context 976bcfdf
 pytest-strategies: contexts conftest.py 976bcfdf, tests/tb_a/conftest.py b1e1b237
 ```
 
-- The fingerprint is the first 8 hex characters of the SHA-256 of a canonical encoding of the object. It is computed when the hook returns the object, before any factory or fixture receives it, so a factory or a test that changes the object later changes no fingerprint. Nothing is printed when no factory with `ctx` ran, or when every context is `None`; the line appears with `-q` and `--collect-only` too. Under pytest-xdist the controller collects no tests, so it does not print the line.
+- The fingerprint is the first 8 hex characters of the SHA-256 of a canonical encoding of the object. It is computed when the hook returns the object, before any factory or fixture receives it, so a factory or a test that changes the object later changes no fingerprint. Nothing is printed when no factory with `ctx` ran, or when every context is `None`; the line appears with `-q` and `--collect-only` too. Under pytest-xdist the controller collects no tests, so it prints the line the workers printed after their collection at the end of the run, in its terminal summary.
 - The encoding depends only on what the object holds. Sets are sorted, so the hash order of `PYTHONHASHSEED` does not matter. Paths inside the rootdir are written relative to it, so two checkouts agree. A pydantic v2 model is written as its `model_dump()`, which leaves out `Field(exclude=True)` fields and keeps a `SecretStr` masked. Dataclasses and NamedTuples are written field by field, mappings as their pairs in order, floats, dates, `Decimal` and `UUID` as text, and classes and Enum members by their qualified names, never their modules. Anything else is written as its repr, without memory addresses. An object that keeps the default repr (`<Plain object at 0x...>`) is in the fingerprint by its type alone, and the line says so: `context 976bcfdf (partial: Plain)`. An object that cannot be encoded (its repr raises) gives `unavailable`, and never fails the run.
 - Leave volatile values out of the context (temporary paths, process IDs, times), or mark them `Field(exclude=True)` in a pydantic model, so that the fingerprint stays the same from one run to the next.
-- When tests fail, the line that says how to reproduce the run ends with the contexts their factories received: `pytest-strategies: reproduce with --rng-seed=S (context 976bcfdf)`, or `(contexts conftest.py 976bcfdf, tests/tb_a/conftest.py b1e1b237)`.
+- When tests fail, the line that says how to reproduce the run ends with the contexts their factories received: `pytest-strategies: reproduce with --rng-seed=S (context 976bcfdf)`, or `(contexts conftest.py 976bcfdf, tests/tb_a/conftest.py b1e1b237)`. Under pytest-xdist the workers send them to the controller.
 - `-v` adds a "Contexts" block to the Strategy Summary, with each context's label, fingerprint and number of tests whose factories received it. `item.stash[VECTOR_KEY].context` holds the fingerprint for the rows of a factory that received `ctx`, and `None` for the others.
 
 ## 🔌 Fixture Integration
@@ -623,7 +623,25 @@ Values that a strategy file draws when it is imported are reproduced by the seed
 
 Keep the same rootdir, because the test's path relative to the rootdir is part of the stream. pytest uses the directory of your ini file (such as `pytest.ini`) as the rootdir when there is one.
 
-**pytest-xdist:** runs with `-n` work with or without `--rng-seed`. The controller sends its seed to the workers, so they all generate the same tests.
+### pytest-xdist
+
+Runs with `-n` work with or without `--rng-seed`. The controller sends its seed to the workers, so they all generate the same tests, as long as the strategy factories and the context hook give the same result in every worker.
+
+Test IDs name the rows instead of showing their values, so pytest-xdist no longer notices workers that generate different values under the same IDs. The plugin checks it: when its session ends, each worker sends the fingerprint of each context it computed (by its label) and a digest of each strategy's values (the first 8 hex characters of the SHA-256 of its tests' node IDs and values, taken after the collection). When two workers differ on a context or a strategy, the controller names them in red at the end of the run, before the line that says how to reproduce it, and a run that would have passed (or collected no tests) fails with exit code 4:
+
+```text
+pytest-strategies: the xdist workers generated different vectors:
+  context tests/tb_a/conftest.py: gw0 1a2b3c4d, gw1 9f8e7d6c
+  values of strategy dma_burst: gw0 5e6f7a8b, gw1 0c1d2e3f
+Make pytest_strategies_context and the strategy factories give the same result in every worker:
+no temporary paths, process IDs, times, unseeded random values or lists built from sets
+(leave them out, or use pydantic Field(exclude=True) in a context).
+```
+
+- Typical causes are a factory that draws from Python's global `random` (draw from `rng` or `RNG.generator()`), or that builds a list from a set of strings, whose order follows each worker's `PYTHONHASHSEED` (sort it), and a context holding a temporary path, a process ID or the time.
+- A context differs even when the values agree, because tests can read it through `strategies_ctx`. The fingerprint is taken when the hook returns, so a test that changes the object on one worker does not count.
+- A context or a strategy that only one worker computed is not compared: a test that runs on one worker only can compute its folder's context through `strategies_ctx` or `get_context()`. A worker that crashed sent nothing and is left out.
+- When the values change the test IDs (a `Series` built from the context), pytest-xdist itself stops with "Different tests were collected", and the plugin's message follows it, naming the cause.
 
 ## 📝 License
 

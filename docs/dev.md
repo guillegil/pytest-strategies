@@ -662,7 +662,9 @@ strategies of its tests may not have been resolved). It is not checked under
   when a `--strategy-constraint-off` item matched no constraint in a run of the
   whole suite
 - `pytest_collection_finish` - Handles `--list-strategies`, and prints the
-  unmatched `--strategy-constraint-off` items of a narrowed run
+  unmatched `--strategy-constraint-off` items of a narrowed run; on a
+  pytest-xdist worker, notes the digest of each strategy's values and the
+  contexts the collection computed, for the controller
 - `pytest_report_header` - Prints the seed, and the `--strategy-constraint-off`
   items when given
 - `pytest_report_collectionfinish` - Prints the fingerprints of the contexts the
@@ -672,7 +674,16 @@ strategies of its tests may not have been resolved). It is not checked under
   `pytest-strategies: reproduce with --rng-seed=S`, followed by the contexts the
   failed tests' factories received; with `-v`, a Strategy Summary (tests and the
   rows of each kind per strategy, and where `nsamples` came from) and the
-  Contexts block (label, fingerprint and tests per context)
+  Contexts block (label, fingerprint and tests per context). On the
+  pytest-xdist controller it first prints the context line the workers printed
+  after their collection, and in red what they generated differently
+- `pytest_sessionfinish` - Maps the failed tests to the contexts their
+  factories received. A pytest-xdist worker sends its `-v` summary and its part
+  of the check that the workers generated the same vectors; the controller
+  compares the workers' parts and turns exit status 0 or 5 into 4 when they
+  differ
+- `pytest_testnodedown` - (pytest-xdist only) keeps what each worker sent, by
+  worker ID; a worker that crashed sent nothing
 
 **Strategy files:** a strategy file is named `strategies.py`, `strategy.py`,
 `*_strategies.py` or `*_strategy.py` and contains a registration decorator
@@ -793,6 +804,34 @@ maps them to the labels and fingerprints their factories received
 (`plugin._failed_contexts()`, through the test's node ID without parameters,
 `_test_key()`), which end the reproduce line. `_summary()` carries the
 `Contexts` lines of the `-v` summary, so a pytest-xdist worker sends them with it.
+
+Under pytest-xdist the plugin checks that every worker generated the same
+vectors (D9), because names in the test IDs no longer make xdist notice workers
+that generated different values. When its collection finishes, before any test
+can change a value, a worker notes the digest of each strategy's values
+(`plugin._value_digests()`: the first 8 hex characters of the SHA-256 of the
+`repr((nodeid, reprs))` of each of its rows, in collection order, the reprs
+being `_ids._value_repr`'s, which orders sets; `unavailable` when a repr
+raises) and the contexts the collection computed, as the line printed after the
+collection shows them (`SessionState.value_digests`, `collection_contexts`).
+When its session finishes, it writes `workeroutput["pytest_strategies_check"]`
+(`plugin._check()`): `contexts`, each label of `ContextStore.scopes()` with its
+fingerprint, `none` or `error: <type>`, and `values`, the digests; strings only,
+because execnet carries builtin types. Its summary also carries the collection's
+contexts and the contexts its failed tests received. The controller keeps each
+worker's summary and check by worker ID in `pytest_testnodedown`
+(`SessionState.worker_summaries`, `worker_checks`), and in
+`pytest_sessionfinish` compares each label and each strategy among the workers
+that have it (`plugin._differences()`, workers in the order of their numbers): a
+key only one worker has is not compared, since a test that runs on one worker can
+compute its folder's context through `strategies_ctx`. When some differ, it sets
+the exit status to 4 if it was 0 or 5, and `pytest_terminal_summary` prints the
+differences in red (`_DIFFERENT_VECTORS`, the lines, `_DIFFERENT_VECTORS_HINT`)
+before the reproduce line. That runs after pytest-xdist's own "Different tests
+were collected" error, which aborts the run before any test is scheduled. The
+controller's context line merges the workers' collection contexts, and its
+reproduce line the contexts the failed tests received, each label taking the
+first worker's value in worker order.
 
 ---
 
@@ -1246,7 +1285,10 @@ the seed, the ambient generator's state, the installed generator and the
 strategy registry are restored to what they were when it began.
 
 **pytest-xdist:** the controller sends its seed to the workers, so `-n` works
-with or without `--rng-seed` and every worker generates the same tests.
+with or without `--rng-seed` and every worker generates the same tests. A run
+whose workers computed different contexts or generated different values under
+the same IDs fails with exit code 4 (see the xdist check under the context hook
+above).
 
 **Test bodies and fixtures:** each phase of a test (setup, call and teardown)
 runs on its body stream and each fixture's setup on its fixture stream, so a

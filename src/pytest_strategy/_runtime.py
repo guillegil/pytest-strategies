@@ -105,6 +105,23 @@ class SessionState:
         # On the pytest-xdist controller, which collects nothing: the -v summary
         # of the first worker that finished (every worker collects all the tests)
         self.worker_summary: dict[str, Any] | None = None
+        # On the controller: what each worker sent when its session finished, by
+        # worker ID (``gw0``): its summary, with the contexts its collection computed
+        # and those its failed tests received, and its part of the check that the
+        # workers generated the same vectors ({"contexts": {label: fingerprint},
+        # "values": {strategy: digest}}). A worker that crashed sent nothing.
+        self.worker_summaries: dict[str, dict[str, Any]] = {}
+        self.worker_checks: dict[str, dict[str, dict[str, str]]] = {}
+        # On the controller: the lines naming the contexts and the strategies whose
+        # fingerprints or digests differ between workers, computed when the session
+        # finishes
+        self.worker_differences: list[str] = []
+        # On a pytest-xdist worker, computed when the collection finishes, before any
+        # test runs: the digest of each strategy's values (strategy -> digest), and
+        # the contexts the collection computed (label -> fingerprint), as the line
+        # printed after the collection shows them
+        self.value_digests: dict[str, str] = {}
+        self.collection_contexts: dict[str, str] = {}
         # --vector-name/--vector-index bookkeeping: whether a Parameter strategy
         # was resolved with the filter, whether any of them had the vector, and
         # the directed vector names of those that did not (strategy -> names).

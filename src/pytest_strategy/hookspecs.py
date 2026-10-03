@@ -68,15 +68,16 @@ def pytest_strategies_context(config: pytest.Config) -> Any:
     implementation come from a stream derived from the seed, started anew for
     each implementation, and do not change any test's vectors. Under
     pytest-xdist every worker calls the implementations it needs, and the results
-    must be the same in all of them.
+    must be the same in all of them: when two workers' fingerprints of one
+    context (below) differ, the run fails with exit code 4, naming the context.
 
     When an implementation returns an object, the plugin takes its fingerprint,
     a hash of what the object holds (sets sorted, paths inside the rootdir
     relative to it, a pydantic model's ``Field(exclude=True)`` fields left out),
-    and prints it after the collection (``pytest-strategies: context 976bcfdf``),
-    at the end of the reproduce line of a failed run, and in
-    ``VectorInfo.context``, so two runs can tell whether they received the same
-    context. Keep volatile values (temporary paths, process IDs, times) out of
+    and prints it after the collection (``pytest-strategies: context 976bcfdf``;
+    under pytest-xdist, at the end of the run), at the end of the reproduce line
+    of a failed run, and in ``VectorInfo.context``, so two runs can tell whether
+    they received the same context. Keep volatile values (temporary paths, process IDs, times) out of
     the object, or exclude them, so that it stays the same from run to run.
 
     An exception raised by an implementation fails the collection of each module

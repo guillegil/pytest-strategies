@@ -257,7 +257,9 @@ def esm_rw(nsamples, ctx):
   folder's `conftest.py`. `strategies_ctx` fails each test that uses it when
   those tests are in folders with different contexts.
 - Under pytest-xdist every worker calls it, so it must return the same data in
-  each.
+  each: a run whose workers built different contexts, or whose factories drew
+  different values (global `random`, `list()` of a set), fails with exit code 4
+  and names the context or strategy.
 - After the collection the plugin prints `pytest-strategies: context 976bcfdf`,
   a hash of the context taken when the hook returned it (sets sorted, rootdir
   paths relative, pydantic `Field(exclude=True)` left out), so two runs can tell

@@ -139,6 +139,13 @@ jobs:
       - name: Examples on two xdist workers, with a seed
         run: python -m pytest examples/*.py -n 2 --rng-seed=1
 
+      # The examples' runs above exit with code 4 if their two workers generated
+      # different values under the same test IDs. These projects check that on two
+      # workers: a context, a list built from a set under two hash seeds, the global
+      # random, Series values that change the IDs, and workers that agree
+      - name: Workers that generate different vectors fail the run (-n 2)
+        run: python -m pytest tests/integration/test_xdist_check_integration.py -v
+
       # Informational: timings depend on the runner, so the step prints them and never
       # fails the job. Compare versions by running the script on one machine
       - name: Benchmark (informational)

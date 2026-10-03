@@ -16,6 +16,7 @@ import difflib
 import fnmatch
 import functools
 import glob
+import hashlib
 import importlib.abc
 import importlib.machinery
 import importlib.util
@@ -24,7 +25,7 @@ import os
 import re
 import sys
 import traceback
-from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from types import ModuleType
 from typing import Any, get_args
@@ -35,6 +36,8 @@ from _pytest.pathlib import ImportPathMismatchError, import_path
 from pytest import Config, Session
 
 from ._context import Answer
+from ._fingerprint import UNAVAILABLE
+from ._ids import _value_repr
 from ._options import VectorMode, constraint_off_item, parse_constraint_off
 from ._registry import (
     STRATEGY_FILE_PATTERNS,
@@ -529,9 +532,19 @@ class PytestStrategyPlugin:
 
         A pytest-xdist worker's output is not shown: the worker sends the lines
         with its -v summary, and the controller prints them in its terminal summary.
+        The worker also notes the digest of each strategy's values, before any test
+        can change a value, and the contexts the collection computed, for the
+        controller (see ``pytest_sessionfinish``).
         """
         state = runtime.current
-        if state is None or getattr(session.config, "workerinput", None) is not None:
+        if state is None:
+            return
+        if getattr(session.config, "workerinput", None) is not None:
+            state.value_digests = _value_digests(session.items)
+            state.collection_contexts = {
+                label: _fingerprint_text(answer)
+                for label, answer in _computed_contexts(state).items()
+            }
             return
         for line in state.unmatched_constraints_off:
             self._write_line(session.config, line, red=True)
@@ -824,12 +837,28 @@ class PytestStrategyPlugin:
         """
         Say how to reproduce a failed run, with the contexts the failed tests'
         factories received, and summarize the strategies and the contexts with -v.
+
+        On the pytest-xdist controller, which collects nothing, first print what the
+        workers printed after their collection (the contexts, the unmatched
+        --strategy-constraint-off items), and then, in red, what the workers
+        generated differently (see ``pytest_sessionfinish``).
         """
         state = runtime.current
         summary = state.worker_summary if state is not None else None
+        if state is not None and state.worker_summaries:
+            # The line the workers printed after their collection
+            collected = _merged(
+                s.get("collection_contexts", {}) for s in _by_worker(state.worker_summaries)
+            )
+            text = _contexts_text(collected)
+            if text is not None:
+                terminalreporter.write_line(f"pytest-strategies: {text}")
         # Unmatched --strategy-constraint-off items a pytest-xdist worker reported
         for line in (summary or {}).get("unmatched_constraints_off", []):
             terminalreporter.write_line(f"pytest-strategies: {line}", red=True)
+        if state is not None and state.worker_differences:
+            for line in [_DIFFERENT_VECTORS, *state.worker_differences, *_DIFFERENT_VECTORS_HINT]:
+                terminalreporter.write_line(line, red=True)
         failed = exitstatus in (pytest.ExitCode.TESTS_FAILED, pytest.ExitCode.INTERRUPTED)
         distributed = getattr(config.option, "dist", "no") != "no"
         if failed and state is not None and (state.resolutions or distributed):
@@ -864,28 +893,63 @@ class PytestStrategyPlugin:
     @pytest.hookimpl
     def pytest_sessionfinish(self, session: Session) -> None:
         """
-        Note the contexts the failed tests' strategy factories received, and on a
-        pytest-xdist worker send the -v summary to the controller.
+        Note the contexts the failed tests' strategy factories received.
+
+        A pytest-xdist worker sends the controller its -v summary and its part of the
+        check that every worker generated the same vectors: the fingerprint of each
+        context it computed, by label, and the digest of each strategy's values. The
+        controller compares them, and when two workers differ on a context or a
+        strategy, the run fails with exit code 4 if it would have passed (or
+        collected nothing), and the terminal summary names them. Every worker
+        collects every test, so their contexts and values must be the same; names
+        in the test IDs no longer make pytest-xdist notice different values.
         """
         state = runtime.current
-        if state is not None and state.failed_tests:
+        if state is not None and state.worker_summaries:
+            # The controller: its failed tests ran in the workers
+            failed = _merged(
+                s.get("failed_contexts", {}) for s in _by_worker(state.worker_summaries)
+            )
+            state.failed_contexts = dict(sorted(failed.items()))
+        elif state is not None and state.failed_tests:
             state.failed_contexts = _failed_contexts(state, session.items)
         workeroutput = getattr(session.config, "workeroutput", None)
         if workeroutput is not None:
             workeroutput["pytest_strategies_summary"] = _summary(state)
+            workeroutput[_CHECK] = _check(state)
+        if state is None:
+            return
+        state.worker_differences = _differences(state.worker_checks)
+        if state.worker_differences and session.exitstatus in (
+            pytest.ExitCode.OK,
+            pytest.ExitCode.NO_TESTS_COLLECTED,
+        ):
+            session.exitstatus = pytest.ExitCode.USAGE_ERROR
 
     @pytest.hookimpl(optionalhook=True)
     def pytest_testnodedown(self, node: Any, error: Any) -> None:
         """
-        Keep the -v summary of the first pytest-xdist worker that finished.
+        Keep what a pytest-xdist worker sent when its session finished, by worker ID:
+        its summary (the -v summary shown is the first worker's that finished) and
+        its part of the check that the workers generated the same vectors. A worker
+        that crashed sent nothing.
 
         The controller collects nothing, and every worker collects all the tests.
         Optional hook: only called when pytest-xdist is installed.
         """
         state = runtime.current
-        summary = getattr(node, "workeroutput", {}).get("pytest_strategies_summary")
-        if state is not None and state.worker_summary is None and summary is not None:
-            state.worker_summary = summary
+        output = getattr(node, "workeroutput", None)
+        if state is None or not isinstance(output, dict):
+            return
+        worker = str(node.gateway.id)
+        summary = output.get("pytest_strategies_summary")
+        if isinstance(summary, dict):
+            if state.worker_summary is None:
+                state.worker_summary = summary
+            state.worker_summaries[worker] = summary
+        check = output.get(_CHECK)
+        if isinstance(check, dict):
+            state.worker_checks[worker] = check
 
     # ==== HELPER METHODS ====
 
@@ -1628,7 +1692,11 @@ def _phase_stream(item: pytest.Item, phase: str) -> contextlib.AbstractContextMa
 
 
 def _summary(state: Any) -> dict[str, Any]:
-    """Return what the -v Strategy Summary shows, in types pytest-xdist can send."""
+    """
+    Return what the -v Strategy Summary shows, in types pytest-xdist can send, and
+    what the controller prints for a worker: the contexts its collection computed
+    and those its failed tests' factories received (label -> fingerprint).
+    """
     return {
         "count": _registration_count(),
         "lines": _summary_lines(state.resolutions) if state is not None else [],
@@ -1637,6 +1705,8 @@ def _summary(state: Any) -> dict[str, Any]:
             list(state.unmatched_constraints_off) if state is not None else []
         ),
         "contexts": _context_lines(state) if state is not None else [],
+        "collection_contexts": dict(state.collection_contexts) if state is not None else {},
+        "failed_contexts": dict(state.failed_contexts) if state is not None else {},
     }
 
 
@@ -1715,6 +1785,114 @@ def _failed_contexts(state: Any, items: Sequence[pytest.Item]) -> dict[str, str]
         if fingerprint is not None and label is not None:
             found[label] = fingerprint
     return dict(sorted(found.items()))
+
+
+# What a pytest-xdist worker sends the controller for the check that every worker
+# generated the same vectors (workeroutput, strings only)
+_CHECK = "pytest_strategies_check"
+
+# The message of that check, before and after the lines that name what differs
+_DIFFERENT_VECTORS = "pytest-strategies: the xdist workers generated different vectors:"
+_DIFFERENT_VECTORS_HINT = (
+    "Make pytest_strategies_context and the strategy factories give the same result "
+    "in every worker:",
+    "no temporary paths, process IDs, times, unseeded random values or lists built from sets",
+    "(leave them out, or use pydantic Field(exclude=True) in a context).",
+)
+
+
+# The types whose repr is the stable repr (``_ids._value_repr``) as it is
+_PLAIN = frozenset({int, float, str, bytes, bool, type(None)})
+
+
+def _value_digests(items: Sequence[pytest.Item]) -> dict[str, str]:
+    """
+    Return the digest of each strategy's values, by strategy name, sorted: the
+    first 8 hex characters of the SHA-256 of its items' node IDs and the stable
+    reprs of their values (``_ids._value_repr``, which orders sets), in collection
+    order. A strategy with a value whose repr raises gets ``unavailable``.
+    """
+    hashes: dict[str, Any] = {}
+    for item in items:
+        for info in item.stash.get(VECTORS_KEY, ()):
+            digest = hashes.get(info.strategy)
+            if digest is None:
+                digest = hashes[info.strategy] = hashlib.sha256()
+            elif isinstance(digest, str):
+                continue
+            try:
+                reprs = [repr(v) if type(v) in _PLAIN else _value_repr(v) for v in info.values]
+            except Exception:
+                hashes[info.strategy] = UNAVAILABLE
+                continue
+            # The repr of a tuple of strings tells where each one ends
+            digest.update(repr((item.nodeid, reprs)).encode("utf-8", "surrogatepass") + b"\n")
+    return {
+        name: digest if isinstance(digest, str) else digest.hexdigest()[:8]
+        for name, digest in sorted(hashes.items())
+    }
+
+
+def _check(state: Any) -> dict[str, dict[str, str]]:
+    """
+    Return a pytest-xdist worker's part of the check that the workers generated the
+    same vectors: ``contexts``, each context the session computed by its label (its
+    fingerprint, ``none`` where nothing answered, or ``error: <type>`` for an
+    implementation that raised), and ``values``, each strategy's digest.
+    """
+    if state is None:
+        return {"contexts": {}, "values": {}}
+    contexts = {}
+    for label, answer in state.contexts.scopes().items():
+        if answer.error is not None:
+            contexts[label] = f"error: {type(answer.error).__name__}"
+        else:
+            contexts[label] = answer.fingerprint if answer.fingerprint is not None else "none"
+    return {"contexts": contexts, "values": dict(state.value_digests)}
+
+
+def _worker_order(worker: str) -> tuple[str, int]:
+    """Sort pytest-xdist worker IDs by their number: gw2 before gw10."""
+    match = re.fullmatch(r"(.*?)(\d+)", worker)
+    return (match.group(1), int(match.group(2))) if match else (worker, -1)
+
+
+def _by_worker(found: Mapping[str, Any]) -> list[Any]:
+    """Return the values of a mapping by pytest-xdist worker ID, in worker order."""
+    return [found[worker] for worker in sorted(found, key=_worker_order)]
+
+
+def _merged(mappings: Iterable[Mapping[str, str]]) -> dict[str, str]:
+    """Merge mappings: a key keeps the value of the first mapping that has it."""
+    merged: dict[str, str] = {}
+    for mapping in mappings:
+        for key, value in mapping.items():
+            merged.setdefault(key, value)
+    return merged
+
+
+def _differences(checks: Mapping[str, Mapping[str, Mapping[str, str]]]) -> list[str]:
+    """
+    Return a line for each context (by label) and each strategy whose fingerprint or
+    digest differs between the pytest-xdist workers that have it, with each one's:
+    ``  context tests/a/conftest.py: gw0 1a2b3c4d, gw1 9f8e7d6c``, ``  values of
+    strategy burst: gw0 5e6f7a8b, gw1 0c1d2e3f``. A context or a strategy only one
+    worker has is not compared: a test that runs on one worker only may compute a
+    context through ``strategies_ctx``.
+
+    Args:
+        checks: What each worker sent (``_check``), by worker ID
+    """
+    workers = sorted(checks, key=_worker_order)
+    lines = []
+    for kind, title in (("contexts", "context"), ("values", "values of strategy")):
+        found = {worker: checks[worker].get(kind) or {} for worker in workers}
+        for key in sorted({key for values in found.values() for key in values}):
+            seen = [(worker, found[worker][key]) for worker in workers if key in found[worker]]
+            if len({value for _, value in seen}) > 1:
+                each = ", ".join(f"{worker} {value}" for worker, value in seen)
+                lines.append(f"  {title} {key}: {each}")
+    return lines
 
 
 def _registration_count() -> int:

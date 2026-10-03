@@ -462,7 +462,8 @@ def pytest_strategies_context(config):
   taken when the hook returned the object: `pytest-strategies: context 976bcfdf`,
   or with several, `pytest-strategies: contexts conftest.py 976bcfdf,
   tests/tb_a/conftest.py b1e1b237`. Nothing is printed when no context was
-  computed or every one is `None`; the pytest-xdist controller does not print it.
+  computed or every one is `None`; under pytest-xdist the controller prints the
+  workers' line at the end of the run.
   The encoding does not depend on `PYTHONHASHSEED` (sets are sorted), the checkout
   folder (rootdir paths are relative) or `--import-mode` (types by qualified name).
   A pydantic v2 model is its `model_dump()`: `Field(exclude=True)` fields are left
@@ -477,7 +478,8 @@ def pytest_strategies_context(config):
   factory that received `ctx` (else `None`). A factory or test that changes the
   object changes no fingerprint.
 - Under pytest-xdist every worker calls it; it must return the same configuration in
-  each, or xdist reports "Different tests were collected".
+  each. A run whose workers computed different fingerprints for one context fails
+  (see section 14).
 - Use it for data the rows depend on; the live objects (a testbench connection) stay
   fixtures, built on the same object:
 
@@ -572,7 +574,24 @@ defined at module level. IDs look like `x=1,y=2`.
   from, so compare the `rootdir:` line of both runs. Values for a seed may differ between major versions; check the
   CHANGELOG before comparing with a 3.x run (4.0.0 changed the random rows).
 - pytest-xdist works with or without `--rng-seed`: the controller sends its seed to
-  the workers.
+  the workers. Each worker sends back the fingerprint of each context it computed
+  and a digest of each strategy's node IDs and values; when two workers differ,
+  the run fails with exit code 4 (when it would have passed or collected nothing)
+  and prints, before the reproduce line:
+
+  ```text
+  pytest-strategies: the xdist workers generated different vectors:
+    context tests/tb_a/conftest.py: gw0 1a2b3c4d, gw1 9f8e7d6c
+    values of strategy dma_burst: gw0 5e6f7a8b, gw1 0c1d2e3f
+  ```
+
+  Names in the test IDs keep xdist from noticing different values itself. The
+  causes: a factory drawing from Python's global `random` (use `rng`), a list
+  built from a set of strings (sort it: its order follows `PYTHONHASHSEED`), a
+  context holding temporary paths, process IDs or times. A context or strategy
+  only one worker computed is not compared. When the values change the IDs (a
+  `Series` from the context), xdist's "Different tests were collected" comes
+  first.
 
 ## 15. Errors and what to do
 
@@ -586,6 +605,7 @@ defined at module level. IDs look like `x=1,y=2`.
 | `Two constraints are named 'x'` | Two functions with one name in a constraint list. Pass a dict of names to functions. |
 | `No valid value found after N attempts` | A number predicate rejected every draw. Narrow the range. |
 | `Strategy 'x' (test_y): something drew from the plugin's generator while the rows were generated` warning | A constraint calls `RNG.*`, or an RNG type draws from a generator kept from the factory (`rng`). Draw only inside an RNG type's `generate()`, from `RNG.generator()` or the `RNG.*` helpers. Under `filterwarnings = error` it fails collection as `Error generating samples for strategy 'x': ...`. |
+| `the xdist workers generated different vectors` (exit code 4) | Two pytest-xdist workers built different contexts or generated different values under the same IDs. Remove what differs between processes: global `random` draws in factories (use `rng`), lists built from sets (sort them), temporary paths, process IDs or times in the context (or pydantic `Field(exclude=True)`). |
 | `Series combination (...) skipped` warning | One combination's random arguments failed the constraints `max_retries` times. Raise `max_retries` or relax the constraint. |
 | `... would generate N rows ..., more than the limit of ...` | Too many exhaustive combinations. Reduce them or raise `max_exhaustive` / `strategies_max_exhaustive`. |
 | `Directed vector 'x' has N values, expected M` | A directed or test vector does not have one value per argument. |
