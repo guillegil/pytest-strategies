@@ -149,13 +149,14 @@ def test_export_strategies_handles_a_skipped_strategy():
         def _factory(nsamples):
             return channel_param([])
 
-        data = json.loads(Strategy.export_strategies())["skip_if_empty_export"]
+        exported = json.loads(Strategy.export_strategies())["strategies"]
     finally:
         Strategy._registry.clear()
         Strategy._registry.update(registry)
 
+    [data] = [e["parameter"] for e in exported if e["name"] == "skip_if_empty_export"]
     assert data["skip_reason"] == REASON
-    assert data["arguments"][0]["rng_details"]["skip_if_empty"] == REASON
+    assert data["arguments"][0]["rng"]["skip_if_empty"] == REASON
 
 
 def test_index_filter_without_directed_vectors_says_so():

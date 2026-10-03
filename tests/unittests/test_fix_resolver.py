@@ -417,6 +417,12 @@ class TestResolverFactoryCalling:
         assert "does not provide" not in message
 
 
+def _exported():
+    """The entries of export_strategies(), by strategy name (one registration each)."""
+    entries = json.loads(Strategy.export_strategies())["strategies"]
+    return {entry["name"]: entry for entry in entries}
+
+
 class TestExportStrategiesFactoryCalling:
     """export_strategies calls factories as the resolver does, with the session's options."""
 
@@ -447,6 +453,9 @@ class TestExportStrategiesFactoryCalling:
                 asked.append(True)
                 return value
 
+            def answer(self):
+                return SimpleNamespace(fingerprint=None if value is None else "f1ngerpr")
+
             def why_none(self):
                 return None
 
@@ -473,13 +482,13 @@ class TestExportStrategiesFactoryCalling:
         def noargs():
             return Parameter(TestArg("x", value=1), nsamples=1)
 
-        data = json.loads(Strategy.export_strategies())
+        data = _exported()
 
         # The session's count: --nsamples, or 10 without it (3.0 passed 1)
         assert received == [nsamples]
-        assert data["fix_export_kwonly"]["arguments"][0]["name"] == "x"
-        assert data["fix_export_varkw"]["arguments"][0]["name"] == "x"
-        assert data["fix_export_noargs"]["arguments"][0]["name"] == "x"
+        assert data["fix_export_kwonly"]["parameter"]["arguments"][0]["name"] == "x"
+        assert data["fix_export_varkw"]["parameter"]["arguments"][0]["name"] == "x"
+        assert data["fix_export_noargs"]["parameter"]["arguments"][0]["name"] == "x"
 
     def test_rng_and_options_factory(self, monkeypatch, restore_registry):
         config = self._own_session(monkeypatch, nsamples=4)
@@ -490,9 +499,9 @@ class TestExportStrategiesFactoryCalling:
             received.append((rng, options))
             return Parameter(TestArg("x", rng_type=RNGInteger(0, 9)))
 
-        data = json.loads(Strategy.export_strategies())
+        data = _exported()
 
-        assert data["fix_export_rng_options"]["arguments"][0]["name"] == "x"
+        assert data["fix_export_rng_options"]["parameter"]["arguments"][0]["name"] == "x"
         [(rng, options)] = received
         assert rng is RNG.generator()
         # The instance the session's collection gives the strategy
@@ -509,9 +518,9 @@ class TestExportStrategiesFactoryCalling:
             received.append((nsamples, options))
             return Parameter(TestArg("x", rng_type=RNGInteger(0, 9)))
 
-        data = json.loads(Strategy.export_strategies())
+        data = _exported()
 
-        assert "error" not in data["fix_export_no_session"]
+        assert "parameter" in data["fix_export_no_session"]
         assert received == [(10, StrategyOptions(strategy="fix_export_no_session"))]
 
     def test_only_a_ctx_factory_asks_for_the_context(self, monkeypatch, restore_registry):
@@ -523,9 +532,10 @@ class TestExportStrategiesFactoryCalling:
         def without_ctx(nsamples, rng, options):
             return Parameter(TestArg("x", rng_type=RNGInteger(0, 9)))
 
-        data = json.loads(Strategy.export_strategies())
+        data = _exported()
 
-        assert "error" not in data["fix_export_without_ctx"]
+        assert "parameter" in data["fix_export_without_ctx"]
+        assert data["fix_export_without_ctx"]["context"] is None
         assert asked == []
 
         received = []
@@ -535,9 +545,11 @@ class TestExportStrategiesFactoryCalling:
             received.append(ctx)
             return Parameter(TestArg("x", rng_type=RNGInteger(0, 9)))
 
-        data = json.loads(Strategy.export_strategies())
+        data = _exported()
 
-        assert "error" not in data["fix_export_with_ctx"]
+        assert "parameter" in data["fix_export_with_ctx"]
+        # The fingerprint of the context the factory received
+        assert data["fix_export_with_ctx"]["context"] == "f1ngerpr"
         assert received == ["bench"]
         assert asked == [True]
 
@@ -546,9 +558,9 @@ class TestExportStrategiesFactoryCalling:
         def broken(nsamples):
             raise RuntimeError("boom")
 
-        data = json.loads(Strategy.export_strategies())
+        data = _exported()
 
-        assert "RuntimeError: boom" in data["fix_export_broken"]["error"]
+        assert data["fix_export_broken"]["error"] == {"type": "RuntimeError", "message": "boom"}
 
     def test_rejected_signatures_are_recorded_without_calling_anything(
         self, monkeypatch, restore_registry
@@ -571,15 +583,18 @@ class TestExportStrategiesFactoryCalling:
         def rejected(a, ctx):
             called.append("rejected")
 
-        data = json.loads(Strategy.export_strategies())
+        data = _exported()
 
-        assert set(data["fix_export_burst"]) == {"error"}
-        assert "has a parameter 'n'" in data["fix_export_burst"]["error"]
-        assert "Did you mean 'nsamples'" in data["fix_export_burst"]["error"]
-        assert set(data["fix_export_reserved"]) == {"error"}
-        assert "'config', a name the plugin reserves" in data["fix_export_reserved"]["error"]
-        assert set(data["fix_export_rejected_ctx"]) == {"error"}
-        assert "has a parameter 'a'" in data["fix_export_rejected_ctx"]["error"]
+        errors = {
+            name: entry["error"]["message"] for name, entry in data.items() if "error" in entry
+        }
+        assert set(errors) == {"fix_export_burst", "fix_export_reserved", "fix_export_rejected_ctx"}
+        assert "has a parameter 'n'" in errors["fix_export_burst"]
+        assert "Did you mean 'nsamples'" in errors["fix_export_burst"]
+        assert "'config', a name the plugin reserves" in errors["fix_export_reserved"]
+        assert "has a parameter 'a'" in errors["fix_export_rejected_ctx"]
+        # Rejected before the factory or the context hook runs: no context either
+        assert {data[name]["context"] for name in errors} == {None}
         # Rejected before the factory or the context hook runs
         assert called == []
         assert asked == []

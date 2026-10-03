@@ -744,6 +744,22 @@ class RNGType(Generic[T]):
         """Return the Python type this RNG type generates"""
         raise NotImplementedError
 
+    def to_dict(self) -> dict[str, Any]:
+        """
+        Describe the RNG type as a JSON-ready dict, the ``rng`` of
+        ``TestArg.to_dict()``: ``{"type": <class qualname>, ...}``.
+
+        A built-in type adds its typed fields (``min`` and ``max``, ``choices``,
+        ``sequence`` and ``skip_if_empty``, ...; a predicate as a ``predicate``
+        flag). Any other class, a subclass of a built-in one included, adds
+        ``attributes``: its public instance attributes, each in the schema 1 value
+        encoding. A subclass can override this to write fields of its own.
+        """
+        # Imported here: the export module imports this one
+        from ._export import rng_type_dict
+
+        return rng_type_dict(self)
+
 
 class RNGInteger(RNGType[int]):
     """RNG type for generating integers"""

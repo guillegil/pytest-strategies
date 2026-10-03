@@ -98,5 +98,4 @@ class TestParameterWithTestVectors:
         """Test that to_dict includes test vectors."""
         param = Parameter(TestArg("x", rng_type=RNGInteger(0, 10)), test_vectors={"test1": (5,)})
         data = param.to_dict()
-        assert "test_vectors" in data
-        assert "test1" in data["test_vectors"]
+        assert data["test_vectors"] == [{"name": "test1", "id": "test-test1", "values": {"x": 5}}]

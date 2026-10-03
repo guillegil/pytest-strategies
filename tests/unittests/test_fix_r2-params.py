@@ -381,29 +381,30 @@ class TestToDictDescribesRNGConfiguration:
     """The export used to drop the Enum class and report a set predicate as no predicate."""
 
     def test_rng_enum_without_predicate(self):
-        details = TestArg("color", rng_type=RNGEnum(Color)).to_dict()["rng_details"]
-        assert details == {
-            "enum_class": "Color",
-            "weights": "None",
-            "predicate": "None",
-            "has_predicate": False,
+        rng = TestArg("color", rng_type=RNGEnum(Color)).to_dict()["rng"]
+        assert rng == {
+            "type": "RNGEnum",
+            "enum": "Color",
+            "members": [{"$enum": "Color", "member": member.name} for member in Color],
+            "weights": None,
+            "predicate": False,
         }
 
     def test_rng_enum_with_predicate(self):
         rng_type = RNGEnum(Color, predicate=lambda c: c is not Color.RED)
-        details = TestArg("color", rng_type=rng_type).to_dict()["rng_details"]
-        assert details["enum_class"] == "Color"
-        assert details["has_predicate"] is True
+        rng = TestArg("color", rng_type=rng_type).to_dict()["rng"]
+        assert rng["enum"] == "Color"
+        assert rng["predicate"] is True
 
     def test_rng_integer_keys_kept(self):
-        plain = TestArg("n", rng_type=RNGInteger(0, 10)).to_dict()["rng_details"]
-        filtered = TestArg("n", rng_type=RNGInteger(0, 10, predicate=bool)).to_dict()["rng_details"]
-        assert plain == {"min": "0", "max": "10", "predicate": "None", "has_predicate": False}
-        assert filtered == {"min": "0", "max": "10", "has_predicate": True}
+        plain = TestArg("n", rng_type=RNGInteger(0, 10)).to_dict()["rng"]
+        filtered = TestArg("n", rng_type=RNGInteger(0, 10, predicate=bool)).to_dict()["rng"]
+        assert plain == {"type": "RNGInteger", "min": 0, "max": 10, "predicate": False}
+        assert filtered == {"type": "RNGInteger", "min": 0, "max": 10, "predicate": True}
 
     def test_rng_without_predicate_attribute_has_no_flag(self):
-        details = TestArg("s", rng_type=Series([1, 2])).to_dict()["rng_details"]
-        assert "has_predicate" not in details
+        rng = TestArg("s", rng_type=Series([1, 2])).to_dict()["rng"]
+        assert "predicate" not in rng
 
     def test_export_strategies_is_json_with_details(self):
         @Strategy.register("fix_r2_export")
@@ -413,6 +414,7 @@ class TestToDictDescribesRNGConfiguration:
             )
 
         data = json.loads(Strategy.export_strategies())
-        details = data["fix_r2_export"]["arguments"][0]["rng_details"]
-        assert details["enum_class"] == "Color"
-        assert details["has_predicate"] is True
+        [entry] = [entry for entry in data["strategies"] if entry["name"] == "fix_r2_export"]
+        rng = entry["parameter"]["arguments"][0]["rng"]
+        assert rng["enum"] == "Color"
+        assert rng["predicate"] is True

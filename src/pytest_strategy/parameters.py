@@ -228,13 +228,6 @@ def _vector_by_name(
     return tuple.__new__(row_type, [values[arg] for arg in arg_names])
 
 
-def _vector_values(vector: object) -> Sequence[Any]:
-    """Return the values of a stored directed or test vector (a pytest.param's values)."""
-    if isinstance(vector, _ParameterSet):
-        return vector.values
-    return cast(Vector, vector)
-
-
 def _check_arg_name(name: Any) -> None:
     """
     Check that an argument name can be a field of the strategy's Vector rows.
@@ -1603,24 +1596,23 @@ class Parameter:
 
     def to_dict(self) -> dict[str, Any]:
         """
-        Serialize the parameter metadata to a dictionary.
+        Describe the Parameter as a JSON-ready dict with ``"schema": 1``, the
+        ``parameter`` of an ``export_strategies()`` entry.
+
+        It lists ``arguments`` (each ``TestArg.to_dict()``), ``directed_vectors`` and
+        ``test_vectors`` in order as ``{"name", "id", "values"}``, with the
+        names-format ID and the values by argument name in the schema's value
+        encoding (``{"$float": "nan"}``, ``{"$enum": "Color", "member": "RED"}``,
+        ``{"$repr": ..., "$type": ...}``), ``constraints`` as ``{"name", "enabled"}``
+        in evaluation order, ``always_include_directed``, ``max_retries``,
+        ``nsamples``, ``per_sequence_samples``, ``max_exhaustive`` and
+        ``skip_reason``. Every constraint is enabled here; the export says which
+        ones the run turns off.
         """
-        return {
-            "arguments": [arg.to_dict() for arg in self.test_args],
-            "directed_vectors": {
-                name: [str(v) for v in _vector_values(vector)]
-                for name, vector in self.directed_vectors.items()
-            },
-            "test_vectors": {
-                name: [str(v) for v in _vector_values(vector)]
-                for name, vector in self.test_vectors.items()
-            },
-            "always_include_directed": self.always_include_directed,
-            "has_constraints": bool(self.vector_constraints),
-            "nsamples": self.nsamples,
-            "per_sequence_samples": self.per_sequence_samples,
-            "skip_reason": self.skip_reason,
-        }
+        # Imported here: the export module imports this one
+        from ._export import parameter_dict
+
+        return parameter_dict(self)
 
     def generate_vectors(
         self,

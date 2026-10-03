@@ -846,10 +846,11 @@ def test_an_installed_packages_factory_exports_the_same_from_any_environment(pyt
 
         result.assert_outcomes(passed=1)
         data = json.loads((pytester.path / "export.json").read_text())
-        exported.append(data["ps_installed"]["arguments"][0]["static_value"])
+        [entry] = data["strategies"]
+        exported.append(entry["parameter"]["arguments"][0]["value"])
 
     key = StreamKey.root(SEED, "export", "ps_installed", "ps_installed_strategies")
-    assert exported == [str(randint(key))] * 2
+    assert exported == [randint(key)] * 2
 
 
 # ---------------------------------------------------------------------------
@@ -939,8 +940,9 @@ PACKAGE_TESTS = """
 
     def test_device(device):
         record("device", device)
-        exported = json.loads(export_strategies())["ps_device"]
-        record("export", exported["arguments"][0]["static_value"])
+        exported = json.loads(export_strategies())["strategies"]
+        [device] = [e["parameter"] for e in exported if e["name"] == "ps_device"]
+        record("export", device["arguments"][0]["value"])
 """
 
 
@@ -969,7 +971,7 @@ def test_a_packages_fixture_draws_the_same_installed_or_from_its_source(pytester
 
     device = StreamKey.root(SEED, "fixture", "", "device", 0, "acme_ps.testing", "device", "")
     export = StreamKey.root(SEED, "export", "ps_device", "acme_ps.testing")
-    assert draws == [{"device": randint(device), "export": str(randint(export))}] * 2
+    assert draws == [{"device": randint(device), "export": randint(export)}] * 2
 
 
 def run_package_project(pytester, layout, name):
@@ -1010,7 +1012,7 @@ def package_draws(where, folder, base):
     """What test_device records when the fixture and the factory are keyed by ``where``."""
     device = StreamKey.root(SEED, "fixture", "", "device", 0, where, "device", base)
     export = StreamKey.root(SEED, "export", "ps_device", folder)
-    return {"device": randint(device), "export": str(randint(export))}
+    return {"device": randint(device), "export": randint(export)}
 
 
 @pytest.mark.parametrize("name", ["testing", "test_utils", "strategies"])
@@ -1045,9 +1047,9 @@ ACME_TESTS = """
 
     def test_device(device):
         record("device", device)
-        exported = json.loads(export_strategies())
-        record("export", exported["ps_device"]["arguments"][0]["static_value"])
-        record("strategies", exported["ps_acme"]["arguments"][0]["static_value"])
+        exported = {e["name"]: e["parameter"] for e in json.loads(export_strategies())["strategies"]}
+        record("export", exported["ps_device"]["arguments"][0]["value"])
+        record("strategies", exported["ps_acme"]["arguments"][0]["value"])
 """
 
 
@@ -1100,8 +1102,8 @@ def test_a_package_module_next_to_a_rootdir_in_tests_draws_the_same_in_every_run
     strategies = StreamKey.root(SEED, "export", "ps_acme", "acme_ps.strategies")
     expected = {
         "device": randint(device),
-        "export": str(randint(export)),
-        "strategies": str(randint(strategies)),
+        "export": randint(export),
+        "strategies": randint(strategies),
     }
     assert draws == [expected] * len(runs)
 
@@ -1127,11 +1129,11 @@ NAMESPACE_TESTS = """
         return RNG.integer(0, 10**9)
 
     def test_ns(request, drawn):
-        exported = json.loads(export_strategies())
+        exported = {e["name"]: e["parameter"] for e in json.loads(export_strategies())["strategies"]}
         found = {
             "test": request.node.nodeid,
             "fixture": drawn,
-            "export": exported["ps_ns_acme"]["arguments"][0]["static_value"],
+            "export": exported["ps_ns_acme"]["arguments"][0]["value"],
         }
         with open(pathlib.Path.cwd() / "draws.jsonl", "a") as out:
             for label, value in found.items():
@@ -1232,7 +1234,7 @@ def test_with_namespace_packages_a_recorded_package_module_keeps_its_path(pytest
         test.partition("::")[0],
     )
     export = StreamKey.root(SEED, "export", "ps_ns_acme", "../ns/acme_ns")
-    expected = {"test": test, "fixture": randint(fixture), "export": str(randint(export))}
+    expected = {"test": test, "fixture": randint(fixture), "export": randint(export)}
     assert draws == [expected] * len(runs)
 
 
@@ -1283,8 +1285,9 @@ OUTSIDE_TESTS = """
     def test_outside(drawn, request):
         record("test", request.node.nodeid)
         record("fixture", drawn)
-        exported = json.loads(export_strategies())["ps_outside"]
-        record("export", exported["arguments"][0]["static_value"])
+        exported = json.loads(export_strategies())["strategies"]
+        [outside] = [e["parameter"] for e in exported if e["name"] == "ps_outside"]
+        record("export", outside["arguments"][0]["value"])
 """
 
 
@@ -1323,7 +1326,7 @@ def test_a_test_module_outside_the_testpaths_draws_the_same_in_every_import_mode
 
     fixture = StreamKey.root(SEED, "fixture", test, "drawn", 0, module, "drawn", module)
     export = StreamKey.root(SEED, "export", "ps_outside", folder)
-    expected = {"test": test, "fixture": randint(fixture), "export": str(randint(export))}
+    expected = {"test": test, "fixture": randint(fixture), "export": randint(export)}
     assert draws == [expected] * 2
 
 
@@ -1357,7 +1360,7 @@ def test_a_testpaths_folder_outside_the_rootdir_draws_the_same_in_every_import_m
     base = test.partition("::")[0]
     fixture = StreamKey.root(SEED, "fixture", test, "drawn", 0, module, "drawn", base)
     export = StreamKey.root(SEED, "export", "ps_outside", "../shared")
-    expected = {"test": test, "fixture": randint(fixture), "export": str(randint(export))}
+    expected = {"test": test, "fixture": randint(fixture), "export": randint(export)}
     assert draws == [expected] * 3
 
 
@@ -1442,7 +1445,7 @@ def test_a_test_module_outside_the_rootdir_draws_the_same_in_every_import_mode(
                 "test": test,
                 "conftest": randint(conftest),
                 "fixture": randint(fixture),
-                "export": str(randint(export)),
+                "export": randint(export),
             }
         )
     assert draws == expected
@@ -1547,7 +1550,7 @@ def test_a_helper_named_like_a_test_module_outside_the_rootdir(pytester, package
                 "conftest": randint(conftest),
                 "helper": randint(helper),
                 "fixture": randint(fixture),
-                "export": str(randint(export)),
+                "export": randint(export),
             }
         )
     assert draws == expected
@@ -1585,8 +1588,9 @@ EXTERNAL_TESTS = """
 
     def test_external(helper):
         record("fixture", helper)
-        exported = json.loads(export_strategies())["ps_external"]
-        record("export", exported["arguments"][0]["static_value"])
+        exported = json.loads(export_strategies())["strategies"]
+        [external] = [e["parameter"] for e in exported if e["name"] == "ps_external"]
+        record("export", external["arguments"][0]["value"])
 """
 
 
@@ -1630,7 +1634,7 @@ def test_a_library_named_like_test_modules_draws_the_same_from_every_checkout_fo
         SEED, "fixture", "", "helper", 0, "extacme.test_helpers", "helper", "tests"
     )
     export = StreamKey.root(SEED, "export", "ps_external", "extacme.strategies")
-    assert draws == [{"fixture": randint(fixture), "export": str(randint(export))}] * 6
+    assert draws == [{"fixture": randint(fixture), "export": randint(export)}] * 6
 
 
 LINKED_CONFTEST = """

@@ -151,6 +151,8 @@ class TestFactoryResults:
 
         data = json.loads(export_strategies())
 
-        assert list(data["v4_export_tuple"]) == ["error"]
-        assert "returned an (argnames, samples) tuple" in data["v4_export_tuple"]["error"]
+        [entry] = [e for e in data["strategies"] if e["name"] == "v4_export_tuple"]
+        assert list(entry) == ["name", "origin", "context", "error"]
+        assert entry["error"]["type"] == "ValueError"
+        assert "returned an (argnames, samples) tuple" in entry["error"]["message"]
         assert "legacy_tuple" not in json.dumps(data)

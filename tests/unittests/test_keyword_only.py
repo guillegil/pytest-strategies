@@ -254,4 +254,4 @@ class TestRngTypeCheck:
         assert arg.type is Any
         assert param.arg_types == (Any,)
         assert repr(arg) == "TestArg(name='x', type=Any)"
-        assert arg.to_dict()["rng_type"] == "GenerateOnly"
+        assert arg.to_dict()["rng"]["type"] == "GenerateOnly"

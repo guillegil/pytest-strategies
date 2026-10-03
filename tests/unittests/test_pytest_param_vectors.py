@@ -131,8 +131,13 @@ class TestGeneration:
     def test_to_dict_lists_the_values(self):
         data = self._param().to_dict()
 
-        assert data["directed_vectors"] == {"bad": ["1", "2"], "ok": ["3", "4"]}
-        assert data["test_vectors"] == {"tv": ["5", "6"]}
+        assert [(v["name"], v["values"]) for v in data["directed_vectors"]] == [
+            ("bad", {"a": 1, "b": 2}),
+            ("ok", {"a": 3, "b": 4}),
+        ]
+        assert [(v["name"], v["values"]) for v in data["test_vectors"]] == [
+            ("tv", {"a": 5, "b": 6})
+        ]
 
 
 class TestParametrization:

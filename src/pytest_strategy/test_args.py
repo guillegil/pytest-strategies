@@ -112,40 +112,17 @@ class TestArg:
 
     def to_dict(self) -> dict[str, Any]:
         """
-        Serialize the test argument metadata to a dictionary.
+        Describe the argument as a JSON-ready dict: its ``name``, ``description``,
+        ``python_type`` (the qualified name of its values' type, or None when unknown),
+        ``validator`` (whether one is set) and ``source``: ``"value"`` with the
+        ``value`` in the schema 1 value encoding, or ``"rng"`` with ``rng``, its RNG
+        type's ``to_dict()``. A fragment of ``Parameter.to_dict()``, without a schema
+        field of its own.
         """
-        from enum import Enum
+        # Imported here: the export module imports this one
+        from ._export import argument_dict
 
-        data = {
-            "name": self._name,
-            "description": self._description,
-            "has_static_value": self._value is not None,
-        }
-
-        if self._value is not None:
-            data["static_value"] = str(self._value)
-
-        if self._rng_type:
-            data["rng_type"] = self._rng_type.__class__.__name__
-            # Add RNG specific details if available
-            if hasattr(self._rng_type, "__dict__"):
-                # Filter out private attributes and callables, except Enum classes (the
-                # enum_class of an RNGEnum), which are configuration and exported by name
-                rng_details: dict[str, Any] = {}
-                for k, v in self._rng_type.__dict__.items():
-                    if k.startswith("_"):
-                        continue
-                    if isinstance(v, type) and issubclass(v, Enum):
-                        rng_details[k] = v.__name__
-                    elif not callable(v):
-                        rng_details[k] = str(v)
-                # A set predicate is a callable and left out above, so say whether one is set
-                if "predicate" in self._rng_type.__dict__:
-                    rng_details["has_predicate"] = self._rng_type.predicate is not None
-                if rng_details:
-                    data["rng_details"] = rng_details
-
-        return data
+        return argument_dict(self)
 
     def generate_samples(self, n: int) -> list[Any]:
         """

@@ -390,26 +390,42 @@ def analyse(factory: Callable[..., Any]) -> CallPlan:
     )
 
 
+class FactoryError(ValueError):
+    """
+    The error reported when a strategy factory raises.
+
+    Attributes:
+        error: What the factory raised
+        note: What the plugin adds about it (why ``ctx`` was None, or how the
+            factory was called), or None
+    """
+
+    def __init__(self, message: str, error: Exception, note: str | None) -> None:
+        super().__init__(message)
+        self.error = error
+        self.note = note
+
+
 def _factory_error(
     name: str, nsamples: int | str, error: Exception, plan: CallPlan, note: str | None = None
-) -> ValueError:
+) -> FactoryError:
     """
     Return the error reported when a strategy factory raises ``error``, ending with
     ``note`` when there is one.
     """
+    notes = [note] if note else []
+    if plan.opaque and isinstance(error, TypeError):
+        notes.append(
+            "The plugin called it with no arguments, because its signature takes only "
+            "*args/**kwargs or cannot be read: if a decorator's wrapper hides the factory's "
+            "parameters, decorate the wrapper with @functools.wraps(factory)."
+        )
     message = (
         f"Error calling strategy factory '{name}' (nsamples={nsamples!r}): "
         f"{type(error).__name__}: {error}"
     )
-    if note:
-        message += f". {note}"
-    if plan.opaque and isinstance(error, TypeError):
-        message += (
-            ". The plugin called it with no arguments, because its signature takes only "
-            "*args/**kwargs or cannot be read: if a decorator's wrapper hides the factory's "
-            "parameters, decorate the wrapper with @functools.wraps(factory)."
-        )
-    return ValueError(message)
+    message = ". ".join([message, *notes])
+    return FactoryError(message, error, ". ".join(notes) or None)
 
 
 def call_factory(

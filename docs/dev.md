@@ -100,8 +100,8 @@ src/pytest_strategy/
 ├── py.typed             # PEP 561 marker: type checkers use the package's annotations
 └── _*.py                # Other internal helpers (introspection, test IDs, record mode,
                          # StrategyOptions, factory calls, each folder's context and its
-                         # fingerprint, runtime state, warnings, schema 1 encoding, stream
-                         # keys, a failed row's repro section, the seeds --lf reuses)
+                         # fingerprint, runtime state, warnings, schema 1 export and encoding,
+                         # stream keys, a failed row's repro section, the seeds --lf reuses)
 ```
 
 ## Core Components
@@ -794,7 +794,7 @@ when such a factory fails with `ctx` None while another folder's conftest
 implements the hook, `FolderContext.why_none()` adds where. Each (nested)
 session and each pytest-xdist worker calls each implementation at most once.
 `export_strategies()`, which has no test, gives a factory the path caller's
-context of the folder of its file (`_api._context_folder()`), or the rootdir's
+context of the folder of its file (`_export.context_folder()`), or the rootdir's
 for a file outside the rootdir or in a `site-packages` or `dist-packages`
 folder below the rootdir (one above it, which a checkout may be in, does not
 count). A factory that declares `ctx` is not called when
@@ -1695,6 +1695,26 @@ they are keyword-only and no existing positional call changes meaning. Since 4.0
 `TestArg`'s options after `rng_type`, `strategy()`'s `validate_signature`,
 `export_strategies()`'s `format` and `Parameter.generate_vectors()`'s options
 after `n` are keyword-only.
+
+`export_strategies()` and the `to_dict()` methods write schema 1 (`_export.py`,
+whose values go through `_encode.encode()`, as `VectorInfo.to_dict()`'s do).
+`_export.document()` calls each registration's factory as collection does and
+writes one entry per registration; an entry whose factory raised, or whose
+custom RNG type's `to_dict()` returns what JSON cannot hold, becomes an `error`
+entry, so one strategy never fails the whole export. A factory error is
+reported as the factory's own exception type and message, and the hint the
+plugin adds to it (`_factory.FactoryError.note`) goes in `note`. Built-in RNG
+types get typed fields by their exact class; a subclass or a custom type gets
+`{"type": ..., "attributes": {...}}`, its public instance attributes in the
+value encoding. Schema 1 evolves by addition only: readers ignore keys they do
+not know and unknown values of the string enums (`kind`, `source`,
+`VectorInfo.kind`), and read an unknown `$`-tagged object like `$repr`, so a
+4.x release may add keys and enum values (`source: "dependent"` is reserved for
+4.1). Removing, renaming or retyping a key bumps `schema`. The golden test
+(`tests/integration/test_export_schema_integration.py`) compares the export of
+a project covering every RNG type with `tests/golden/export-schema1.json`,
+`generator.version` masked: update the file only for such an addition, as its
+docstring says.
 
 The suite runs with `filterwarnings = error`, `--strict-markers`,
 `--strict-config` and `empty_parameter_set_mark = fail_at_collect`, and an

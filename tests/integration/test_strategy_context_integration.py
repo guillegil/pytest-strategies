@@ -174,8 +174,9 @@ import json
 from pytest_strategy import Strategy
 
 def test_export():
-    exported = json.loads(Strategy.export_strategies())
-    assert "error" not in exported["esm_rw"], exported["esm_rw"]
+    exported = json.loads(Strategy.export_strategies())["strategies"]
+    [esm_rw] = [entry for entry in exported if entry["name"] == "esm_rw"]
+    assert "parameter" in esm_rw, esm_rw
 """)
 
     result = project.runpytest(

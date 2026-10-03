@@ -96,6 +96,12 @@ TESTS = """
     """
 
 
+def _exported(pytester, name="exported.json"):
+    """The entries of the export the project wrote, by strategy name."""
+    exported = json.loads((pytester.path / name).read_text())
+    return exported, {entry["name"]: entry for entry in exported["strategies"]}
+
+
 def _received(pytester):
     lines = (pytester.path / "received.jsonl").read_text().splitlines()
     return [json.loads(line) for line in lines]
@@ -128,9 +134,11 @@ def test_factories_get_the_sessions_options(pytester, case, args, nsamples, sour
     # test_rows has the session's count of rows ("auto" falls back to 10
     # without a Series), and test_export passes
     result.assert_outcomes(passed=(10 if nsamples == "auto" else nsamples) + 1)
-    exported = json.loads((pytester.path / "exported.json").read_text())
+    exported, entries = _exported(pytester)
+    # The document says which count the factories got
+    assert exported["nsamples"] == nsamples
     for name in ("rows", "count", "none"):
-        assert "error" not in exported[f"ex_{case}_{name}"], exported[f"ex_{case}_{name}"]
+        assert "parameter" in entries[f"ex_{case}_{name}"], entries[f"ex_{case}_{name}"]
     collected, *at_export = _received(pytester)
     rows = {
         "factory": "rows",
@@ -178,9 +186,10 @@ def test_a_rejected_factory_is_an_error_entry_relative_to_the_rootdir(pytester):
 
     # The export reports the factory instead of failing
     result.assert_outcomes(passed=1)
-    exported = json.loads((pytester.path / "exported.json").read_text())
-    assert set(exported["ex_bad_bad"]) == {"error"}
-    error = exported["ex_bad_bad"]["error"]
+    _, entries = _exported(pytester)
+    assert list(entries["ex_bad_bad"]) == ["name", "origin", "context", "error"]
+    assert entries["ex_bad_bad"]["error"]["type"] == "ValueError"
+    error = entries["ex_bad_bad"]["error"]["message"]
     where = "(sub/ex_bad_strategies.py:3:bad)"
     assert f"Strategy factory 'ex_bad_bad' {where} has a parameter 'n'" in error
     assert "Did you mean 'nsamples'?" in error
@@ -199,8 +208,11 @@ def test_only_a_ctx_factory_runs_the_hook(pytester):
     result = pytester.runpytest("-p", "no:cacheprovider", "--nsamples=2")
 
     result.assert_outcomes(passed=3)
-    exported = json.loads((pytester.path / "exported.json").read_text())
-    assert "error" not in exported["ex_ctx_ctx"], exported["ex_ctx_ctx"]
+    _, entries = _exported(pytester)
+    assert "parameter" in entries["ex_ctx_ctx"], entries["ex_ctx_ctx"]
+    # The fingerprint of the context it received
+    assert entries["ex_ctx_ctx"]["context"] is not None
+    assert entries["ex_ctx_rows"]["context"] is None
     assert {"factory": "ctx", "ctx": "bench"} in _received(pytester)
     assert _hook_calls(pytester) == 1
 
@@ -243,12 +255,16 @@ FOLDER_EXPORT = """
     from pytest_strategy import export_strategies
 
     def test_export(request):
-        exported = json.loads(export_strategies())
-        found = {
-            name: entry["arguments"][0]["static_value"] if "arguments" in entry else entry
-            for name, entry in exported.items()
-            if name.startswith("ex_fold_")
-        }
+        found = {}
+        for entry in json.loads(export_strategies())["strategies"]:
+            if not entry["name"].startswith("ex_fold_"):
+                continue
+            if "parameter" in entry:
+                found[entry["name"]] = entry["parameter"]["arguments"][0]["value"]
+            else:
+                found[entry["name"]] = {
+                    key: entry[key] for key in ("unavailable", "error") if key in entry
+                }
         Path(request.config.rootpath, "export.json").write_text(json.dumps(found))
     """
 
@@ -366,11 +382,13 @@ class TestEachRegistrationsFolderContext:
 
         exported, calls, factories = folder_run(root, pytester)
 
-        error = exported["ex_fold_b"]["error"]
-        assert "TypeError: 'NoneType' object is not subscriptable" in error
-        assert (
-            "ctx is None for tests/b: no pytest_strategies_context implementation in this "
-            "folder or above answered (implemented in tests/a/conftest.py; move it to a common "
-            "parent conftest)"
-        ) in error
+        assert exported["ex_fold_b"]["error"] == {
+            "type": "TypeError",
+            "message": "'NoneType' object is not subscriptable",
+            "note": (
+                "ctx is None for tests/b: no pytest_strategies_context implementation in this "
+                "folder or above answered (implemented in tests/a/conftest.py; move it to a "
+                "common parent conftest)"
+            ),
+        }
         assert calls == {"A": 1}

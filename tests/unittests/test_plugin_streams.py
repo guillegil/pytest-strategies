@@ -527,7 +527,8 @@ class TestAnotherThreadDraws:
             thread.join()
             runtime.pop()
 
-        assert "ps_unit_threaded_export" in json.loads(exported[0])
+        [entry] = json.loads(exported[0])["strategies"]
+        assert (entry["name"], list(entry)[-1]) == ("ps_unit_threaded_export", "parameter")
         assert drawn == first_draws(KEY, 2)
         assert after == before
 

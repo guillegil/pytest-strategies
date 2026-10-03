@@ -445,4 +445,8 @@ class TestAccessorsReturnVectors:
     def test_to_dict_lists_the_values(self):
         data = _addr_len(directed_vectors={"d": {"len": 2, "addr": 1}}).to_dict()
 
-        assert data["directed_vectors"] == {"d": ["1", "2"]}
+        # In declaration order, whatever the dict's order
+        assert data["directed_vectors"] == [
+            {"name": "d", "id": "directed-d", "values": {"addr": 1, "len": 2}}
+        ]
+        assert list(data["directed_vectors"][0]["values"]) == ["addr", "len"]

@@ -363,10 +363,10 @@ class TestDecoratedFactories:
         def opaque():
             return Parameter(TestArg("x", value=1), nsamples=1)
 
-        data = json.loads(Strategy.export_strategies())
+        data = {e["name"]: e for e in json.loads(Strategy.export_strategies())["strategies"]}
 
         for name in ("fix_r2_injected", "fix_r2_patched", "fix_r2_adapted", "fix_r2_opaque"):
-            assert [arg["name"] for arg in data[name]["arguments"]] == ["x"]
+            assert [arg["name"] for arg in data[name]["parameter"]["arguments"]] == ["x"]
 
 
 # ---------------------------------------------------------------------------

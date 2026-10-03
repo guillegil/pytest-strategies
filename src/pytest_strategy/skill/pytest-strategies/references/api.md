@@ -69,6 +69,18 @@ def strategy(name_or_factory, *, validate_signature=True): ...  # decorator for 
   registered strategy (arguments, RNG types, vectors). It loads every strategies file
   and calls each factory as at collection: the `ctx` of the factory's own folder,
   and the session's `nsamples` (10 without `--nsamples`) and `options`.
+  The document has schema 1: `{"schema": 1, "kind": "strategies", "generator": {...},
+  "seed": ..., "nsamples": ..., "strategies": [...]}`, one entry per registration
+  sorted by name and folder, each with `name`, `origin` (`folder`, `file`,
+  `qualname`, `line`), `context` (a fingerprint or null) and one of `parameter`
+  (`Parameter.to_dict()`), `error` (`{"type": "RuntimeError", "message": "boom"}`)
+  or `unavailable`. In `Parameter.to_dict()` (`"schema": 1`) each argument has
+  `source` `"value"` with `value`, or `"rng"` with `rng` (`RNGType.to_dict()`:
+  `{"type": "RNGInteger", "min": 0, "max": 255, "predicate": false}`); vectors are
+  `{"name", "id", "values"}` lists and constraints `{"name", "enabled"}`. Values
+  that JSON does not hold are tagged: `{"$float": "nan"}`, `{"$enum": "Color",
+  "member": "RED"}`, `{"$repr": "b'\\x00'", "$type": "bytes"}`. Ignore keys you
+  do not know: 4.x adds keys within schema 1.
 - Apply `@strategy` to test functions and methods, not to classes or modules.
 
 ## 3. Factories
@@ -242,6 +254,8 @@ Each checks its arguments when built and raises `RNGValueError` (a `ValueError`)
   it, never from a generator kept from earlier (such as the factory's `rng`), and
   keeps no state between calls (a counter makes row k depend on the rows before
   it). Each argument of a random row then draws from a stream of its own.
+  `to_dict()` (for the export) lists a custom type's public attributes as
+  `{"type": "Walk", "attributes": {...}}`; override it to choose the fields.
 
 ## 7. Series, RNGSequence and exhaustive mode
 

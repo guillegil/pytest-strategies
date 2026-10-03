@@ -29,7 +29,6 @@ from pytest_strategy import (
     get_context,
     hookspecs,
 )
-from pytest_strategy._api import _context_folder, _not_loaded
 from pytest_strategy._context import (
     NO_ANSWER,
     ContextStore,
@@ -39,6 +38,7 @@ from pytest_strategy._context import (
     unloaded_conftests,
     visible_from,
 )
+from pytest_strategy._export import context_folder, not_loaded
 from pytest_strategy._factory import FactoryInputs, call_factory
 from pytest_strategy._fingerprint import fingerprint
 from pytest_strategy._resolver import build_parametrization
@@ -535,33 +535,33 @@ class TestExportFolder:
     def test_the_folder_of_a_file_inside_the_rootdir(self, tmp_path):
         factory = _factory_in(tmp_path / "tests/a/a_strategies.py")
 
-        assert _context_folder(factory, tmp_path) == str(tmp_path / "tests/a")
+        assert context_folder(factory, tmp_path) == str(tmp_path / "tests/a")
 
     def test_the_rootdir_for_a_file_outside_it(self, tmp_path):
         factory = _factory_in(tmp_path / "shared/ext.py")
 
-        assert _context_folder(factory, tmp_path / "proj") == tmp_path / "proj"
+        assert context_folder(factory, tmp_path / "proj") == tmp_path / "proj"
 
     def test_the_rootdir_for_an_installed_package_inside_it(self, tmp_path):
         site = tmp_path / ".venv/lib/python3.11/site-packages/acme"
         factory = _factory_in(site / "strategies.py")
 
-        assert _context_folder(factory, tmp_path) == tmp_path
+        assert context_folder(factory, tmp_path) == tmp_path
 
     def test_an_installed_packages_folder_above_the_rootdir_does_not_count(self, tmp_path):
         rootdir = tmp_path / "site-packages/proj"
         factory = _factory_in(rootdir / "tests/a/a_strategies.py")
 
-        assert _context_folder(factory, rootdir) == str(rootdir / "tests/a")
+        assert context_folder(factory, rootdir) == str(rootdir / "tests/a")
 
     def test_the_rootdir_for_code_without_a_file(self, tmp_path):
         namespace = {}
         exec("def factory(ctx):\n    return ctx\n", namespace)
 
-        assert _context_folder(namespace["factory"], tmp_path) == tmp_path
+        assert context_folder(namespace["factory"], tmp_path) == tmp_path
 
     def test_none_without_a_rootdir(self, tmp_path):
-        assert _context_folder(_factory_in(tmp_path / "x.py"), None) is None
+        assert context_folder(_factory_in(tmp_path / "x.py"), None) is None
 
     @pytest.mark.parametrize(
         ("names", "text"),
@@ -575,7 +575,7 @@ class TestExportFolder:
         ids=["one", "two"],
     )
     def test_the_unavailable_text(self, tmp_path, names, text):
-        assert _not_loaded([str(tmp_path / name) for name in names], tmp_path) == text
+        assert not_loaded([str(tmp_path / name) for name in names], tmp_path) == text
 
 
 class TestFolderContexts:
