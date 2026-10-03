@@ -334,6 +334,44 @@ def pytest_strategies_context(config):
         rows = values_dump.collect("-p", "no:cacheprovider", f"--rng-seed={SEED}", "tests/b")
         assert names(dict(rows)) == {"tests/b/test_b.py": "root"}
 
+    def test_a_change_made_outside_the_wrapper_s_folders_is_not_the_wrapper_s(self, pytester):
+        """
+        A test in a folder without the wrapper changes the object they share before
+        a folder that sees the wrapper first asks for its context: the wrapper
+        changed nothing, so its folder passes.
+        """
+        files = {
+            "conftest.py": 'def pytest_strategies_context(config):\n    return {"seen": []}\n',
+            "tests/a/test_a.py": """
+from pytest_strategy import get_context
+
+def test_a(request):
+    get_context(request.config, __file__)["seen"].append("a")
+""",
+            "tests/w/conftest.py": """
+import pytest
+from pytest_strategy import get_context
+
+@pytest.hookimpl(wrapper=True)
+def pytest_strategies_context(config):
+    return {**(yield), "w": 1}
+
+@pytest.fixture
+def tb(request):
+    return get_context(request.config, __file__)
+""",
+            "tests/w/test_w.py": """
+def test_w(tb):
+    assert tb == {"seen": ["a"], "w": 1}
+""",
+        }
+        for name, text in files.items():
+            path = pytester.path / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(dedent(text))
+
+        pytester.runpytest("-p", "no:cacheprovider").assert_outcomes(passed=2)
+
     def test_a_tryfirst_rootdir_implementation_wins_everywhere(self, pytester, values_dump):
         root = """
 import pytest

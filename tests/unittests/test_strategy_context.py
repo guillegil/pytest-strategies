@@ -895,12 +895,59 @@ class TestWrappers:
         class Through(Plugin):
             @pytest.hookimpl(wrapper=True)
             def pytest_strategies_context(self, config):
-                return (yield)
+                ctx = yield
+                assert "name" in ctx
+                return ctx
 
         session.conftest(".", Plugin({"name": "root"}))
         session.conftest("tests/a", Through())
 
-        assert session.context("tests/a") is session.context("tests/b")
+        in_a = runtime.path_context(session.rootpath / "tests/a").answer()
+        in_b = runtime.path_context(session.rootpath / "tests/b").answer()
+
+        # One object, so one context: the implementation's, with its label
+        assert in_a is in_b
+        assert in_a.label == "conftest.py"
+        assert list(runtime.current.contexts.scopes()) == ["conftest.py"]
+
+    def test_a_wrapper_that_returns_an_equal_new_object_is_another_context(self, session):
+        class Copy(Plugin):
+            @pytest.hookimpl(wrapper=True)
+            def pytest_strategies_context(self, config):
+                return dict((yield))
+
+        session.conftest(".", Plugin({"name": "root"}))
+        session.conftest("tests/a", Copy())
+
+        in_a = runtime.path_context(session.rootpath / "tests/a").answer()
+        in_b = runtime.path_context(session.rootpath / "tests/b").answer()
+
+        assert in_a.value == in_b.value and in_a.value is not in_b.value
+        assert (in_a.label, in_b.label) == ("tests/a/conftest.py", "conftest.py")
+
+    @pytest.mark.parametrize("by", ["test", "itself"])
+    def test_a_change_made_before_the_wrappers_ran_is_not_theirs(self, session, by):
+        class Extend(Plugin):
+            @pytest.hookimpl(wrapper=True)
+            def pytest_strategies_context(self, config):
+                return {**(yield), "w": 1}
+
+        class Counter:
+            """An object whose repr changes each time it is shown."""
+
+            shown = 0
+
+            def __repr__(self):
+                Counter.shown += 1
+                return f"Counter({Counter.shown})"
+
+        root = {"seen": []} if by == "test" else {"counter": Counter()}
+        session.conftest(".", Plugin(root))
+        session.conftest("tests/w", Extend())
+        # A test in a folder without the wrapper changes the shared object first
+        session.context("tests/a").get("seen", []).append("a")
+
+        assert session.context("tests/w") == {**root, "w": 1}
 
 
 class TestHookRandomStream:

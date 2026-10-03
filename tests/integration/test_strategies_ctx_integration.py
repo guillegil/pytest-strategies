@@ -178,6 +178,27 @@ def pytest_wrap_context(config):
         assert (pytester.path / "tbs.txt").read_text() == "1"
         result.stdout.fnmatch_lines(["pytest-strategies: context ????????"])
 
+    def test_a_wrapper_that_returns_the_object_it_receives_keeps_one_context(self, pytester):
+        # A wrapper that only checks the object gives its folder the object of the
+        # folders without it: one context, so tb's tests on both sides pass
+        wrapper = """
+import pytest
+
+@pytest.hookimpl(wrapper=True)
+def pytest_strategies_context(config):
+    ctx = yield
+    assert "name" in ctx
+    return ctx
+"""
+        self.one_scope_project(pytester)
+        (pytester.path / "tests/sub/conftest.py").write_text(wrapper)
+
+        result = pytester.runpytest("-p", "no:cacheprovider", "-v")
+
+        result.assert_outcomes(passed=4)
+        result.stdout.fnmatch_lines(["pytest-strategies: context ????????"])
+        result.stdout.fnmatch_lines(["Contexts: 1", "  conftest.py: ????????, 2 test(s)"])
+
     def test_works_under_xdist(self, pytester):
         pytest.importorskip("xdist")
         self.one_scope_project(pytester)
@@ -335,6 +356,100 @@ def test_dynamic(request):
             ]
         )
         pytester.runpytest("-p", "no:cacheprovider", "tests/test_root.py").assert_outcomes(passed=1)
+
+    @staticmethod
+    def dynamic_project(pytester, root, other):
+        """
+        A rootdir conftest.py answering "root" with a session fixture that asks for
+        strategies_ctx through request.getfixturevalue(), a test in ``root`` that
+        requests strategies_ctx, and tests in ``root`` and in ``other`` (whose
+        conftest.py answers "B") that ask for it through request.getfixturevalue(),
+        directly (one then skips, one fails) or through that fixture.
+        """
+        write(
+            pytester,
+            {
+                "conftest.py": conftest(
+                    "root",
+                    """
+@pytest.fixture(scope="session")
+def tb_dynamic(request):
+    return request.getfixturevalue("strategies_ctx")
+""",
+                ),
+                f"{other}/conftest.py": conftest("B"),
+                f"{root}/test_root.py": """
+def test_root(strategies_ctx):
+    assert strategies_ctx == {"name": "root"}
+
+def test_root_dynamic(request):
+    assert request.getfixturevalue("strategies_ctx") == {"name": "root"}
+
+def test_root_fixture(tb_dynamic):
+    assert tb_dynamic == {"name": "root"}
+""",
+                f"{other}/test_b.py": """
+import pytest
+
+def test_b_quiet(request):
+    request.getfixturevalue("strategies_ctx")
+
+def test_b_skip(request):
+    request.getfixturevalue("strategies_ctx")
+    pytest.skip("not for this testbench")
+
+def test_b_assert(request):
+    assert request.getfixturevalue("strategies_ctx") == {"name": "B"}
+
+def test_b_fixture(tb_dynamic):
+    pass
+
+def test_b_fixture_again(tb_dynamic):
+    pass
+""",
+            },
+        )
+
+    @pytest.mark.parametrize("xdist", [False, True], ids=["one_process", "xdist"])
+    @pytest.mark.parametrize(
+        ("root", "other"),
+        [("tests/a_root", "tests/b_tb"), ("tests/b_root", "tests/a_tb")],
+        ids=["requested_first", "dynamic_first"],
+    )
+    def test_a_dynamic_request_from_another_context_fails_after_its_phase(
+        self, pytester, root, other, xdist
+    ):
+        # The tests that request it decide its context, whichever test asks first:
+        # a test that asks for it through request.getfixturevalue(), or through a
+        # fixture that does, fails when its folder's context is another one
+        self.dynamic_project(pytester, root, other)
+        if xdist:
+            pytest.importorskip("xdist")
+            result = pytester.runpytest_subprocess("-p", "no:cacheprovider", "-n", "2")
+        else:
+            result = pytester.runpytest("-p", "no:cacheprovider")
+
+        # The tests of "B" fail, a skip too. Those that use the fixture fail at
+        # setup: the first one when the fixture asks, the next one from its cache
+        result.assert_outcomes(passed=3, failed=3, errors=2)
+        guard = (
+            "*strategies_ctx is a session fixture, but the tests that use it have different "
+            f"contexts (conftest.py: {root}/test_root.py::test_root; {other}/conftest.py: "
+            f"{other}/test_b.py::{{}})*"
+        )
+        tests = (
+            "test_b_quiet",
+            "test_b_skip",
+            "test_b_assert",
+            "test_b_fixture",
+            "test_b_fixture_again",
+        )
+        for test in tests:
+            result.stdout.fnmatch_lines([guard.format(test)])
+        # A test whose body raised keeps its own error, with the guard's message
+        result.stdout.fnmatch_lines(
+            ["E * assert {'name': 'root'} == {'name': 'B'}", "E " + guard.format("test_b_assert")]
+        )
 
     # A folder's own strategies_ctx, which does not build on the plugin's
     OVERRIDE = """

@@ -61,6 +61,25 @@ class Resolution:
     left_out: int | None = None
 
 
+@dataclass
+class CtxFixture:
+    """
+    The ``strategies_ctx`` fixture's value in a session, once it was set up, for
+    the check of the tests that ask for it later through
+    ``request.getfixturevalue()`` (``plugin._ctx_mismatch``).
+    """
+
+    # The fixture's definition (pytest's FixtureDef)
+    definition: Any
+    # The label of the context it returned
+    label: str
+    # The tests it counted when it was set up: their node IDs by context label
+    consumers: dict[str, dict[str, None]]
+    # The fixtures (FixtureDefs) that asked for it through request.getfixturevalue()
+    # when they were set up: a test that gets one of them uses it too
+    requesters: set[Any] = field(default_factory=set)
+
+
 class SessionState:
     """Mutable state scoped to a single (possibly nested) pytest session."""
 
@@ -148,6 +167,10 @@ class SessionState:
         # The tests whose strategy factories received a context, by the context's
         # label (their node IDs without parameters, in order), for the -v summary
         self.context_tests: dict[str, dict[str, None]] = {}
+        # The strategies_ctx fixture's context, once it was set up and its tests
+        # shared one, so a test that asks for it through request.getfixturevalue()
+        # without being one of them is checked against it
+        self.ctx_fixture: CtxFixture | None = None
         # The node IDs of the tests whose setup or call failed, and the contexts
         # their strategy factories received (label -> fingerprint), computed when
         # the session finishes, for the line that says how to reproduce the failures

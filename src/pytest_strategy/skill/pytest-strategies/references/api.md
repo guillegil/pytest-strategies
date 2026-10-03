@@ -438,8 +438,9 @@ def pytest_strategies_context(config):
   `conftest.py` files from the test's folder upward, the other plugins (last
   registered first), `trylast` ones; the first that is not `None` answers. A
   `wrapper=True` implementation can change the answer by returning a new object
-  (`{**ctx, "extra": 1}`); changing the object it receives fails its folders,
-  since other folders get that object too. Its code before `yield` runs after
+  (`{**ctx, "extra": 1}`), or return the object it receives as it is (one context
+  with the folders without it); changing that object fails its folders, since
+  other folders get it too. Its code before `yield` runs after
   the implementations it wraps. A factory registered in another folder gets the
   test's folder's context.
 - Each implementation that is not a wrapper is called at most once per session,
@@ -520,9 +521,12 @@ def tb_a(request):
   tests/tb_a/conftest.py: ...). In a folder with its own pytest_strategies_context,
   use pytest_strategy.get_context(request.config, __file__) in that folder's
   conftest.py fixtures.` Deselecting one folder's tests also makes the run pass.
-  A `request.getfixturevalue("strategies_ctx")` counts every test of the run. The
-  tests of a folder whose `conftest.py` defines its own `strategies_ctx` (one that
-  does not request the plugin's) do not count.
+  The tests of a folder whose `conftest.py` defines its own `strategies_ctx` (one
+  that does not request the plugin's) do not count. When no test requests it, a
+  `request.getfixturevalue("strategies_ctx")` counts every test of the run. When
+  some do, a test that asks for it that way (or through a fixture that does) gets
+  their context, and fails with the message after its setup or its body when its
+  own folder's context is another one.
 - `get_context(config, path)` returns the context of the folder of `path` (a file
   or a folder), the object a test there gets. A folder whose `conftest.py` pytest
   did not load (no test there collected) gets the nearest loaded one's above. Call

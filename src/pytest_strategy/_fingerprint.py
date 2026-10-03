@@ -31,10 +31,12 @@ memory addresses, ``--import-mode`` or the folder the checkout is in.
   ``<...>`` (``Periph('uart0' at 0x40001000)``) is kept. The sets the repr shows
   as Python does (``{'b', 'a'}``) are written with their items sorted, so a repr
   that shows a set in hash order, which ``PYTHONHASHSEED`` changes, gives one
-  text in every process (:func:`_sorted_sets`). An object whose type keeps the
-  default repr (``<Plain object at 0x...>``) is written as its type's name alone:
-  its state is not in the fingerprint, which says so by listing the type as
-  *partial*.
+  text in every process (:func:`_sorted_sets`). Both read the repr's quoted
+  strings and brackets once, so a ``'->'`` or an ``O'Brien`` in it changes
+  nothing, and the time grows with its length (:func:`_scan`). An object whose
+  type keeps the default repr (``<Plain object at 0x...>``) is written as its
+  type's name alone: its state is not in the fingerprint, which says so by
+  listing the type as *partial*.
 
 Type names are qualified names, never module names, which depend on
 ``--import-mode``. An object that cannot be encoded (its repr raises, or it nests
@@ -65,16 +67,18 @@ UNAVAILABLE = "unavailable"
 # The hex characters of the SHA-256 that make the fingerprint
 _LENGTH = 8
 
-# A memory address in a repr: "<Plain object at 0x7f3a2b1c>", "<function f at 0x...>"
-# (removed inside a <...> repr only, see _without_addresses), and a mock's, which
-# ends its repr: "<MagicMock name='dut' id='140139121477264'>"
-_ADDRESS = re.compile(r" at 0x[0-9a-fA-F]+| id='[0-9]+'(?=>)")
+# A memory address in a <...> repr: "<Plain object at 0x7f3a2b1c>", "<function f at
+# 0x...>" (see _without_addresses)
+_ADDRESS = re.compile(r" at 0x[0-9a-fA-F]+")
 
-# The brackets _sorted_sets() pairs up in a repr: each opening one and its closing
-# one. "<" opens a <...> repr (<Color.RED: 1>) only when a ">" closes it.
+# A mock's id, which ends its <...> repr: "<MagicMock name='dut' id='140139121477264'>"
+_MOCK_ID = re.compile(r" id='[0-9]+'\Z")
+
+# The brackets _scan() pairs up in a repr: each opening one and its closing one. "<"
+# opens a <...> repr (<Color.RED: 1>) only when a ">" closes it.
 _BRACKETS = {"(": ")", "[": "]", "{": "}", "<": ">"}
 
-# What _sorted_sets() looks at in a repr: quotes, brackets, commas and colons
+# What _scan() looks at in a repr: quotes, brackets, commas and colons
 _SPECIAL = re.compile(r"""['"()\[\]{}<>,:]""")
 
 # A quoted string in a repr, from its opening quote
@@ -259,7 +263,7 @@ class _Encoder:
             # The default repr shows only the type and the address
             self.partial.add(name)
             return {"object": name}
-        return {"repr": [name, _sorted_sets(_without_addresses(repr(value)))]}
+        return {"repr": [name, _shown(repr(value))]}
 
     def _field(self, value: Any, name: str) -> list[Any]:
         """
@@ -288,29 +292,31 @@ class _Encoder:
         return value.as_posix()
 
 
+def _shown(text: str) -> str:
+    """
+    Return a repr as the fingerprint writes it: without its memory addresses
+    (:func:`_without_addresses`), and with its sets sorted (:func:`_sorted_sets`).
+    """
+    if "{" not in text and " at 0x" not in text and " id='" not in text:
+        return text
+    tokens, pairs, unpaired = _scan(text)
+    return _render(text, tokens, pairs, sort=not unpaired, strip=True)
+
+
 def _without_addresses(text: str) -> str:
     """
     Return a repr without the memory addresses in it: `` at 0x...`` inside a
     ``<...>`` repr (``<function f at 0x7f...>``, ``<code object f at 0x..., file
     ...>``, ``<weakref at 0x...; to 'A' at 0x...>``), and a mock's ``id='...'``,
-    which ends its repr. An address a repr of its own shows outside ``<...>``, such
-    as a register's (``Periph('uart0' at 0x40001000)``), is kept.
+    which ends its repr. A ``<...>`` repr is one whose ``<`` a ``>`` closes
+    (:func:`_scan`), so an address after a comparison's ``<`` or in a quoted
+    string is not in one. An address a repr of its own shows outside ``<...>``,
+    such as a register's (``Periph('uart0' at 0x40001000)``), is kept.
     """
     if " at 0x" not in text and " id='" not in text:
         return text
-    kept = []
-    end = 0
-    for match in _ADDRESS.finditer(text):
-        start = match.start()
-        if text.count("<", 0, start) > text.count(">", 0, start):
-            kept.append(text[end:start])
-            end = match.end()
-    kept.append(text[end:])
-    return "".join(kept)
-
-
-class _Unpaired(Exception):
-    """A repr whose brackets do not pair up."""
+    tokens, pairs, _ = _scan(text)
+    return _render(text, tokens, pairs, sort=False, strip=True)
 
 
 def _sorted_sets(text: str) -> str:
@@ -320,73 +326,145 @@ def _sorted_sets(text: str) -> str:
     ``frozenset(...)`` too, nested sets first. So ``Bench({'beta', 'alpha'})``
     becomes ``Bench({'alpha', 'beta'})``, whatever order this process's
     ``PYTHONHASHSEED`` gave the set. Quoted strings are read as they are, so a
-    brace or a comma inside one is not a set's. A repr whose brackets do not pair
-    up is returned as it is, and so is a set shown in another form
-    (``",".join(tags)``).
+    brace or a comma inside one is not a set's (:func:`_scan`). A repr whose
+    brackets do not pair up is returned as it is, and so is a set shown in
+    another form (``",".join(tags)``).
     """
     if "{" not in text:
         return text
-    try:
-        return _read(text, 0, "")[0]
-    except _Unpaired:
+    tokens, pairs, unpaired = _scan(text)
+    if unpaired:
         return text
+    return _render(text, tokens, pairs, sort=True, strip=False)
 
 
-def _read(text: str, start: int, closer: str) -> tuple[str, int]:
+def _opens_string(text: str, index: int) -> bool:
     """
-    Read a repr from ``start`` to the bracket ``closer``, or to its end for ``""``,
-    with the sets in it sorted (:func:`_sorted_sets`).
+    Whether the quote at ``index`` in a repr can open a string. A string a repr
+    shows is not part of a word, so a quote right after a letter, a digit or an
+    underscore opens none (the apostrophe in ``O'Brien`` or ``it's``), unless that
+    letter is the ``b`` of ``b'...'`` and follows none of them itself.
+    """
+    before = text[index - 1] if index > 0 else " "
+    if before in "bB":
+        before = text[index - 2] if index > 1 else " "
+    return not (before.isalnum() or before == "_")
+
+
+def _scan(text: str) -> tuple[list[tuple[int, int]], dict[int, int], bool]:
+    """
+    Read a repr once, from left to right: its quoted strings and its brackets.
+
+    A quote opens a string where a repr can show one (:func:`_opens_string`) and a
+    matching quote closes it; quotes, brackets, commas and colons inside it are
+    the string's. Brackets pair up as Python's reprs nest them: a closing bracket
+    closes the innermost one open. A ``<`` that a ``>`` closes opens a ``<...>``
+    repr; one that nothing closes before a closing bracket of an enclosing group,
+    or before the end, is a comparison's, and so is a ``>`` that closes no ``<``
+    (an arrow's). A closing bracket that closes nothing, or an opening one other
+    than ``<`` that nothing closes, leaves the brackets unpaired. Each bracket is
+    looked at once, so the time grows with the length of the repr, whatever its
+    comparisons.
 
     Returns:
-        What was read, the closing bracket included, and the index after it
+        The special characters outside strings (:data:`_SPECIAL`), and each
+        string, as (start, end) in order; the index of the closing bracket of
+        each opening one that pairs up, by the opening one's index; and whether
+        some brackets do not pair up
     """
-    # A {...}'s items read so far, and the item being read
-    items: list[str] = []
-    part: list[str] = []
-    # A colon between the items: a dict
-    keyed = False
-    position = start
+    tokens: list[tuple[int, int]] = []
+    pairs: dict[int, int] = {}
+    # The opening brackets not closed yet, innermost last
+    open_: list[int] = []
+    unpaired = False
+    position = 0
     while True:
         match = _SPECIAL.search(text, position)
         if match is None:
-            if closer:
-                raise _Unpaired
-            # The end of the repr: no {...} is open
-            part.append(text[position:])
-            return "".join(part), len(text)
+            break
         index = match.start()
         char = text[index]
-        part.append(text[position:index])
         position = index + 1
         if char in _QUOTED:
-            quoted = _QUOTED[char].match(text, index)
-            # An apostrophe in plain text starts no string
-            if quoted is not None:
-                position = quoted.end()
-            part.append(text[index:position])
-        elif char == "<":
-            try:
-                inner, position = _read(text, position, ">")
-            except _Unpaired:
-                # A "<" that no ">" closes, such as a comparison's
-                inner = ""
-            part.append(char + inner)
+            quoted = _QUOTED[char].match(text, index) if _opens_string(text, index) else None
+            if quoted is None:
+                # A quote that opens no string is text
+                continue
+            position = quoted.end()
         elif char in _BRACKETS:
-            inner, position = _read(text, position, _BRACKETS[char])
-            part.append(char + inner)
-        elif char == ">" and closer != ">":
-            # An arrow's or a comparison's
-            part.append(char)
-        elif char in ")]}>":
-            if char != closer:
-                raise _Unpaired
-            items.append("".join(part))
-            if closer == "}" and not keyed and len(items) > 1:
-                return ", ".join(sorted(item.strip() for item in items)) + char, position
-            return ",".join(items) + char, position
-        elif char == "," and closer == "}":
-            items.append("".join(part))
-            part = []
+            open_.append(index)
+        elif char == ">":
+            if open_ and text[open_[-1]] == "<":
+                pairs[open_.pop()] = index
+        elif char in ")]}":
+            # A "<" that no ">" closed inside the group is a comparison's
+            while open_ and text[open_[-1]] == "<":
+                open_.pop()
+            if open_ and _BRACKETS[text[open_[-1]]] == char:
+                pairs[open_.pop()] = index
+            else:
+                unpaired = True
+        tokens.append((index, position))
+    return tokens, pairs, unpaired or any(text[index] != "<" for index in open_)
+
+
+class _Group:
+    """A bracket group being written by :func:`_render`."""
+
+    __slots__ = ("opening", "end", "items", "part", "keyed")
+
+    def __init__(self, opening: str, end: int) -> None:
+        # Its opening bracket, and the index of its closing one
+        self.opening = opening
+        self.end = end
+        # A {...}'s items written so far, and the item being written
+        self.items: list[str] = []
+        self.part: list[str] = []
+        # A colon between the items: a dict
+        self.keyed = False
+
+
+def _render(
+    text: str, tokens: list[tuple[int, int]], pairs: dict[int, int], *, sort: bool, strip: bool
+) -> str:
+    """
+    Write a repr read by :func:`_scan` again, with the sets it shows sorted
+    (``sort``, :func:`_sorted_sets`) and without the memory addresses in its
+    ``<...>`` reprs (``strip``, :func:`_without_addresses`). Brackets that do not
+    pair up are written as they are.
+    """
+    groups = [_Group("", len(text))]
+    # How many <...> reprs are open
+    angled = 0
+    position = 0
+    for start, end in tokens:
+        group = groups[-1]
+        plain = text[position:start]
+        if angled and strip:
+            plain = _ADDRESS.sub("", plain)
+        group.part.append(plain)
+        position = end
+        char = text[start]
+        if start in pairs:
+            groups.append(_Group(char, pairs[start]))
+            angled += char == "<"
+        elif start == group.end:
+            groups.pop()
+            group.items.append("".join(group.part))
+            if sort and group.opening == "{" and not group.keyed and len(group.items) > 1:
+                inner = ", ".join(sorted(item.strip() for item in group.items))
+            else:
+                inner = ",".join(group.items)
+            if group.opening == "<":
+                angled -= 1
+                if strip:
+                    inner = _MOCK_ID.sub("", inner)
+            groups[-1].part.append(group.opening + inner + char)
+        elif char == "," and group.opening == "{":
+            group.items.append("".join(group.part))
+            group.part = []
         else:
-            keyed = keyed or char == ":"
-            part.append(char)
+            group.keyed = group.keyed or char == ":"
+            group.part.append(text[start:end])
+    groups[-1].part.append(text[position:])
+    return "".join(groups[-1].part)

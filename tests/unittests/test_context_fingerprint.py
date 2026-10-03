@@ -16,6 +16,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import uuid
 from collections import OrderedDict, deque, namedtuple
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -102,7 +103,7 @@ class Bench:
 # types reported partial, one JSON list, and how the set of strings iterates in
 # this process (which PYTHONHASHSEED changes)
 SCRIPT = """
-import argparse, collections, dataclasses, datetime, enum, json, types
+import argparse, collections, dataclasses, datetime, enum, functools, json, types
 from unittest.mock import MagicMock
 from pytest_strategy._fingerprint import fingerprint
 
@@ -122,6 +123,16 @@ class Shown:
     def __repr__(self):
         return f"Shown({self.lanes!r})"
 
+class Owner:
+    \"\"\"A repr with an apostrophe in plain text before a set\"\"\"
+    def __init__(self, name, lanes):
+        self.name, self.lanes = name, lanes
+    def __repr__(self):
+        return f"Owner({self.name}, lanes={self.lanes})"
+
+def fmt(text, sep="", after=None):
+    return text
+
 values = [
     Bench(frozenset(NAMES)),
     {Color.RED: datetime.date(2026, 10, 3), "names": NAMES},
@@ -131,6 +142,9 @@ values = [
     {"dut": MagicMock(name="dut"), "width": 8},
     Shown(frozenset(NAMES)),
     collections.deque([NAMES]),
+    Owner("O'Brien", NAMES),
+    # A quoted arrow before a function's address
+    functools.partial(fmt, sep="->", after=fmt),
 ]
 if EXTRA == "pydantic":
     import pydantic
@@ -360,10 +374,30 @@ class TestPartial:
             ("<function <lambda> at 0x7f3a>", "<function <lambda>>"),
             ("Wrapper(<Plain object at 0x7f3a>, 0x10)", "Wrapper(<Plain object>, 0x10)"),
             ("Periph('uart0' at 0x40001000)", "Periph('uart0' at 0x40001000)"),
-            ("Window(a < b at 0x10)", "Window(a < b)"),
+            # A "<" that no ">" closes is a comparison's, not a <...> repr's
+            ("Window(a < b at 0x10)", "Window(a < b at 0x10)"),
+            ("Window(a < b, cb=<function f at 0x7f3a>)", "Window(a < b, cb=<function f>)"),
+            # Quoted "<" and ">" are a string's, and so is an arrow's ">"
+            (
+                "Bench(prompt='->', cb=<function cb at 0x7f3a>)",
+                "Bench(prompt='->', cb=<function cb>)",
+            ),
+            (
+                "functools.partial(<function cb at 0x7f3a>, sep='>', y=<function cb at 0x7f3b>)",
+                "functools.partial(<function cb>, sep='>', y=<function cb>)",
+            ),
+            ("Expr(a -> b, cb=<function cb at 0x7f3a>)", "Expr(a -> b, cb=<function cb>)"),
+            ("Bench(sep='<', p=Periph('uart0' at 0x40001000))", None),
+            ("Bench(sep=\"<\", ok=O'Brien, p=Periph('u' at 0x4000))", None),
+            ("<MagicMock name='a->b' id='140139121477264'>", "<MagicMock name='a->b'>"),
+            ("<MagicMock name='a<b' id='140139121477264'>", "<MagicMock name='a<b'>"),
+            ("Shown(<MagicMock name='dut' id='1401391'>)", "Shown(<MagicMock name='dut'>)"),
+            # Brackets that do not pair up elsewhere
+            ("Interval[0, cb=<function f at 0x7f3a>)", "Interval[0, cb=<function f>)"),
         ],
     )
     def test_which_addresses_are_removed(self, text, expected):
+        expected = text if expected is None else expected
         assert _fingerprint._without_addresses(text) == expected
 
     @pytest.mark.parametrize(
@@ -402,14 +436,43 @@ class TestPartial:
             ("Note('{b, a}', \"{d, c}\")", "Note('{b, a}', \"{d, c}\")"),
             ("{'a, b', 'c'}", "{'a, b', 'c'}"),
             ("{'it\\'s', 'a'}", "{'a', 'it\\'s'}"),
+            # An apostrophe in a word starts no string, a quote after a non-word
+            # character or a bytes prefix does
+            ("Owner(O'Brien, lanes={'b', 'a'})", "Owner(O'Brien, lanes={'a', 'b'})"),
+            ("Note(it's {'b', 'a'})", "Note(it's {'a', 'b'})"),
+            ("Note(Bob's {b'y', b'x'})", "Note(Bob's {b'x', b'y'})"),
+            ("Note(it's {'it\\'s', 'a'}, don't)", "Note(it's {'a', 'it\\'s'}, don't)"),
+            # A "<" that no ">" closes, before a set and around one
+            ("Window(a < b, {'b', 'a'})", "Window(a < b, {'a', 'b'})"),
+            ("Window(a < {'b', 'a'}, b > c)", "Window(a < {'a', 'b'}, b > c)"),
+            ("Window(" + "x < " * 3 + "{'b', 'a'})", "Window(" + "x < " * 3 + "{'a', 'b'})"),
+            # Quoted brackets are a string's
+            ("Seq('<', {'b', 'a'}, '>')", "Seq('<', {'a', 'b'}, '>')"),
             # Brackets that do not pair up: as it is
             ("Interval[0, {'b', 'a'})", "Interval[0, {'b', 'a'})"),
+            ("Open({'b', 'a'}", "Open({'b', 'a'}"),
             ("{1}", "{1}"),
             ("set()", "set()"),
         ],
     )
     def test_which_sets_are_sorted(self, text, expected):
         assert _fingerprint._sorted_sets(text) == expected
+
+    def test_reading_a_repr_takes_a_time_that_grows_with_its_length(self):
+        # Each "<" that nothing closes is looked at once: 40 of them in one group,
+        # with a set and an address, took hours when each was tried again after
+        # the one before it failed
+        many = "Expr(" + "x < " * 40 + "cb=<function f at 0x7f3a>, {'b', 'a'})"
+        longer = "Expr(" + "x < " * 20_000 + "cb=<function f at 0x7f3a>, {'b', 'a'})"
+
+        started = time.perf_counter()
+        assert _fingerprint._shown(many) == many.replace(" at 0x7f3a", "").replace(
+            "{'b', 'a'}", "{'a', 'b'}"
+        )
+        assert _fingerprint._sorted_sets(longer).endswith("{'a', 'b'})")
+        assert _fingerprint._without_addresses(longer).endswith("<function f>, {'b', 'a'})")
+        assert fp(Displayed(longer)) != UNAVAILABLE
+        assert time.perf_counter() - started < 5
 
     def test_an_object_that_holds_a_set_its_repr_does_not_show_keeps_its_state(self):
         class Testbench:

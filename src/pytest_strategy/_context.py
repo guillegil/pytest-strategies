@@ -209,10 +209,11 @@ class Answer:
         value: The context, or None when nothing answered
         label: The rootdir-relative path of the conftest.py whose implementation
             answered or raised, the plugin's name for a plugin's, or ``none`` when
-            nothing answered. With a wrapper, the deepest conftest.py among the
-            wrappers and the implementation that answered; when none of them is a
-            conftest.py, the name of the plugin that answered, or of the first
-            wrapper when nothing did.
+            nothing answered. With a wrapper that returns another object than the
+            implementation that answered, the deepest conftest.py among the
+            wrappers and that implementation; when none of them is a conftest.py,
+            the name of the plugin that answered, or of the first wrapper when
+            nothing did.
         error: What the implementation raised, or None
         traceback: The error's traceback when it was raised, so raising it again
             for another folder does not stack frames
@@ -302,9 +303,10 @@ class ContextStore:
     implementation still runs at most once, so a wrapper's code before its yield
     runs after the implementations it wraps. The wrappers receive the object the
     implementation returned, which the folders without them get too, so changing
-    it is an error (:meth:`_check_unchanged`). A folder's answer is also kept for
-    its list of implementations, so the other tests of the folder, and of folders
-    that see the same ones, look it up.
+    it is an error (:meth:`_check_unchanged`); when they return that very object,
+    those folders share the implementation's answer. A folder's answer is also
+    kept for its list of implementations, so the other tests of the folder, and of
+    folders that see the same ones, look it up.
 
     Each call, a wrapper's included, draws from the random stream root(S, "ctx")
     (streams v1), started anew for each, so what an implementation draws does not
@@ -421,6 +423,11 @@ class ContextStore:
         Return the answer of ``wrappers`` (call order) around the implementation
         that answered, or around none, running them through pluggy's own call loop
         (``_hookexec``, private API), which calls the last one in its list first.
+
+        When they return the very object the implementation returned (a wrapper
+        that only checks or logs it), the answer is the implementation's own, with
+        its label: the folders that see the wrappers and those that do not get one
+        object, so they share one context.
         """
         ordered = [*wrappers] if answering is None else [*wrappers, answering]
         conftests = [impl for impl in ordered if is_conftest(impl)]
@@ -430,30 +437,43 @@ class ContextStore:
             impl if _is_wrapper(impl) else _Kept(self, impl, seed) for impl in reversed(ordered)
         ]
         rootpath = getattr(self.config, "rootpath", None)
+        kept = self._answers[answering] if answering is not None else NO_ANSWER
+        # The object's fingerprint now, which a test, a fixture or a factory may have
+        # changed since the implementation returned it: only what the wrappers
+        # change counts (_check_unchanged). On a stream of its own, so a repr that
+        # draws moves no other stream.
+        before = None
+        if kept.value is not None:
+            with _Stream(lambda: StreamKey.root(seed, "ctx")):
+                before = fingerprint(kept.value, rootpath)[0]
         try:
             with _Stream(lambda: StreamKey.root(seed, "ctx")):
                 value = self.config.pluginmanager._hookexec(
                     HOOK, cast("list[HookImpl]", methods), {"config": self.config}, True
                 )
-                if answering is not None:
-                    self._check_unchanged(wrappers, answering, rootpath)
+                if before is not None:
+                    self._check_unchanged(wrappers, kept, before, rootpath)
                 if value is None:
                     return NO_ANSWER
+                if value is kept.value:
+                    return kept
                 return _answered(value, label, rootpath)
         except _KEPT as e:
             return Answer(None, label, e, e.__traceback__)
 
     def _check_unchanged(
-        self, wrappers: tuple[HookImpl, ...], answering: HookImpl, rootpath: Any
+        self, wrappers: tuple[HookImpl, ...], kept: Answer, before: str, rootpath: Any
     ) -> None:
         """
-        Raise ``RuntimeError`` when ``wrappers`` changed the object ``answering``
-        returned in place, as far as its fingerprint shows: the folders that get
-        that object without those wrappers (or through others) would get it
-        changed, whichever folder asked first.
+        Raise ``RuntimeError`` when ``wrappers`` changed in place the object an
+        implementation returned (``kept``), as far as its fingerprint shows: the
+        one it had right before they ran (``before``). The folders that get that
+        object without those wrappers (or through others) would get it changed,
+        whichever folder asked first. An object whose fingerprint changes by itself
+        (a repr that shows a counter) blames no wrapper.
         """
-        kept = self._answers[answering]
-        if kept.value is None or fingerprint(kept.value, rootpath)[0] == kept.fingerprint:
+        after = fingerprint(kept.value, rootpath)[0]
+        if after == before or fingerprint(kept.value, rootpath)[0] != after:
             return
         names = ", ".join(self.label(impl) for impl in wrappers)
         raise RuntimeError(

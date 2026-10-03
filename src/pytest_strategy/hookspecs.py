@@ -53,10 +53,12 @@ def pytest_strategies_context(config: pytest.Config) -> Any:
     ``wrapper=True`` (or ``hookwrapper=True``) implementation that a folder sees
     runs around the one that answered, and can change its answer by returning a
     new object (``{**ctx, "extra": 1}``); folders that see the same wrappers and
-    get their answer from the same implementation share the wrapped result. A
-    wrapper must leave the object it receives as it is, since the folders that do
-    not see the wrapper get that object too: when its fingerprint (below) changed,
-    the folders that see the wrapper fail with an error that says so. Each
+    get their answer from the same implementation share the wrapped result, and a
+    wrapper that returns the very object it received shares the context of the
+    folders without it. A wrapper must leave the object it receives as it is,
+    since the folders that do not see the wrapper get that object too: when its
+    fingerprint (below) changed while the wrappers ran, the folders that see the
+    wrapper fail with an error that says so. Each
     implementation runs once, for the first folder that asks, so a wrapper's code
     before its ``yield`` runs after the implementations it wraps, not before them
     as in other hooks.

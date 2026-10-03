@@ -50,7 +50,7 @@ from ._registry import (
     source_part,
     test_file_patterns,
 )
-from ._runtime import runtime
+from ._runtime import CtxFixture, runtime
 from ._streams import StreamKey, file_part, seed_part
 from ._vector import VECTOR_KEY, VECTORS_KEY, VectorInfo
 from .rng import RNG, _Stream
@@ -588,20 +588,48 @@ class PytestStrategyPlugin:
                 seed, "fixture", scope, fixturedef.argname, param_index, *definition
             )
 
+        # The fixtures the test's request resolved (private API): strategies_ctx
+        # resolved during this setup was asked for through request.getfixturevalue(),
+        # so a later test that gets this fixture from its cache uses it too
+        resolved = getattr(request, "_fixture_defs", None)
+        if not isinstance(resolved, Mapping):
+            resolved = {_CTX_FIXTURE: None}
+        before = _CTX_FIXTURE in resolved
         with _Stream(key):
-            return (yield)
+            result = yield
+        if not before and _CTX_FIXTURE in resolved and state.ctx_fixture is not None:
+            state.ctx_fixture.requesters.add(fixturedef)
+        return result
 
     @pytest.hookimpl(wrapper=True)
     def pytest_runtest_setup(self, item: pytest.Item) -> Generator[None, None, None]:
-        """Run a test's setup on its own random stream (see ``_phase_stream``)."""
+        """
+        Run a test's setup on its own random stream (see ``_phase_stream``), and
+        check the context it got from ``strategies_ctx`` (see ``_check_ctx``).
+        """
         with _phase_stream(item, "setup"):
-            return (yield)
+            try:
+                result = yield
+            except BaseException as error:
+                _check_ctx(item, error)
+                raise
+            _check_ctx(item, None)
+            return result
 
     @pytest.hookimpl(wrapper=True)
     def pytest_runtest_call(self, item: pytest.Item) -> Generator[None, None, None]:
-        """Run a test's body on its own random stream (see ``_phase_stream``)."""
+        """
+        Run a test's body on its own random stream (see ``_phase_stream``), and
+        check the context it got from ``strategies_ctx`` (see ``_check_ctx``).
+        """
         with _phase_stream(item, "call"):
-            return (yield)
+            try:
+                result = yield
+            except BaseException as error:
+                _check_ctx(item, error)
+                raise
+            _check_ctx(item, None)
+            return result
 
     @pytest.hookimpl(wrapper=True)
     def pytest_runtest_teardown(
@@ -2072,10 +2100,12 @@ def strategies_ctx(request: pytest.FixtureRequest) -> Any:
     each of them fails, and a folder with its own pytest_strategies_context uses
     ``pytest_strategy.get_context(request.config, __file__)`` in its conftest.py
     fixtures instead. The tests that use it are those that request it, directly or
-    through other fixtures, or every test when one asks for it through
-    ``request.getfixturevalue()``, except those in a folder whose conftest.py
-    defines a fixture of that name that does not request this one. What the
-    implementation raised is raised again as it is, so a ``pytest.skip`` there
+    through other fixtures, except those in a folder whose conftest.py defines a
+    fixture of that name that does not request this one. When no test requests it
+    and one asks for it through ``request.getfixturevalue()``, every test counts.
+    When some do, a test that asks for it that way gets their context, and fails
+    after its setup or its call when its own folder's context is another one. What
+    the implementation raised is raised again as it is, so a ``pytest.skip`` there
     skips the tests that use it.
     """
     state = runtime.session_of(request.config)
@@ -2086,16 +2116,21 @@ def strategies_ctx(request: pytest.FixtureRequest) -> Any:
     item = getattr(request, "_pyfuncitem", None)
     own = getattr(request, "_fixturedef", None)
     items = list(request.session.items)
-    # Asked for through request.getfixturevalue(), any test may use it
-    dynamic = item is None or _CTX_FIXTURE not in getattr(item, "fixturenames", ())
     consumers = [
         i
         for i in items
-        if (dynamic or _CTX_FIXTURE in getattr(i, "fixturenames", ()))
-        and _gets_this_fixture(i, own, dynamic)
+        if _CTX_FIXTURE in getattr(i, "fixturenames", ()) and _gets_this_fixture(i, own, False)
     ]
-    if item is not None:
+    if item is not None and _CTX_FIXTURE in getattr(item, "fixturenames", ()):
         consumers.append(item)
+    elif not consumers:
+        # Only asked for through request.getfixturevalue(): any test may use it
+        consumers = [i for i in items if _gets_this_fixture(i, own, True)]
+        if item is not None:
+            consumers.append(item)
+    # Otherwise a test asked for it through request.getfixturevalue() while others
+    # request it: it gets their context, and is checked after its phase
+    # (_ctx_mismatch), whichever of them asked first
     if not consumers:
         return state.path_context()()
     # The tests in one file share their folder's context
@@ -2108,7 +2143,9 @@ def strategies_ctx(request: pytest.FixtureRequest) -> Any:
         scopes.setdefault(answer.label, {})[consumer.nodeid] = None
     if len(scopes) > 1:
         pytest.fail(_ctx_scopes_message(scopes), pytrace=False)
-    return answers[consumers[-1].path].get()
+    answer = answers[consumers[-1].path]
+    state.ctx_fixture = CtxFixture(own, answer.label, scopes)
+    return answer.get()
 
 
 def _gets_this_fixture(item: pytest.Item, own: Any, dynamic: bool) -> bool:
@@ -2138,6 +2175,58 @@ def _gets_this_fixture(item: pytest.Item, own: Any, dynamic: bool) -> bool:
         if _CTX_FIXTURE not in getattr(definition, "argnames", ()):
             return False
     return False
+
+
+def _ctx_mismatch(item: pytest.Item) -> str | None:
+    """
+    Return the guard's message when ``item`` used the plugin's ``strategies_ctx``
+    without being one of the tests it counted when it was set up, through
+    ``request.getfixturevalue()`` (its own, or that of a fixture whose setup asked
+    for it), and its folder's context is not the one the fixture returned; None
+    otherwise. Private API: the fixtures the test's request resolved
+    (``item._request._fixture_defs``).
+    """
+    state = runtime.session_of(item.config)
+    fixture = state.ctx_fixture if state is not None else None
+    if state is None or fixture is None:
+        return None
+    resolved = getattr(getattr(item, "_request", None), "_fixture_defs", None)
+    if not isinstance(resolved, Mapping) or any(
+        item.nodeid in tests for tests in fixture.consumers.values()
+    ):
+        return None
+    if not (
+        _CTX_FIXTURE in resolved and _gets_this_fixture(item, fixture.definition, True)
+    ) and not any(definition in fixture.requesters for definition in resolved.values()):
+        return None
+    label = state.test_context(item).answer().label
+    if label == fixture.label:
+        return None
+    scopes = {other: dict(tests) for other, tests in fixture.consumers.items()}
+    scopes.setdefault(label, {})[item.nodeid] = None
+    return _ctx_scopes_message(scopes)
+
+
+def _check_ctx(item: pytest.Item, error: BaseException | None) -> None:
+    """
+    Fail a test's setup or call that used ``strategies_ctx`` with another folder's
+    context (``_ctx_mismatch``): when the phase passed or skipped, with the guard's
+    message; when it raised an error, which that context may have caused, the
+    message is added to it as a note.
+    """
+    if isinstance(error, pytest.exit.Exception) or (
+        error is not None and not isinstance(error, (Exception, pytest.skip.Exception))
+    ):
+        # pytest.exit(), a KeyboardInterrupt, or a failure that pytest.fail() or
+        # pytest.xfail() reported
+        return
+    message = _ctx_mismatch(item)
+    if message is None:
+        return
+    if error is None or isinstance(error, pytest.skip.Exception):
+        raise pytest.fail.Exception(message, pytrace=False) from None
+    if isinstance(error, Exception) and message not in getattr(error, "__notes__", ()):
+        error.add_note(message)
 
 
 def _ctx_scopes_message(scopes: Mapping[str, Mapping[str, None]]) -> str:

@@ -766,16 +766,25 @@ the loop would run each one after the wrappers of the first folder that asks and
 before those of the others, so what a wrapper prepares would reach an
 implementation in one run and not in another. Since the wrappers receive the
 implementation's kept object, which the folders without them get too,
-`ContextStore._check_unchanged()` takes its fingerprint again after the wrappers
-ran, and when it changed the wrapped answer is a `RuntimeError` that says a
-wrapper must return a new object (a change the fingerprint does not show, in an
-object counted by its type alone, goes unnoticed). A folder's answer is also
+`ContextStore._through_pluggy()` takes its fingerprint right before the wrappers
+run and `_check_unchanged()` right after, and when it changed the wrapped answer
+is a `RuntimeError` that says a wrapper must return a new object (a change the
+fingerprint does not show, in an object counted by its type alone, goes
+unnoticed). Comparing with the fingerprint taken before the wrappers, not the
+one taken when the implementation returned, leaves out what a test, a fixture or
+a factory changed in between, and an object whose fingerprint changes by itself
+(taken a third time, it differs again) blames no wrapper. When the wrappers
+return the very object the implementation returned, the wrapped answer is the
+implementation's own `Answer`, so the folders on both sides share one label (a
+deviation from D7's label rule below: one object is one context for
+`strategies_ctx` and the context lines). A folder's answer is also
 kept per list of the implementations it sees, so later tests look it up.
 The label is the conftest's path relative to the rootdir, the plugin's name
 (its class's name when pluggy named it by its id), `none` when nothing
-answered, or with a wrapper the deepest conftest among the wrappers and the
-implementation that answered (when none is a conftest, the answering plugin's
-name, or the first wrapper's when nothing answered). A `FolderContext`
+answered, or with wrappers that return another object the deepest conftest
+among the wrappers and the implementation that answered (when none is a
+conftest, the answering plugin's name, or the first wrapper's when nothing
+answered). A `FolderContext`
 computes its folder's answer only when a factory that declares `ctx` is called;
 when such a factory fails with `ctx` None while another folder's conftest
 implements the hook, `FolderContext.why_none()` adds where. Each (nested)
@@ -797,21 +806,36 @@ for an example.
 
 Tests and fixtures read the same objects (D8). `strategies_ctx`, a
 session-scoped fixture defined in `plugin.py`, takes its consumers from
-`session.items`: the items whose `fixturenames` contain it, or every item when
-the requesting item (`request._pyfuncitem`, private) does not, because it asked
-through `request.getfixturevalue()`, each kept only when the name resolves to
-this fixture's definition for it (`plugin._gets_this_fixture()`, private API:
-`request._fixturedef`, the item's `_fixtureinfo.name2fixturedefs`, and for a
-dynamic request `session._fixturemanager.getfixturedefs()`): the last
-definition it sees, or one reached from it through definitions that request the
-name in turn. A folder whose `conftest.py` overrides the fixture without
-requesting it, or a test that parametrizes the name, is no consumer. It
-computes each consumer file's
+`session.items` when it is set up: the items whose `fixturenames` contain it,
+each kept only when the name resolves to this fixture's definition for it
+(`plugin._gets_this_fixture()`, private API: `request._fixturedef`, the item's
+`_fixtureinfo.name2fixturedefs`, and for a dynamic request
+`session._fixturemanager.getfixturedefs()`): the last definition it sees, or one
+reached from it through definitions that request the name in turn. A folder
+whose `conftest.py` overrides the fixture without requesting it, or a test that
+parametrizes the name, is no consumer. When there is none, and the requesting
+item (`request._pyfuncitem`, private) asked through `request.getfixturevalue()`,
+every item it resolves for is one. It computes each consumer file's
 `SessionState.test_context(item).answer()`; when their labels differ it fails
 with `pytest.fail(..., pytrace=False)`, which pytest caches for the session, so
 each consumer fails with the message (`plugin._ctx_scopes_message()`, labels
-sorted, each with its first node ID). Otherwise it returns the requesting
-item's `Answer.get()`, the cached object or the implementation's own exception.
+sorted, each with its first node ID). Otherwise it keeps the label and the
+consumers in `SessionState.ctx_fixture` (`_runtime.CtxFixture`) and returns
+their `Answer.get()`, the cached object or the implementation's own exception.
+So which items count does not depend on which one asks first, in one process
+or on any xdist worker. A test that asked through `request.getfixturevalue()`
+while others request it is checked after its setup and after its call, in the
+plugin's `pytest_runtest_setup` and `pytest_runtest_call` wrappers
+(`plugin._check_ctx()`): when its request resolved the fixture
+(`item._request._fixture_defs`, private) or a fixture in
+`CtxFixture.requesters`, and its own folder's label is another one, a phase
+that passed or skipped fails with the message, and an error gets it as a note
+(`add_note`). `CtxFixture.requesters` holds the fixtures whose setup resolved
+`strategies_ctx` (the plugin's `pytest_fixture_setup` wrapper compares the
+request's `_fixture_defs` before and after), so the tests that get one of them
+from its cache are checked too. A fixture set up for a test that had resolved
+`strategies_ctx` already cannot be told from the others; the tests that get it
+from its cache are not checked.
 `pytest_strategy.get_context(config, path)` (`_api.py`) finds the session of
 `config` with `runtime.session_of()` (the innermost one, so an outer session's
 config still works while an in-process `pytester` session runs; `RuntimeError`
@@ -832,15 +856,20 @@ its type by `__attrs_attrs__`) and `namedtuple` field by field, `namespace` for 
 `SimpleNamespace` or `argparse.Namespace` as its `vars()` pairs, `map` as pairs
 in their order, `set` sorted by the elements' JSON, `repr` for other objects,
 and `object` for a type that keeps `object.__repr__`, which goes in `partial`).
-A `repr` is the object's repr without its memory addresses
-(`_without_addresses()`: `" at 0x..."` inside a `<...>` repr, counted by the
-`<` and `>` before it, and a mock's `" id='...'"` before its closing `>`; an
-address outside `<...>`, such as a register's, stays), with the sets it shows
-sorted (`_sorted_sets()`): it reads the text by its quotes and its brackets
-(`(`, `[`, `{`, and `<` when a `>` closes it), and writes the items of each
-`{...}` with two or more items and no `:` between them sorted, nested ones
-first, so the hash order of a set of strings or Enum members does not show; a
-repr whose brackets do not pair up stays as it is. It reads only the text: an
+A `repr` is the object's repr as `_shown()` writes it, after one reading
+(`_scan()`) that finds its quoted strings (a quote opens one only where it is
+not part of a word, `_opens_string()`, so the apostrophe of `O'Brien` does not)
+and pairs its brackets with one stack (`(`, `[`, `{`, and `<` when a `>`
+closes it; a `<` left open when an enclosing group closes, or at the end, is a
+comparison's, and a `>` that closes no `<` an arrow's), so its time grows with
+the length of the repr. `_render()` then writes it without its memory addresses
+(`_without_addresses()`: `" at 0x..."` in a `<...>` repr or a group inside one,
+and a mock's `" id='...'"` that ends its `<...>`; an address outside `<...>`,
+such as a register's, or after a comparison's `<`, stays), with the sets it
+shows sorted (`_sorted_sets()`: the items of each `{...}` with two or more items
+and no `:` between them, nested ones first, so the hash order of a set of
+strings or Enum members does not show; when some brackets do not pair up, the
+sets stay as they are, and the addresses are still removed). It reads only the text: an
 object that holds a set its repr does not show (a testbench holding pytest's
 config, a register holding its chip) costs nothing more, and a set shown
 another way (`",".join(tags)`) is not recognized. Lists and

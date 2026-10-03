@@ -518,6 +518,39 @@ def benches(ctx):
         ]
         result.stdout.no_fnmatch_line("*different vectors*")
 
+    def test_the_context_line_lists_the_contexts_the_collection_computed(self, pytester):
+        # A test of tests/tb_b computes its folder's context while it runs: the
+        # controller lists only the contexts the workers computed while they
+        # collected, as a run in one process does after its collection
+        write(
+            pytester,
+            {
+                "conftest.py": "def pytest_strategies_context(config):\n"
+                "    return {'limit': 3}\n",
+                "strategies.py": STRATEGIES,
+                "test_x.py": TESTS.format(condition="True"),
+                "tests/tb_b/conftest.py": "def pytest_strategies_context(config):\n"
+                "    return {'limit': 7}\n",
+                "tests/tb_b/test_b.py": """
+from pytest_strategy import get_context
+
+def test_b(request):
+    assert get_context(request.config, __file__) == {"limit": 7}
+""",
+            },
+        )
+
+        one_process = pytester.runpytest_subprocess(
+            "-p", "no:cacheprovider", f"--rng-seed={SEED}", "-q"
+        )
+        distributed = run(pytester, "-q")
+
+        for result in (one_process, distributed):
+            result.assert_outcomes(passed=17)
+            assert [
+                line for line in result.stdout.lines if line.startswith("pytest-strategies: con")
+            ] == [f"pytest-strategies: context {fp({'limit': 3}, pytester)}"]
+
     def test_the_reproduce_line_has_the_failed_tests_contexts(self, pytester):
         write(
             pytester,
