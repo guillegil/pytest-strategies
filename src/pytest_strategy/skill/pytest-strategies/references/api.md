@@ -362,10 +362,12 @@ Reporting:
 
 - The header shows `pytest-strategies: RNG seed = S` (hidden by `-q` and `--no-header`).
 - A run with failures prints "reproduce with `--rng-seed=S`" after the tracebacks,
-  also under `-q`.
+  also under `-q`, followed by `(context 976bcfdf)` when the failed tests'
+  factories received a context (section 12).
   A passing run does not print it.
 - `-v` adds, per strategy, the counts of directed and random rows (and of test,
-  exhaustive and skipped rows when there are some) and where `nsamples` came from.
+  exhaustive and skipped rows when there are some) and where `nsamples` came from,
+  then a "Contexts" block with each context's fingerprint.
 - Warnings raised while generating a strategy's rows are reported at the test, prefixed
   with `Strategy '<name>' (<test>): `.
 
@@ -455,6 +457,25 @@ def pytest_strategies_context(config):
 - Random draws in the hook come from a stream of their own, derived from the seed and
   started anew for each implementation, and do not shift any test's rows.
 - `export_strategies()` passes the rootdir's context.
+- After the collection (also with `-q` and `--collect-only`) the plugin prints a
+  fingerprint of each context it computed, the first 8 hex characters of a SHA-256
+  taken when the hook returned the object: `pytest-strategies: context 976bcfdf`,
+  or with several, `pytest-strategies: contexts conftest.py 976bcfdf,
+  tests/tb_a/conftest.py b1e1b237`. Nothing is printed when no context was
+  computed or every one is `None`; the pytest-xdist controller does not print it.
+  The encoding does not depend on `PYTHONHASHSEED` (sets are sorted), the checkout
+  folder (rootdir paths are relative) or `--import-mode` (types by qualified name).
+  A pydantic v2 model is its `model_dump()`: `Field(exclude=True)` fields are left
+  out and a `SecretStr` stays masked. Other objects are their repr without memory
+  addresses; one with the default repr counts by its type alone, shown as
+  `(partial: Plain)`. One that cannot be encoded is `unavailable`. Keep volatile
+  values (temporary paths, times) out of the context, or exclude them.
+- The reproduce line of a failed run ends with the contexts the failed tests'
+  factories received (`(context 976bcfdf)`, or `(contexts conftest.py 976bcfdf,
+  tests/tb_a/conftest.py b1e1b237)`), `-v` lists each context with its number of
+  tests, and `item.stash[VECTOR_KEY].context` is the fingerprint for the rows of a
+  factory that received `ctx` (else `None`). A factory or test that changes the
+  object changes no fingerprint.
 - Under pytest-xdist every worker calls it; it must return the same configuration in
   each, or xdist reports "Different tests were collected".
 - Use it for data the rows depend on; the live objects (a testbench connection) stay

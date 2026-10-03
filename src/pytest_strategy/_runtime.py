@@ -128,6 +128,14 @@ class SessionState:
         # when a folder first needs it, and its result, or the exception it raised,
         # is kept for the rest of the session (see _context.ContextStore)
         self.contexts: ContextStore = ContextStore(config)
+        # The tests whose strategy factories received a context, by the context's
+        # label (their node IDs without parameters, in order), for the -v summary
+        self.context_tests: dict[str, dict[str, None]] = {}
+        # The node IDs of the tests whose setup or call failed, and the contexts
+        # their strategy factories received (label -> fingerprint), computed when
+        # the session finishes, for the line that says how to reproduce the failures
+        self.failed_tests: set[str] = set()
+        self.failed_contexts: dict[str, str] = {}
         # Where each fixture that drew is defined and registered
         # (plugin._fixture_definition and _fixture_base), the last parts of its
         # random stream's key, by FixtureDef
@@ -298,6 +306,14 @@ class StrategyRuntime:
         """Record how a test's strategy was resolved (no-op if no session)."""
         if self.current is not None:
             self.current.resolutions.append(resolution)
+
+    def record_context(self, label: str, test: str) -> None:
+        """
+        Record that a strategy factory of the test ``test`` (its node ID without
+        parameters) received the context labeled ``label`` (no-op if no session).
+        """
+        if self.current is not None:
+            self.current.context_tests.setdefault(label, {})[test] = None
 
     def load_all_strategy_files(self) -> None:
         """Load every strategy file of the active session (no-op if none)."""

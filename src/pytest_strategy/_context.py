@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
+from ._fingerprint import fingerprint
 from ._registry import _contains
 from ._streams import StreamKey, path_part, seed_part
 from .rng import _Stream
@@ -144,12 +145,18 @@ class Answer:
         error: What the implementation raised, or None
         traceback: The error's traceback when it was raised, so raising it again
             for another folder does not stack frames
+        fingerprint: The value's fingerprint (``_fingerprint.fingerprint``), computed
+            when the implementation returned it, before anything received it; None
+            when the value is None or the implementation raised
+        partial: The types in the value that its fingerprint has by name alone
     """
 
     value: Any
     label: str
     error: BaseException | None = None
     traceback: TracebackType | None = None
+    fingerprint: str | None = None
+    partial: tuple[str, ...] = ()
 
     def get(self) -> Any:
         """Return the context, or raise what the implementation raised."""
@@ -160,6 +167,18 @@ class Answer:
 
 # The answer of a folder that no implementation answered for
 NO_ANSWER = Answer(None, "none")
+
+
+def _answered(value: Any, label: str, rootpath: Any) -> Answer:
+    """
+    Return the answer of an implementation (or a wrapper's call) that returned
+    ``value``, with its fingerprint: computed now, so a factory, a fixture or a test
+    that changes the object later changes no fingerprint.
+    """
+    if value is None:
+        return Answer(None, label)
+    digest, partial = fingerprint(value, rootpath)
+    return Answer(value, label, fingerprint=digest, partial=partial)
 
 
 class _Kept:
@@ -211,6 +230,9 @@ class ContextStore:
     Each call, a wrapper's included, draws from the random stream root(S, "ctx")
     (streams v1), started anew for each, so what an implementation draws does not
     depend on which folder asked first or what it asked before.
+
+    The fingerprint of each value is computed right after the call that returned
+    it, on the same stream, and kept with it (:class:`Answer`).
     """
 
     def __init__(self, config: Any) -> None:
@@ -240,6 +262,18 @@ class ContextStore:
             if answer.error is not None or answer.value is not None:
                 return answer
         return NO_ANSWER
+
+    def scopes(self) -> dict[str, Answer]:
+        """
+        Return the answers the folders that consulted the store got, by label,
+        sorted by label: one per answering implementation (or per conftest.py that
+        ends a list with a wrapper), ``none`` for the folders where nothing
+        answered, and the errors.
+        """
+        found: dict[str, Answer] = {}
+        for answer in self._folders.values():
+            found.setdefault(answer.label, answer)
+        return dict(sorted(found.items()))
 
     def label(self, impl: HookImpl) -> str:
         """
@@ -279,10 +313,10 @@ class ContextStore:
                 args = [{"config": self.config}[name] for name in impl.argnames]
                 with _Stream(lambda: StreamKey.root(seed, "ctx")):
                     value = impl.function(*args)
+                    # On the stream too: a repr that draws moves no other stream
+                    answer = _answered(value, label, getattr(self.config, "rootpath", None))
             except _KEPT as e:
                 answer = Answer(None, label, e, e.__traceback__)
-            else:
-                answer = Answer(value, label)
             self._answers[impl] = answer
         return answer
 
@@ -302,9 +336,11 @@ class ContextStore:
                 value = self.config.pluginmanager._hookexec(
                     HOOK, cast("list[HookImpl]", methods), {"config": self.config}, True
                 )
+                if value is None:
+                    return NO_ANSWER
+                return _answered(value, label, getattr(self.config, "rootpath", None))
         except _KEPT as e:
             return Answer(None, label, e, e.__traceback__)
-        return Answer(value, label) if value is not None else NO_ANSWER
 
 
 class FolderContext:

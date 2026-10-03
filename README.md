@@ -512,6 +512,19 @@ def tb_a(request):
 - `pytest_strategy.get_context(config, path)` returns the context of the folder of `path` (a file or a folder): the object a test there gets. A folder whose `conftest.py` pytest has not loaded, because no test there was collected, gets the context of the nearest loaded `conftest.py` above it. Call it from fixtures or hooks: in `pytest_configure`, or while `conftest.py` files are imported, it sees only those loaded so far. It raises `RuntimeError` for a config that no running session uses.
 - Both raise what the implementation raised, as it is: a `pytest.skip` in the hook skips the tests that use them.
 
+After the collection, the plugin prints a fingerprint of the contexts the run computed, so you can tell whether two runs (a CI job and your rerun) built the same configuration. Several contexts are named by the `conftest.py` (or plugin) that answered:
+
+```text
+pytest-strategies: context 976bcfdf
+pytest-strategies: contexts conftest.py 976bcfdf, tests/tb_a/conftest.py b1e1b237
+```
+
+- The fingerprint is the first 8 hex characters of the SHA-256 of a canonical encoding of the object. It is computed when the hook returns the object, before any factory or fixture receives it, so a factory or a test that changes the object later changes no fingerprint. Nothing is printed when no factory with `ctx` ran, or when every context is `None`; the line appears with `-q` and `--collect-only` too. Under pytest-xdist the controller collects no tests, so it does not print the line.
+- The encoding depends only on what the object holds. Sets are sorted, so the hash order of `PYTHONHASHSEED` does not matter. Paths inside the rootdir are written relative to it, so two checkouts agree. A pydantic v2 model is written as its `model_dump()`, which leaves out `Field(exclude=True)` fields and keeps a `SecretStr` masked. Dataclasses and NamedTuples are written field by field, mappings as their pairs in order, floats, dates, `Decimal` and `UUID` as text, and classes and Enum members by their qualified names, never their modules. Anything else is written as its repr, without memory addresses. An object that keeps the default repr (`<Plain object at 0x...>`) is in the fingerprint by its type alone, and the line says so: `context 976bcfdf (partial: Plain)`. An object that cannot be encoded (its repr raises) gives `unavailable`, and never fails the run.
+- Leave volatile values out of the context (temporary paths, process IDs, times), or mark them `Field(exclude=True)` in a pydantic model, so that the fingerprint stays the same from one run to the next.
+- When tests fail, the line that says how to reproduce the run ends with the contexts their factories received: `pytest-strategies: reproduce with --rng-seed=S (context 976bcfdf)`, or `(contexts conftest.py 976bcfdf, tests/tb_a/conftest.py b1e1b237)`.
+- `-v` adds a "Contexts" block to the Strategy Summary, with each context's label, fingerprint and number of tests whose factories received it. `item.stash[VECTOR_KEY].context` holds the fingerprint for the rows of a factory that received `ctx`, and `None` for the others.
+
 ## 🔌 Fixture Integration
 
 Strategies work seamlessly with standard pytest fixtures. You don't need any special configuration; just add the fixture to your test signature.
@@ -574,8 +587,9 @@ When tests fail, the plugin also prints how to rerun them with the same vectors,
 ```text
 pytest-strategies: reproduce with --rng-seed=1763926297314361000
 ```
+When the factories of the failed tests received a context, the line ends with its fingerprint, such as `(context 976bcfdf)` (see [Configuration-Dependent Strategies](#11-configuration-dependent-strategies-new-in-v200)).
 
-With `-v`, a "Strategy Summary" section lists each strategy with the number of tests that use it, their directed and random rows (and their test rows, the exhaustive rows of `--nsamples=auto` and the skipped row of an empty `skip_if_empty` sequence, when there are some), and where the sample count came from (`--nsamples`, `Parameter(nsamples=)` or the default).
+With `-v`, a "Strategy Summary" section lists each strategy with the number of tests that use it, their directed and random rows (and their test rows, the exhaustive rows of `--nsamples=auto` and the skipped row of an empty `skip_if_empty` sequence, when there are some), and where the sample count came from (`--nsamples`, `Parameter(nsamples=)` or the default), followed by the contexts' fingerprints.
 
 Each strategy and test pair draws from its own random streams. Each argument of a random row draws from a stream derived from the seed, the strategy name, the test's node ID without its parameters (its file path relative to the rootdir, its class and its name), the row and the argument's name. The factory draws from a stream derived from the seed, the strategy name and the test's node ID without its parameters, so its draws do not change the rows. As a result:
 - A test gets the same vectors and node IDs whether you run the whole suite, one file or one test, in any collection order and with any `--import-mode`.

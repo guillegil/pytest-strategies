@@ -1,8 +1,10 @@
 """
 Unit tests for the ``ctx`` that factories get from the pytest_strategies_context
 hook: which implementations a folder sees, the order they are asked in, the store
-that calls each one at most once per session, and ``get_context()``, which gives a
-folder's context to fixtures.
+that calls each one at most once per session, ``get_context()``, which gives a
+folder's context to fixtures, and the fingerprint the store takes of each answer:
+in ``VectorInfo.context``, the collection line, the reproduce line and the ``-v``
+summary.
 
 The sessions here have a real plugin manager with the plugin's hook, and no pytest
 session: a plugin registered under a name that ends with ``conftest.py`` is that
@@ -11,12 +13,14 @@ folder's conftest.py, as pytest registers one.
 
 import functools
 import random
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from pytest_strategy import (
     RNG,
+    VECTORS_KEY,
     Parameter,
     RNGInteger,
     StrategyOptions,
@@ -32,9 +36,17 @@ from pytest_strategy._context import (
     visible_from,
 )
 from pytest_strategy._factory import FactoryInputs, call_factory
+from pytest_strategy._fingerprint import fingerprint
+from pytest_strategy._resolver import build_parametrization
 from pytest_strategy._runtime import StrategyRuntime, runtime
 from pytest_strategy._streams import StreamKey
-from pytest_strategy.plugin import _ctx_scopes_message
+from pytest_strategy.plugin import (
+    _context_lines,
+    _contexts_text,
+    _ctx_scopes_message,
+    _failed_contexts,
+    _test_key,
+)
 
 # The run seed of the sessions below
 SEED = 77
@@ -858,3 +870,271 @@ class TestStrategiesCtxMessage:
             "its own pytest_strategies_context, use pytest_strategy.get_context(request.config, "
             "__file__) in that folder's conftest.py fixtures."
         )
+
+
+class Opaque:
+    """A context part that keeps the default repr."""
+
+
+def _resolve(session, factory, folder=".", test_key="tests/test_x.py::test_x"):
+    """Resolve ``factory`` for a test in ``folder`` (relative to the rootdir)."""
+
+    def test_x(x):
+        pass
+
+    return build_parametrization(
+        "s",
+        factory,
+        test_x,
+        config=None,
+        pytest_fixtures=set(),
+        test_key=test_key,
+        context=runtime.path_context(session.rootpath / folder),
+    )
+
+
+class TestFingerprints:
+    """The fingerprint the store keeps with each context (D9)."""
+
+    def test_computed_when_the_implementation_returns(self, session):
+        ctx = {"channels": [3, 5]}
+        session.conftest(".", Plugin(ctx))
+
+        answer = runtime.path_context().answer()
+        ctx["channels"].append(7)
+
+        assert answer.fingerprint == fingerprint({"channels": [3, 5]}, session.rootpath)[0]
+        assert answer.partial == ()
+        # A folder that asks later gets the object as it is now, and the kept fingerprint
+        later = runtime.path_context(session.rootpath / "tests").answer()
+        assert later.value is ctx
+        assert later.fingerprint == answer.fingerprint
+
+    def test_paths_are_relative_to_the_rootdir(self, session):
+        session.conftest(".", Plugin(fn=lambda config: config.rootpath / "tb.yaml"))
+
+        assert runtime.path_context().answer().fingerprint == fingerprint(Path("tb.yaml"))[0]
+
+    def test_partial_types_are_kept(self, session):
+        session.conftest(".", Plugin({"handle": Opaque()}))
+
+        assert runtime.path_context().answer().partial == ("Opaque",)
+
+    def test_none_and_errors_have_none(self, session):
+        def broken(config):
+            raise RuntimeError("no bench")
+
+        session.conftest("tests/a", Plugin(None))
+        session.conftest("tests/b", Plugin(fn=broken))
+
+        assert runtime.path_context(session.rootpath / "tests/a").answer().fingerprint is None
+        assert runtime.path_context(session.rootpath / "tests/b").answer().fingerprint is None
+
+    def test_a_wrapper_s_answer_is_fingerprinted_as_it_returns_it(self, session):
+        class Extend(Plugin):
+            @pytest.hookimpl(wrapper=True)
+            def pytest_strategies_context(self, config):
+                ctx = yield
+                return {**ctx, "extended": True}
+
+        session.conftest(".", Plugin({"name": "root"}))
+        session.conftest("tests/w", Extend())
+
+        wrapped = runtime.path_context(session.rootpath / "tests/w").answer()
+        plain = runtime.path_context(session.rootpath / "tests").answer()
+
+        assert wrapped.fingerprint == fingerprint({"name": "root", "extended": True})[0]
+        assert plain.fingerprint == fingerprint({"name": "root"})[0]
+
+    def test_a_repr_that_draws_moves_no_stream(self, session):
+        class Drawing:
+            def __repr__(self):
+                return f"Drawing({RNG.generator().random()})"
+
+        session.conftest(".", Plugin(Drawing()))
+        RNG.generator().seed("caller stream")
+        expected = random.Random("caller stream").random()
+
+        runtime.path_context().answer()
+
+        assert RNG.generator().random() == expected
+
+    def test_an_unencodable_context_is_unavailable(self, session):
+        class Broken:
+            def __repr__(self):
+                raise ValueError("no repr")
+
+        session.conftest(".", Plugin(Broken()))
+
+        assert runtime.path_context().answer().fingerprint == "unavailable"
+
+    def test_the_scopes_by_label(self, session):
+        def broken(config):
+            raise RuntimeError("no bench")
+
+        session.conftest(".", Plugin({"name": "root"}))
+        session.conftest("tests/a", Plugin({"name": "A"}))
+        session.conftest("tests/b", Plugin(None))
+        session.conftest("tests/c", Plugin(fn=broken))
+        for folder in ("tests/a", "tests/a/deep", "tests/b", "tests/c", "."):
+            runtime.path_context(session.rootpath / folder).answer()
+
+        scopes = runtime.current.contexts.scopes()
+
+        # tests/b's conftest.py defers to the rootdir's
+        assert list(scopes) == ["conftest.py", "tests/a/conftest.py", "tests/c/conftest.py"]
+        assert scopes["tests/c/conftest.py"].error is not None
+
+    def test_a_folder_where_nothing_answers_is_the_none_scope(self, session):
+        session.conftest("tests/a", Plugin({"name": "A"}))
+        for folder in ("tests/a", "tests/b"):
+            runtime.path_context(session.rootpath / folder).answer()
+
+        scopes = runtime.current.contexts.scopes()
+
+        assert list(scopes) == ["none", "tests/a/conftest.py"]
+        assert scopes["none"] is NO_ANSWER
+
+
+class TestVectorInfoContext:
+    """VectorInfo.context is set only for the rows of factories that received ctx."""
+
+    def test_the_rows_of_a_factory_that_received_ctx(self, session):
+        session.conftest(".", Plugin({"limit": 3}))
+
+        infos = _resolve(session, lambda ctx: _parameter()).infos
+
+        expected = runtime.path_context().answer().fingerprint
+        assert expected is not None
+        assert [info.context for info in infos] == [expected] * len(infos)
+
+    def test_not_for_a_factory_without_ctx(self, session):
+        plugin = session.conftest(".", Plugin({"limit": 3}))
+
+        infos = _resolve(session, lambda nsamples: _parameter()).infos
+
+        assert {info.context for info in infos} == {None}
+        assert plugin.calls == 0
+
+    def test_not_when_the_context_is_none(self, session):
+        session.conftest(".", Plugin(None))
+
+        assert {info.context for info in _resolve(session, lambda ctx: _parameter()).infos} == {
+            None
+        }
+        assert {
+            info.context for info in _resolve(session, lambda ctx=None: _parameter()).infos
+        } == {None}
+
+    def test_the_folder_s_fingerprint(self, session):
+        session.conftest(".", Plugin({"name": "root"}))
+        session.conftest("tests/a", Plugin({"name": "A"}))
+
+        in_a = _resolve(session, lambda ctx: _parameter(), "tests/a").infos[0].context
+        in_b = _resolve(session, lambda ctx: _parameter(), "tests/b").infos[0].context
+
+        assert in_a == fingerprint({"name": "A"})[0]
+        assert in_b == fingerprint({"name": "root"})[0]
+
+    def test_a_factory_that_changes_ctx_changes_no_later_fingerprint(self, session):
+        session.conftest(".", Plugin({"runs": 0}))
+
+        def counting(ctx):
+            ctx["runs"] += 1
+            return _parameter()
+
+        first = _resolve(session, counting, test_key="t::a").infos[0].context
+        second = _resolve(session, counting, test_key="t::b").infos[0].context
+
+        assert first == second == fingerprint({"runs": 0})[0]
+
+    def test_the_tests_are_counted_by_label(self, session):
+        session.conftest(".", Plugin({"name": "root"}))
+        session.conftest("tests/a", Plugin({"name": "A"}))
+
+        _resolve(session, lambda ctx: _parameter(), "tests/a", "tests/a/t.py::test_1")
+        # A second strategy of the same test counts once
+        _resolve(session, lambda ctx: _parameter(), "tests/a", "tests/a/t.py::test_1")
+        _resolve(session, lambda ctx: _parameter(), "tests/a", "tests/a/t.py::test_2")
+        _resolve(session, lambda ctx: _parameter(), ".", "t.py::test_3")
+        _resolve(session, lambda nsamples: _parameter(), ".", "t.py::test_4")
+
+        assert runtime.current.context_tests == {
+            "tests/a/conftest.py": dict.fromkeys(["tests/a/t.py::test_1", "tests/a/t.py::test_2"]),
+            "conftest.py": dict.fromkeys(["t.py::test_3"]),
+        }
+        assert _context_lines(runtime.current) == [
+            f"conftest.py: {fingerprint({'name': 'root'})[0]}, 1 test(s)",
+            f"tests/a/conftest.py: {fingerprint({'name': 'A'})[0]}, 2 test(s)",
+        ]
+
+
+class TestContextOutput:
+    """The text of the context line, the reproduce line's suffix and the -v block."""
+
+    def test_one_context_without_its_label(self):
+        assert _contexts_text({"conftest.py": "976bcfdf"}) == "context 976bcfdf"
+
+    def test_several_with_their_labels_sorted(self):
+        text = _contexts_text({"tests/tb_a/conftest.py": "b1e1b237", "conftest.py": "976bcfdf"})
+
+        assert text == "contexts conftest.py 976bcfdf, tests/tb_a/conftest.py b1e1b237"
+
+    def test_none_without_contexts(self):
+        assert _contexts_text({}) is None
+
+    def test_the_partial_types_in_the_v_block(self, session):
+        session.conftest(".", Plugin({"handle": Opaque(), "other": Plugin()}))
+        runtime.path_context().answer()
+
+        (line,) = _context_lines(runtime.current)
+
+        assert line.endswith(" (partial: Opaque, Plugin), 0 test(s)")
+
+    def test_a_context_no_factory_received_counts_no_test(self, session):
+        session.conftest(".", Plugin({"name": "root"}))
+        runtime.path_context().answer()
+
+        assert _context_lines(runtime.current) == [
+            f"conftest.py: {fingerprint({'name': 'root'})[0]}, 0 test(s)"
+        ]
+
+    def test_the_test_key_of_an_item(self):
+        item = SimpleNamespace(
+            nodeid="tests/test_x.py::TestA::test_a[rand-1]",
+            name="test_a[rand-1]",
+            originalname="test_a",
+        )
+        plain = SimpleNamespace(nodeid="tests/test_x.py::test_b", name="test_b")
+
+        assert _test_key(item) == "tests/test_x.py::TestA::test_a"
+        assert _test_key(plain) is None
+
+    def test_the_failed_tests_contexts(self, session):
+        session.conftest(".", Plugin({"name": "root"}))
+        session.conftest("tests/a", Plugin({"name": "A"}))
+        root = _resolve(session, lambda ctx: _parameter(), ".", "t.py::test_r").infos[0]
+        in_a = _resolve(session, lambda ctx: _parameter(), "tests/a", "tests/a/t.py::test_a")
+        plain = _resolve(session, lambda: _parameter(), ".", "t.py::test_p").infos[0]
+
+        def item(test, info):
+            return SimpleNamespace(
+                nodeid=f"{test}[rand-0]",
+                name=f"{test.rsplit('::')[-1]}[rand-0]",
+                originalname=test.rsplit("::")[-1],
+                stash={VECTORS_KEY: (info,)},
+            )
+
+        items = [
+            item("t.py::test_r", root),
+            item("tests/a/t.py::test_a", in_a.infos[0]),
+            item("t.py::test_p", plain),
+        ]
+        state = runtime.current
+        state.failed_tests = {"tests/a/t.py::test_a[rand-0]", "t.py::test_p[rand-0]"}
+
+        assert _failed_contexts(state, items) == {
+            "tests/a/conftest.py": fingerprint({"name": "A"})[0]
+        }
+        state.failed_tests.add("t.py::test_r[rand-0]")
+        assert list(_failed_contexts(state, items)) == ["conftest.py", "tests/a/conftest.py"]

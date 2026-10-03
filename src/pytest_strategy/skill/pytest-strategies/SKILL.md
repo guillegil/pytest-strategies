@@ -258,6 +258,12 @@ def esm_rw(nsamples, ctx):
   those tests are in folders with different contexts.
 - Under pytest-xdist every worker calls it, so it must return the same data in
   each.
+- After the collection the plugin prints `pytest-strategies: context 976bcfdf`,
+  a hash of the context taken when the hook returned it (sets sorted, rootdir
+  paths relative, pydantic `Field(exclude=True)` left out), so two runs can tell
+  whether they built the same one. Keep volatile values (temp paths, times) out
+  of it. The reproduce line of a failed run ends with `(context 976bcfdf)`, and
+  `VECTOR_KEY.context` holds it for factories that received `ctx`.
 - `skip_if_empty="reason"` (keyword-only) turns an empty `Series`/`RNGSequence`
   into one skipped row (test ID `[skipped]`) instead of a collection error.
 
@@ -285,7 +291,8 @@ To reproduce a failure:
 3. The same seed, rootdir and plugin version give the same rows whether you run the
    suite, one file or one test, in any order, with or without xdist. The test's path
    relative to the rootdir is part of its random stream: compare the `rootdir:` line
-   of the CI log with yours. Without an ini file the rootdir depends on where pytest
+   of the CI log with yours, and the `pytest-strategies: context` line when the
+   factories take `ctx`. Without an ini file the rootdir depends on where pytest
    is run from, so run from the same folder as CI (or add a `pytest.ini` or
    `[tool.pytest.ini_options]`).
 4. Once fixed, add the failing values as a directed vector (`"bug_1234": (17, "EUR")`;

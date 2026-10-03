@@ -792,10 +792,39 @@ class PytestStrategyPlugin:
         return lines
 
     @pytest.hookimpl
+    def pytest_report_collectionfinish(self, config: Config) -> list[str]:
+        """
+        Print the fingerprints of the testbench contexts the collection computed,
+        after the collection report (also under -q and --collect-only): ``context
+        976bcfdf``, or ``contexts conftest.py 976bcfdf, tests/a/conftest.py b1e1b237``
+        with each one's label, for a context with several. Nothing when no context
+        was computed, or none was other than None.
+
+        A pytest-xdist controller collects nothing, so this does not run there.
+        """
+        state = runtime.session_of(config)
+        if state is None:
+            return []
+        shown = {label: _fingerprint_text(a) for label, a in _computed_contexts(state).items()}
+        text = _contexts_text(shown)
+        return [f"pytest-strategies: {text}"] if text is not None else []
+
+    @pytest.hookimpl
+    def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
+        """Note a test whose setup or call failed, for the line that reproduces the run."""
+        if report.failed and report.when != "teardown":
+            state = runtime.current
+            if state is not None:
+                state.failed_tests.add(report.nodeid)
+
+    @pytest.hookimpl
     def pytest_terminal_summary(
         self, terminalreporter: Any, exitstatus: int, config: Config
     ) -> None:
-        """Say how to reproduce a failed run, and summarize the strategies with -v."""
+        """
+        Say how to reproduce a failed run, with the contexts the failed tests'
+        factories received, and summarize the strategies and the contexts with -v.
+        """
         state = runtime.current
         summary = state.worker_summary if state is not None else None
         # Unmatched --strategy-constraint-off items a pytest-xdist worker reported
@@ -804,8 +833,11 @@ class PytestStrategyPlugin:
         failed = exitstatus in (pytest.ExitCode.TESTS_FAILED, pytest.ExitCode.INTERRUPTED)
         distributed = getattr(config.option, "dist", "no") != "no"
         if failed and state is not None and (state.resolutions or distributed):
+            # Exactly the 3.0 line when no failed test's factory received a context
+            contexts = _contexts_text(state.failed_contexts)
+            suffix = f" ({contexts})" if contexts is not None else ""
             terminalreporter.write_line(
-                f"pytest-strategies: reproduce with --rng-seed={_run_seed()}"
+                f"pytest-strategies: reproduce with --rng-seed={_run_seed()}{suffix}"
             )
 
         if self._verbosity(config) < 1:
@@ -815,21 +847,32 @@ class PytestStrategyPlugin:
             summary = _summary(state)
         if not summary["count"]:
             terminalreporter.write_line("No strategies registered")
-            return
-        terminalreporter.write_line(f"Registered strategies: {summary['count']}")
-        for line in summary["lines"]:
-            terminalreporter.write_line(f"  {line}")
-        if self._verbosity(config) >= 2:
-            # Show all strategy names in very verbose mode
-            for name in summary["names"]:
-                terminalreporter.write_line(f"  - {name}")
+        else:
+            terminalreporter.write_line(f"Registered strategies: {summary['count']}")
+            for line in summary["lines"]:
+                terminalreporter.write_line(f"  {line}")
+            if self._verbosity(config) >= 2:
+                # Show all strategy names in very verbose mode
+                for name in summary["names"]:
+                    terminalreporter.write_line(f"  - {name}")
+        contexts = summary.get("contexts", [])
+        if contexts:
+            terminalreporter.write_line(f"Contexts: {len(contexts)}")
+            for line in contexts:
+                terminalreporter.write_line(f"  {line}")
 
     @pytest.hookimpl
     def pytest_sessionfinish(self, session: Session) -> None:
-        """On a pytest-xdist worker, send the -v summary to the controller."""
+        """
+        Note the contexts the failed tests' strategy factories received, and on a
+        pytest-xdist worker send the -v summary to the controller.
+        """
+        state = runtime.current
+        if state is not None and state.failed_tests:
+            state.failed_contexts = _failed_contexts(state, session.items)
         workeroutput = getattr(session.config, "workeroutput", None)
         if workeroutput is not None:
-            workeroutput["pytest_strategies_summary"] = _summary(runtime.current)
+            workeroutput["pytest_strategies_summary"] = _summary(state)
 
     @pytest.hookimpl(optionalhook=True)
     def pytest_testnodedown(self, node: Any, error: Any) -> None:
@@ -1593,7 +1636,85 @@ def _summary(state: Any) -> dict[str, Any]:
         "unmatched_constraints_off": (
             list(state.unmatched_constraints_off) if state is not None else []
         ),
+        "contexts": _context_lines(state) if state is not None else [],
     }
+
+
+def _computed_contexts(state: Any) -> dict[str, Answer]:
+    """
+    Return the contexts the session computed that are not None (their answers by
+    label, sorted by label): what the folders that asked got, errors left out.
+    """
+    return {
+        label: answer
+        for label, answer in state.contexts.scopes().items()
+        if answer.fingerprint is not None
+    }
+
+
+def _fingerprint_text(answer: Answer) -> str:
+    """Return a context's fingerprint, and the types it has by name alone: ``(partial: Plain)``."""
+    if not answer.partial:
+        return str(answer.fingerprint)
+    return f"{answer.fingerprint} (partial: {', '.join(answer.partial)})"
+
+
+def _contexts_text(fingerprints: Mapping[str, str]) -> str | None:
+    """
+    Describe contexts given as label -> fingerprint: ``context 976bcfdf`` for one,
+    ``contexts conftest.py 976bcfdf, tests/a/conftest.py b1e1b237`` for several
+    (sorted by label), None for none.
+    """
+    if not fingerprints:
+        return None
+    if len(fingerprints) == 1:
+        return f"context {next(iter(fingerprints.values()))}"
+    return "contexts " + ", ".join(f"{label} {fp}" for label, fp in sorted(fingerprints.items()))
+
+
+def _context_lines(state: Any) -> list[str]:
+    """
+    Describe each context the session computed for the -v summary: its label, its
+    fingerprint and the number of tests whose strategy factories received it.
+    """
+    return [
+        f"{label}: {_fingerprint_text(answer)}, "
+        f"{len(state.context_tests.get(label, ()))} test(s)"
+        for label, answer in _computed_contexts(state).items()
+    ]
+
+
+def _test_key(item: pytest.Item) -> str | None:
+    """
+    Return the node ID of an item's test without its parameters (the
+    ``metafunc.definition.nodeid`` its strategies were resolved with), or None for
+    an item that is not a test function's.
+    """
+    original = getattr(item, "originalname", None)
+    if not isinstance(original, str) or not item.nodeid.endswith(item.name):
+        return None
+    return item.nodeid[: len(item.nodeid) - len(item.name)] + original
+
+
+def _failed_contexts(state: Any, items: Sequence[pytest.Item]) -> dict[str, str]:
+    """
+    Return the contexts the strategy factories of the failed tests among ``items``
+    received, as label -> fingerprint, sorted by label.
+    """
+    labels = {test: label for label, tests in state.context_tests.items() for test in tests}
+    found: dict[str, str] = {}
+    for item in items:
+        if item.nodeid not in state.failed_tests:
+            continue
+        fingerprint = next(
+            (info.context for info in item.stash.get(VECTORS_KEY, ()) if info.context),
+            None,
+        )
+        test = _test_key(item)
+        label = labels.get(test) if test is not None else None
+        if fingerprint is not None and label is not None:
+            found[label] = fingerprint
+    return dict(sorted(found.items()))
 
 
 def _registration_count() -> int:

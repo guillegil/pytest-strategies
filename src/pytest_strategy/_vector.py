@@ -151,7 +151,10 @@ class VectorInfo:
             An ``ids=`` callable receives the row's VectorInfo with the ID in the
             effective format instead, before any suffix.
         seed: The run's seed (``--rng-seed``)
-        context: The fingerprint of the context the factory received, or None
+        context: The fingerprint of the context (``pytest_strategies_context``) the
+            strategy's factory received, computed when the hook returned it: 8 hex
+            characters, or ``unavailable`` for a context that cannot be encoded.
+            None when the factory does not declare ``ctx`` or the context is None.
         constraints_off: The constraints turned off in this strategy, in order
         streams: The version of the random streams the values come from
     """

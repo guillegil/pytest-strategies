@@ -21,7 +21,7 @@ from typing import Any, NamedTuple, cast
 
 import pytest
 
-from ._context import FolderContext
+from ._context import Answer, FolderContext
 from ._factory import FactoryInputs, call_factory
 from ._ids import (
     ID_FORMATS,
@@ -267,9 +267,13 @@ def _vector_infos(
     strategy: str,
     origin: str | None,
     arg_names: Sequence[str],
+    context: str | None,
     constraints_off: tuple[str, ...],
 ) -> tuple[VectorInfo, ...]:
-    """Return the VectorInfo of each row, whose final test ID is in ``ids``."""
+    """
+    Return the VectorInfo of each row, whose final test ID is in ``ids``. ``context``
+    is the fingerprint of the context the factory received, or None.
+    """
     seed = runtime.run_seed()
     order = {arg: position for position, arg in enumerate(arg_names)}
     # The enumerated arguments in declaration order, per set of enumerated arguments
@@ -291,8 +295,7 @@ def _vector_infos(
                 values=row.values,
                 id=row_id,
                 seed=seed,
-                # The context's fingerprint is not computed yet
-                context=None,
+                context=context,
                 constraints_off=constraints_off,
             )
         )
@@ -489,23 +492,32 @@ def build_parametrization(
     # T/"factory", and every random and exhaustive row draws each argument from a
     # stream below T/"row", so the factory's draws, the other rows and the other
     # arguments do not move a row's values.
-    stream_key = StreamKey.root(
-        seed_part(runtime.run_seed()),
-        "test",
-        name,
-        test_key if test_key is not None else _fallback_test_key(test_fn, config),
-    )
+    if test_key is None:
+        test_key = _fallback_test_key(test_fn, config)
+    stream_key = StreamKey.root(seed_part(runtime.run_seed()), "test", name, test_key)
 
     # Call the factory with the inputs it declares by name, on its own stream: rng
     # is RNG.generator() during the call. Its nsamples is the --nsamples value,
     # "auto", or 10 without the option, never None (FR-8). The count the rows use is
     # resolved below, once the Parameter's own nsamples is known.
-    if context is None:
-        context = runtime.path_context(_test_file(test_fn))
+    folder = context if context is not None else runtime.path_context(_test_file(test_fn))
+    # The folder's answer, once the factory asked for ctx
+    asked: list[Answer] = []
+
+    def ctx() -> Any:
+        answer = folder.answer()
+        asked.append(answer)
+        return answer.get()
+
     with _Stream(stream_key.child("factory")) as rng:
-        inputs = FactoryInputs(options=options, rng=rng, ctx=context, why_no_ctx=context.why_none)
+        inputs = FactoryInputs(options=options, rng=rng, ctx=ctx, why_no_ctx=folder.why_none)
         result = call_factory(name, factory, inputs, rootpath=_rootpath(config))
     param = check_factory_result(name, factory, result)
+    # The fingerprint of the context the factory received (D9): only a factory that
+    # declares ctx asks for it, and only an answer that is not None has one
+    fingerprint = asked[0].fingerprint if asked else None
+    if fingerprint is not None:
+        runtime.record_context(asked[0].label, test_key)
 
     # --strategy-constraint-off: the names this strategy turns off are the ones its
     # Parameter has, in evaluation order. The plugin checks once collection ends that
@@ -660,6 +672,7 @@ def build_parametrization(
             strategy=name,
             origin=_origin(factory, config),
             arg_names=argnames,
+            context=fingerprint,
             constraints_off=constraints_off,
         )
 

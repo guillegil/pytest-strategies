@@ -99,9 +99,9 @@ src/pytest_strategy/
 ├── skill/               # The agent skill that pytest-strategies skill install copies
 ├── py.typed             # PEP 561 marker: type checkers use the package's annotations
 └── _*.py                # Other internal helpers (introspection, test IDs, record mode,
-                         # StrategyOptions, factory calls, the context of each folder,
-                         # runtime state, warning categories, the value encoding of
-                         # schema 1 documents, the random stream keys)
+                         # StrategyOptions, factory calls, the context of each folder
+                         # and its fingerprint, runtime state, warning categories, the
+                         # value encoding of schema 1 documents, the random stream keys)
 ```
 
 ## Core Components
@@ -665,10 +665,14 @@ strategies of its tests may not have been resolved). It is not checked under
   unmatched `--strategy-constraint-off` items of a narrowed run
 - `pytest_report_header` - Prints the seed, and the `--strategy-constraint-off`
   items when given
+- `pytest_report_collectionfinish` - Prints the fingerprints of the contexts the
+  collection computed (`pytest-strategies: context <fp>`)
+- `pytest_runtest_logreport` - Records the tests whose setup or call failed
 - `pytest_terminal_summary` - After a failed run, prints
-  `pytest-strategies: reproduce with --rng-seed=S`; with `-v`, a Strategy
-  Summary (tests and the rows of each kind per strategy, and where `nsamples`
-  came from)
+  `pytest-strategies: reproduce with --rng-seed=S`, followed by the contexts the
+  failed tests' factories received; with `-v`, a Strategy Summary (tests and the
+  rows of each kind per strategy, and where `nsamples` came from) and the
+  Contexts block (label, fingerprint and tests per context)
 
 **Strategy files:** a strategy file is named `strategies.py`, `strategy.py`,
 `*_strategies.py` or `*_strategy.py` and contains a registration decorator
@@ -758,6 +762,37 @@ config still works while an in-process `pytester` session runs; `RuntimeError`
 when none) and returns `SessionState.path_context(path)()`, the path caller
 above. Both call only the implementations of the folders they ask for, as
 factories do.
+
+Each context has a fingerprint (D9). `_fingerprint.fingerprint(value, rootpath)`
+returns the first 8 hex characters of the SHA-256 of a canonical JSON encoding,
+and the qualified names of the types it holds by name alone (`partial`): every
+value that JSON does not hold as it is becomes an object with one key, its tag
+(`float` by repr, `enum` by qualified name and name, `bytes` as hex, `path`
+relative to the rootdir as spelled or through `realpath`, tagged strings for
+dates, times, `Decimal`, `UUID` and `complex`, `type` by qualified name, `model`
+for a pydantic v2 model through `model_dump(mode="python")`, recognized on its
+type by `model_fields` and `model_dump`, `dataclass` and `namedtuple` field by
+field, `map` as pairs in their order, `set` sorted by the elements' JSON, `repr`
+without `" at 0x..."`, and `object` for a type that keeps `object.__repr__`,
+which goes in `partial`). Lists and tuples are arrays. A container met again
+below itself is `{"cycle": n}`. Any exception while encoding (a raising repr, a
+`RecursionError`) gives `unavailable`. `ContextStore._call()` and
+`_through_pluggy()` compute it right after the call returns, inside the same
+`_Stream(root(S, "ctx"))`, and keep it on the `Answer` (`fingerprint`,
+`partial`), so later changes to the object change no fingerprint. In
+`build_parametrization`, the factory's `ctx` is a closure that records the
+folder's `Answer` when the factory asks for it: `VectorInfo.context` is that
+answer's fingerprint, None for a factory that does not declare `ctx`, and
+`runtime.record_context(label, test)` counts the test for the `-v` block.
+`ContextStore.scopes()` gives the answers the folders got, by label;
+`pytest_report_collectionfinish` prints those with a fingerprint
+(`plugin._contexts_text()`: `context <fp>` for one, `contexts <label> <fp>, ...`
+sorted by label for several, with `(partial: ...)`). `pytest_runtest_logreport`
+records the node IDs of failed setups and calls, and `pytest_sessionfinish`
+maps them to the labels and fingerprints their factories received
+(`plugin._failed_contexts()`, through the test's node ID without parameters,
+`_test_key()`), which end the reproduce line. `_summary()` carries the
+`Contexts` lines of the `-v` summary, so a pytest-xdist worker sends them with it.
 
 ---
 
