@@ -1456,9 +1456,10 @@ def _fixture_definition(func: Callable[..., Any], config: Config | None) -> tupl
     mode or checked out next to the tests, unless the module's file is named like
     a test module or a strategy file (``test_utils.py``) and is inside the rootdir,
     below a testpaths entry or imported by its path in the session, which keys it
-    by its path (``definition_part``). One whose code has no file (``exec``'d
-    code) is named by its module too: its file would resolve against the working
-    directory.
+    by its path (``definition_part``); a regular package's module that pytest
+    imported under its package name (``acme.test_utils``) keeps that name. One
+    whose code has no file (``exec``'d code) is named by its module too: its file
+    would resolve against the working directory.
     """
     return (definition_part(func, config), factory_source(func)[1] or "")
 
@@ -1470,9 +1471,11 @@ def definition_part(fn: Callable[..., Any], config: Config | None, *, folder: bo
     for the active session's config, the files pytest and the plugin imported by
     their paths in it (``SessionState.imported_files``). A ``conftest.py``, a test
     module or a strategy file is keyed by its path inside the rootdir, below a
-    testpaths entry, or when this session imported it by its path; elsewhere (a
-    library on ``sys.path`` with ``acme/strategies.py``) by the rules of any other
-    module, which give its module's name when ``sys.modules`` has it under that name.
+    testpaths entry, or when this session imported it by its path and it is not a
+    regular package's module that ``sys.modules`` holds under its package name;
+    elsewhere (a library on ``sys.path`` with ``acme/strategies.py``) by the rules
+    of any other module, which give its module's name when ``sys.modules`` has it
+    under that name.
     """
     state = runtime.current
     imported = (

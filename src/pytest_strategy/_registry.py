@@ -114,9 +114,14 @@ def source_part(
       real path is in ``imported``, the files that pytest or the plugin imported
       by their paths in this session (the test modules pytest collected, the
       ``conftest.py`` files it loaded and the strategy files the plugin loaded;
-      empty outside a session). Elsewhere a file with such a name is a module of a
-      library on ``sys.path`` (an editable install's, ``PYTHONPATH``'s, a ``pip
-      install`` target folder's), and the rules below apply to it as to any module.
+      empty outside a session), unless it is a module of a regular package that
+      ``sys.modules`` holds under its package name, the dotted name of the folders
+      with an ``__init__.py`` above it (``acme.test_utils``), which is the name
+      pytest imports it under in every import mode and another module's import
+      gives it. Elsewhere a file with such a name is a module of a library on
+      ``sys.path`` (an editable install's, ``PYTHONPATH``'s, a ``pip install``
+      target folder's) or of a package, and the rules below apply to it as to any
+      module.
     - The name of its module, for a module imported by that name: an installed
       package's (in a site-packages or dist-packages folder, also when it is named
       like a test module), an editable install's (whose file is in a source tree,
@@ -133,11 +138,14 @@ def source_part(
     Two limitations remain. A package module named like a test module or a
     strategy file inside the rootdir (``src/acme/test_utils.py``) keeps its path
     in a checkout and has its module's name installed, so the two draw different
-    values; renaming it avoids that. And a file named like one outside the rootdir
-    and the testpaths is keyed by its path only in a session that imported it by
-    its path (a run that names its folder on the command line), and by its
-    module's name in a session that imported it only by that name (another
-    module's ``import``, in a run that does not collect it).
+    values; renaming it avoids that. And a helper module named like one outside
+    the rootdir and the testpaths that is not in a regular package (its folder has
+    no ``__init__.py``) and is imported by its name (``from test_b import port``)
+    is keyed by its path in a run that collects its folder, where pytest imports it
+    by its path under a name derived from the path, and by its module's name in a
+    run that does not. So is a regular package's module that ``sys.modules`` holds
+    only under another name than its package name (a namespace package's name
+    above it).
 
     Args:
         fn: The function, factory, partial or callable object
@@ -216,11 +224,11 @@ def _imported_by_path(
     Whether a file named like a ``conftest.py``, a test module or a strategy file
     is one that pytest or the plugin imports by its path (see :func:`source_part`):
     inside the rootdir or below a testpaths entry, by its real path or as it is
-    spelled, or imported by its path in this session.
+    spelled, or imported by its path in this session, unless it is a module of a
+    regular package that ``sys.modules`` holds under its package name
+    (:func:`_held_under_package_name`).
     """
     real = os.path.normcase(os.path.realpath(source))
-    if real in imported:
-        return True
     spelled = os.path.normcase(os.path.abspath(source))
     for base in (*([rootpath] if rootpath is not None else []), *testpaths):
         for folder in {
@@ -229,7 +237,60 @@ def _imported_by_path(
         }:
             if _contains(folder, real) or _contains(folder, spelled):
                 return True
+    # pytest imports a regular package's module under its package name in every
+    # import mode, the name another module's import gives it: keyed by that name, it
+    # draws the same in a run that collects its folder and in one that does not
+    return real in imported and not _held_under_package_name(source)
+
+
+def _held_under_package_name(source: str) -> bool:
+    """
+    Whether the file ``source`` is a module of a regular package (its folder has an
+    ``__init__.py``) that ``sys.modules`` holds under its package name: the dotted
+    name of the chain of folders with an ``__init__.py`` above it, ending at the
+    module (``acme.test_utils`` for ``acme/test_utils.py``, ``acme`` for
+    ``acme/__init__.py``), the chain ``_pytest.pathlib.resolve_package_path()``
+    finds. The chain is read from the path as it is spelled and from the real path.
+
+    pytest 8.4 and 9 import such a module under that name in the prepend, append
+    and importlib import modes, so the name does not depend on the mode or the
+    run. A module that pytest imports under another name (a namespace package's
+    name above the chain, with ``consider_namespace_packages``) and a module
+    outside a regular package (a rootless basename under prepend and append, a
+    name importlib makes from its path) are not held under it.
+    """
+    real = _normalize(source)
+    for path in {os.path.abspath(source), os.path.realpath(source)}:
+        name = _package_name(path)
+        loaded = sys.modules.get(name) if name else None
+        file = getattr(loaded, "__file__", None)
+        if file and _normalize(file) == real:
+            return True
     return False
+
+
+def _package_name(path: str) -> str | None:
+    """
+    The dotted name of the file ``path`` in its regular package, from the chain of
+    folders with an ``__init__.py`` above it, or None when its folder has none.
+    """
+    folder, file = os.path.split(path)
+    stem = os.path.splitext(file)[0]
+    parts = [] if stem == "__init__" else [stem]
+    # As pytest's resolve_package_path(): up to the first folder without an
+    # __init__.py or whose name is not an identifier
+    while os.path.isfile(os.path.join(folder, "__init__.py")):
+        name = os.path.basename(folder)
+        if not name.isidentifier():
+            break
+        parts.append(name)
+        parent = os.path.dirname(folder)
+        if parent == folder:
+            break
+        folder = parent
+    if not parts or parts == [stem]:
+        return None
+    return ".".join(reversed(parts))
 
 
 def matches_pattern(pattern: str, path: str) -> bool:

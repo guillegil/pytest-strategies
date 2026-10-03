@@ -1310,8 +1310,9 @@ class TestFixtureDefinition:
         """
         A test module that pytest collected from a folder named on the command line
         outside the rootdir and the testpaths, its folder's conftest.py, or a strategy
-        file the plugin loaded there: the session imported it by its path, under a
-        module name that depends on --import-mode, so its path keys it.
+        file the plugin loaded there, in a folder that is not a package: the session
+        imported it by its path, under a module name that --import-mode derives from
+        its path, so its path keys it.
         """
         path = tmp_path / "other" / name
         path.parent.mkdir()
@@ -1333,6 +1334,157 @@ class TestFixtureDefinition:
             ]
 
         assert found == [module, f"../other/{name}", "../other"]
+
+    @pytest.mark.parametrize("name", ["test_utils.py", "strategies.py", "conftest.py"])
+    @pytest.mark.parametrize(
+        ("folders", "module"),
+        [
+            # acme/ has an __init__.py, proj/ next to it does not
+            (["acme"], "acme"),
+            (["acme", "acme/sub"], "acme.sub"),
+            # The chain ends at the first folder without an __init__.py
+            (["acme/sub"], "sub"),
+        ],
+    )
+    def test_a_package_module_the_session_imported_by_its_path_keeps_its_name(
+        self, tmp_path, name, folders, module
+    ):
+        """
+        A module of a regular package outside the rootdir and the testpaths that the
+        session imported by its path (pytest collected its folder, as pytest .
+        ../acme does from a rootdir in tests/): pytest 8 and 9 import it under its
+        package name, the dotted name of the folders with an __init__.py above it,
+        in every import mode, the name another module's import gives it, so it
+        keeps that name in the runs that collect it and in those that do not.
+        """
+        for folder in folders:
+            (tmp_path / folder).mkdir(parents=True, exist_ok=True)
+            (tmp_path / folder / "__init__.py").write_text("")
+        path = tmp_path / folders[-1] / name
+        path.write_text(FIXTURES_SOURCE)
+        root = tmp_path / "tests"
+        root.mkdir()
+        module = f"{module}.{name.removesuffix('.py')}"
+        recorded = {os.path.normcase(os.path.realpath(path))}
+
+        with imported(path, module) as loaded:
+            found = [
+                source_part(loaded.conn, root),
+                source_part(loaded.conn, root, imported=recorded),
+                source_part(loaded.conn, root, folder=True, imported=recorded),
+            ]
+
+        assert found == [module] * 3
+
+    @pytest.mark.parametrize(
+        ("held", "keyed"),
+        [
+            # Under its package name: the name keys it
+            ("acme.test_utils", "acme.test_utils"),
+            # Only under a name that is not its package name (a namespace package's
+            # name above the chain, or a rootless basename): the path keys it
+            ("ns.acme.test_utils", "../acme/test_utils.py"),
+            ("test_utils", "../acme/test_utils.py"),
+        ],
+    )
+    def test_a_package_module_held_under_another_name_keeps_its_path(self, tmp_path, held, keyed):
+        """
+        A recorded package module that sys.modules does not hold under its package
+        name was imported under a name pytest derived otherwise, so rule 3 keys it
+        by its path.
+        """
+        (tmp_path / "acme").mkdir()
+        (tmp_path / "acme" / "__init__.py").write_text("")
+        path = tmp_path / "acme" / "test_utils.py"
+        path.write_text(FIXTURES_SOURCE)
+        root = tmp_path / "tests"
+        root.mkdir()
+        recorded = {os.path.normcase(os.path.realpath(path))}
+
+        with imported(path, held) as loaded:
+            found = source_part(loaded.conn, root, imported=recorded)
+
+        assert found == keyed
+
+    def test_another_file_under_the_package_name_does_not_count(self, tmp_path):
+        """
+        The package name must hold that very file: another file under it (a second
+        checkout's acme package first on sys.path) leaves rule 3 to key it by its path.
+        """
+        (tmp_path / "acme").mkdir()
+        (tmp_path / "acme" / "__init__.py").write_text("")
+        path = tmp_path / "acme" / "test_utils.py"
+        path.write_text(FIXTURES_SOURCE)
+        other = tmp_path / "elsewhere" / "acme" / "test_utils.py"
+        other.parent.mkdir(parents=True)
+        other.write_text(FIXTURES_SOURCE)
+        root = tmp_path / "tests"
+        root.mkdir()
+        recorded = {os.path.normcase(os.path.realpath(path))}
+
+        with imported(path, "test_utils") as loaded, imported(other, "acme.test_utils"):
+            found = source_part(loaded.conn, root, imported=recorded)
+
+        assert found == "../acme/test_utils.py"
+
+    @pytest.mark.parametrize(
+        ("layout", "held", "keyed"),
+        [
+            # The package's own __init__.py, named like a test module by python_files
+            (("acme/__init__.py",), "acme", "acme"),
+            # A folder whose name is not an identifier ends the chain, as in pytest,
+            # whose importlib mode then makes a name from the path
+            (("my-acme/__init__.py", "my-acme/test_utils.py"), "my-acme.test_utils", None),
+            # No __init__.py: a rootless basename
+            (("other/test_utils.py",), "test_utils", None),
+        ],
+    )
+    def test_the_package_name_follows_pytests_package_path(self, tmp_path, layout, held, keyed):
+        """The chain of folders with an __init__.py, as _pytest.pathlib.resolve_package_path."""
+        for file in layout:
+            (tmp_path / file).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / file).write_text(FIXTURES_SOURCE)
+        path = tmp_path / layout[-1]
+        root = tmp_path / "tests"
+        root.mkdir()
+        recorded = {os.path.normcase(os.path.realpath(path))}
+
+        with imported(path, held) as loaded:
+            found = source_part(loaded.conn, root, test_files=["*.py"], imported=recorded)
+
+        assert found == (keyed or path_part(path, root))
+
+    def test_a_package_module_in_a_linked_folder_has_its_spelled_package_name(self, tmp_path):
+        """
+        The chain is read from the path as it is spelled and from the real path: a
+        module whose folder is linked into a package (acme/linked -> ../shared, a
+        package too) is held under acme.linked.test_utils or shared.test_utils.
+        """
+        base = tmp_path / "b"
+        (base / "shared").mkdir(parents=True)
+        (base / "shared" / "__init__.py").write_text("")
+        (base / "shared" / "test_utils.py").write_text(FIXTURES_SOURCE)
+        (base / "acme").mkdir()
+        (base / "acme" / "__init__.py").write_text("")
+        try:
+            os.symlink(base / "shared", base / "acme" / "linked", target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks are not available")
+        spelled = base / "acme" / "linked" / "test_utils.py"
+        root = tmp_path / "a" / "tests"
+        root.mkdir(parents=True)
+        recorded = {os.path.normcase(os.path.realpath(spelled))}
+
+        found = []
+        for module in ("acme.linked.test_utils", "shared.test_utils", "test_utils"):
+            with imported(spelled, module) as loaded:
+                found.append(source_part(loaded.conn, root, imported=recorded))
+
+        assert found == [
+            "acme.linked.test_utils",
+            "shared.test_utils",
+            "../../b/shared/test_utils.py",
+        ]
 
     def test_the_files_the_session_imported_count_for_its_own_config_only(self, tmp_path):
         """
