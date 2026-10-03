@@ -834,7 +834,8 @@ def test_an_installed_packages_factory_exports_the_same_from_any_environment(pyt
         package = pytester.path / env / "lib" / "python3" / folder / "ps_installed_strategies"
         package.mkdir(parents=True)
         (package / "__init__.py").write_text(dedent(INSTALLED_STRATEGIES))
-        pytester.makeini(f"[pytest]\npythonpath = {package.parent}\n")
+        # pytest splits ini paths with shlex, which drops Windows backslashes
+        pytester.makeini(f"[pytest]\npythonpath = {package.parent.as_posix()}\n")
 
         result = pytester.runpytest_subprocess("-p", "no:cacheprovider", f"--rng-seed={SEED}")
 
