@@ -551,7 +551,7 @@ Control test generation directly from the command line:
 | `--vector-mode`     | Generation mode: `all`, `random_only`, `directed_only`, `mixed`, `test` | `pytest --vector-mode=test`                 |
 | `--vector-name`     | Run only the directed vector with this name                             | `pytest --vector-name=edge_case_1`          |
 | `--vector-index`    | Run only the directed vector at this index (0-based, in definition order) | `pytest --vector-index=0`                 |
-| `--rng-seed`        | Set seed for reproducibility                                            | `pytest --rng-seed=42`                      |
+| `--rng-seed`        | Set seed for reproducibility. Without it, `--lf` and `--sw` reuse the seed of the failed run (see [Reproducibility](#-reproducibility)) | `pytest --rng-seed=42`                      |
 | `--strategy-constraint-off` | Turn named constraints off for this run: `NAME` in every strategy, `STRATEGY:NAME` in one; comma-separated, repeatable (see [Constraints](#4-constraints)) | `pytest --strategy-constraint-off=dma_burst:aligned` |
 | `--list-strategies` | List the registered strategy names and exit                             | `pytest --list-strategies`                  |
 
@@ -618,6 +618,20 @@ A `--junitxml` report holds the same information, under pytest-xdist too:
   </properties>
   ```
 - With `junit_family = xunit1` or `legacy`, each failed strategy row's test case also gets string properties: `pytest_strategies.strategy`, `.kind`, `.name` (for a directed or test vector), `.index`, `.id`, `.value.<argument>` for each value (as in the section), `.seed`, `.context` and `.constraints_off` when set, and `.command`, the command to run from the rootdir. With several `@strategy` decorators they are numbered per strategy, in the order of the node ID: `pytest_strategies.0.strategy`, `pytest_strategies.1.strategy`. pytest's default family, `xunit2`, has no properties per test case in its schema, so there the test cases get none.
+
+`--lf` and `--sw` rerun the failed rows with the values they failed with. The plugin records the seed of each failed strategy row, with the options its rerun command adds, in pytest's cache (`pytest-strategies/failed-seeds`). A run with `--lf`, `--sw` or `--sw-skip` and no `--rng-seed` reuses the seed of the newest of the failed rows it reruns, among those whose file still exists and that the paths and node IDs on the command line select. A line under the seed line says so:
+```text
+pytest-strategies: RNG seed = 1763926297314361000
+pytest-strategies: seed reused from the failed run for --lf (--rng-seed overrides)
+```
+- The recorded options are not applied. When they differ from the run's, the line ends with them (`; recorded with --nsamples=13`, or `without --vector-mode=test`): add them to get the same rows.
+- Failed rows recorded under another seed are deselected, so pytest keeps them in its last-failed set, and the end of the run gives the command that reruns them, one per seed (and per set of options), even with `-qq`:
+  ```text
+  pytest-strategies: deselected 2 failed rows recorded under another seed; run them with:
+    pytest --lf --rng-seed=1763926297314360000  # 2 rows
+  ```
+- `--rng-seed` always wins and deselects nothing, and so does a `config.option.rng_seed` that a `conftest.py` sets in its `pytest_configure`. An `RNG.seed()` call there does not change the reused seed, as it does not change `--rng-seed`. `--ff` and `--nf` draw a new seed, because they run every test, and so does `--sw-reset`.
+- A row leaves the record once it passes under its recorded seed and options. Under pytest-xdist the controller reads and writes the record and sends the seed to the workers. Without pytest's cache plugin (`-p no:cacheprovider`) there is no `--lf` or `--sw`, and nothing is recorded.
 
 With `-v`, a "Strategy Summary" section lists each strategy with the number of tests that use it, their directed and random rows (and their test rows, the exhaustive rows of `--nsamples=auto` and the skipped row of an empty `skip_if_empty` sequence, when there are some), and where the sample count came from (`--nsamples`, `Parameter(nsamples=)` or the default), followed by the contexts' fingerprints.
 

@@ -100,8 +100,8 @@ src/pytest_strategy/
 ├── py.typed             # PEP 561 marker: type checkers use the package's annotations
 └── _*.py                # Other internal helpers (introspection, test IDs, record mode,
                          # StrategyOptions, factory calls, each folder's context and its
-                         # fingerprint, runtime state, warning categories, the encoding of
-                         # schema 1 documents, the stream keys, a failed row's repro section)
+                         # fingerprint, runtime state, warnings, schema 1 encoding, stream
+                         # keys, a failed row's repro section, the seeds --lf reuses)
 ```
 
 ## Core Components
@@ -636,19 +636,19 @@ strategies of its tests may not have been resolved). It is not checked under
 - `pytest_configure` - Checks the `strategies_ids` ini option (any value but
   `names` or `values` is a `UsageError`, exit code 4), opens the session's state
   and sets the run's seed, restarting the plugin's generator from it; a
-  pytest-xdist worker without `--rng-seed` takes the controller's seed. The
-  module has two implementations. A `tryfirst` one opens the state, so it exists
-  when the other plugins' and the conftest.py files' `pytest_configure` run
-  (`get_context()` works there, with the conftest.py files loaded so far, and
-  with the seed of `--rng-seed` or of the pytest-xdist controller, when one is
-  given). The other, at the default priority, registers the plugin instance,
-  whose `pytest_configure` sets the seed: it runs after the initial conftest.py
-  files' `pytest_configure` and the plugins registered after the module, as in
-  3.0, so one that seeds there (`RNG.seed(1234)`, or `config.option.rng_seed =
-  99`) sets the run's seed. A context computed in `pytest_configure` without
-  `--rng-seed`, before such a call, draws from the seed in effect then
-- `pytest_configure_node` - (pytest-xdist only) sends the controller's seed to
-  each worker
+  pytest-xdist worker without `--rng-seed` takes the controller's seed, and a
+  `--lf` or `--sw` run without it the failed run's (`_reuse.plan()`, see
+  [Reproducibility](#reproducibility)). A `tryfirst` implementation opens the
+  state and chooses those seeds, reading the cache before the cache plugin sets
+  `config.cache`, so `get_context()` works in the other plugins' and the
+  conftest.py files' `pytest_configure`, with the conftest.py files loaded so
+  far. The other registers the plugin instance, whose `pytest_configure` sets
+  the seed after the initial conftest.py files' and the later plugins'
+  `pytest_configure`, as in 3.0: `RNG.seed(1234)` there sets it when no seed was
+  chosen, `config.option.rng_seed = 99` always. A context computed in
+  `pytest_configure` before such a call draws from the seed in effect then
+- `pytest_configure_node` - (pytest-xdist only) sends each worker the
+  controller's seed, and the `--lf` rows to deselect or to watch
 - `pytest_plugin_registered` - Records a `conftest.py` that pytest imported by
   its path (a module registered under its path) in
   `SessionState.imported_files`, which keys its fixtures and factories by its
@@ -670,28 +670,28 @@ strategies of its tests may not have been resolved). It is not checked under
 - `pytest_collection_modifyitems` - Fails the run on a name registered twice in
   one folder, when `--vector-name` or `--vector-index` matched no strategy, and
   when a `--strategy-constraint-off` item matched no constraint in a run of the
-  whole suite
+  whole suite. Another deselects the `--lf` rows recorded under another seed
 - `pytest_collection_finish` - Handles `--list-strategies`, and prints the
   unmatched `--strategy-constraint-off` items of a narrowed run; on a
   pytest-xdist worker, notes the digest of each strategy's values and the
   contexts the collection computed, for the controller
-- `pytest_report_header` - Prints the seed, and the `--strategy-constraint-off`
-  items when given
+- `pytest_report_header` - Prints the seed, the line that says a `--lf` or
+  `--sw` run reused it, and the `--strategy-constraint-off` items
 - `pytest_report_collectionfinish` - Prints the fingerprints of the contexts the
   collection computed (`pytest-strategies: context <fp>`)
 - `pytest_runtest_logreport` - Records the tests whose setup or call failed, and
   the failed strategy rows' commands (`report.pytest_strategies`, see `_repro`)
 - `pytest_terminal_summary` - After a failed run, prints `pytest-strategies:
-  reproduce with --rng-seed=S` with the contexts the failed tests' factories
-  received, and the failed rows; with `-v`, a Strategy Summary (tests and rows
-  of each kind per strategy, where `nsamples` came from) and the Contexts block
-  (label, fingerprint, tests per context). The pytest-xdist controller first
-  prints the workers' context line, and in red what they generated differently
+  reproduce with --rng-seed=S` with the failed tests' contexts and the failed
+  rows, and in any run the commands of the deselected `--lf` rows; with `-v`, a
+  Strategy Summary (rows of each kind per strategy, where `nsamples` came from)
+  and the Contexts block (label, fingerprint, tests per context). The xdist
+  controller first prints the workers' context line, and in red what differed
 - `pytest_sessionfinish` - A tryfirst one adds the `--junitxml` suite
-  properties. The other maps the failed tests to their factories' contexts; a
-  pytest-xdist worker sends its `-v` summary and its part of the check that the
-  workers generated the same vectors, and the controller compares the workers'
-  parts and turns exit status 0 or 5 into 4 when they differ
+  properties. The other maps the failed tests to their factories' contexts and
+  records the failed seeds; a pytest-xdist worker sends its `-v` summary, its
+  `--lf` rows and its part of the same-vectors check, and the controller
+  compares the parts and turns exit status 0 or 5 into 4 when they differ
 - `pytest_testnodedown` - (pytest-xdist only) keeps what each worker sent, by
   worker ID; a worker that crashed sent nothing
 
@@ -1186,6 +1186,51 @@ properties are strings, so pytest-xdist carries them. Their `command` is run
 from the rootdir: the item's node ID (`rootdir_nodeid()`), and `-c` and
 `--rootdir` relative to the rootdir (`generation_options(..., start=rootpath)`).
 test_junitxml_integration.py checks each family, under `-n 2` too.
+
+**`--lf` and `--sw` (`_reuse.py`, D4):** the controller's `pytest_sessionfinish`
+(not a pytest-xdist worker's) updates the cache key
+`pytest-strategies/failed-seeds`, a dict `{nodeid: {"seed": S, "options":
+[...]}}` in the order the rows were recorded, newest last
+(`_record_failed_seeds()`, `_reuse.updated()`): it removes an entry whose row
+passed in this run under the entry's seed and options, then adds each row of
+`SessionState.failed_rows` again as the newest, with the seed and options of its
+report's `pytest_strategies` attribute. The makereport wrapper takes a passing
+row's options (`generation_options()`) from a passing call report, only for the
+items in `SessionState.recorded`, the node IDs of the map's entries under the
+run's seed. A pytest-xdist worker gets `recorded` and `deselect` through
+`workerinput` and sends its passed rows' options and the node IDs it deselected
+through `workeroutput`, which `pytest_testnodedown` keeps in
+`SessionState.worker_reuse`. The map is written only when it changed, so a run
+that never failed creates nothing. With `--lf`, `--sw` or `--sw-skip` (not
+`--sw-reset`) and no seed given, the tryfirst `pytest_configure` calls
+`_reuse.plan()`. It reads the cache through `Cache.for_config(config,
+_ispytest=True)`, because the cache plugin's `pytest_configure`, tryfirst too,
+has not set `config.cache` yet, and a conftest.py's `pytest_configure` can
+compute a context, which draws from the run's seed (nothing is read without the
+cache plugin or under `--cache-clear`). It takes the keys of pytest's
+`cache/lastfailed`, or the `last_failed` of `cache/stepwise`, and keeps the
+map's entries among them whose file exists and that the command line selects
+(when `config.args_source` is `ARGS`: a path is a prefix, and a node ID's `::`
+names match the test and its parametrizations; an argument that is not an
+existing path, such as a `--pyargs` module, selects everything). The newest kept
+entry gives the seed. `Reuse.rows` are the kept entries of that seed, and
+`Reuse.others` the rest, which a second `pytest_collection_modifyitems`
+deselects through `pytest_deselected`: pytest's `LFPlugin` drops a test from
+`lastfailed` only on a report, so they stay there. When none of the failed tests
+it would rerun is collected (the run's options do not generate the reused rows),
+`--lf` says `N known failures not in selected tests` and runs every collected
+test, as pytest does. The instance's `pytest_configure` seeds from `Reuse.seed`,
+unless a conftest.py's `pytest_configure` set `config.option.rng_seed`, which
+drops the reuse as `--rng-seed` would; an `RNG.seed()` call there does not
+change the reused seed, as it does not change `--rng-seed`. `_reuse_line()` adds
+to the header the options of the newest reused row that the run lacks (`with`)
+and those the run adds (`without`), from `generation_options(config, ())`; a
+constraint the rows turned off counts as off when the run turns it off in their
+strategy or everywhere. After the failed rows, at every verbosity,
+`_deselected_lines()` prints one `pytest --lf --rng-seed=S ...` per seed and set
+of options (`_reuse.commands()`, the constraint items of a group merged into one
+option). test_lf_seed_reuse_integration.py runs pytest in subprocesses, with the
+cache plugin, `-n 2` included.
 
 **One generator of the plugin's own:** every draw (the RNG types and the `RNG.*`
 helpers) comes from `RNG.generator()`, a `random.Random` instance. The plugin

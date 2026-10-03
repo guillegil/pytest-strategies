@@ -43,7 +43,7 @@ import pytest
 from _pytest.pathlib import ImportPathMismatchError, import_path
 from pytest import Config, Session
 
-from . import _repro
+from . import _repro, _reuse
 from ._context import Answer
 from ._fingerprint import UNAVAILABLE, canonical
 from ._options import VectorMode, constraint_off_item, parse_constraint_off
@@ -214,17 +214,28 @@ class PytestStrategyPlugin:
         after the pytest_configure of the initial conftest.py files and of the
         plugins registered after the module: one that seeds there
         (``RNG.seed(1234)``, or ``config.option.rng_seed = 99``) sets the run's
-        seed, as in 3.0.
+        seed, as in 3.0. ``--rng-seed``, and the seed a ``--lf`` or ``--sw`` run
+        reuses, win over ``RNG.seed(1234)``; ``config.option.rng_seed = 99`` wins
+        over both.
         """
         # A pytest-xdist worker without --rng-seed uses the controller's seed (see
-        # pytest_configure_node): workers must generate identical vectors.
-        # Without either, the seed chosen for this process is kept. Either way the
+        # pytest_configure_node): workers must generate identical vectors. A --lf
+        # or --sw run without it reuses the failed run's seed (_reuse.plan).
+        # Without any, the seed chosen for this process is kept. Either way the
         # generator restarts from it, so values drawn when test modules are
         # imported follow the printed seed. The global random state is not touched.
-        RNG.seed(_given_seed(config))
+        given = _given_seed(config)
         state = runtime.current
+        reuse = state.reuse if state is not None else None
+        if state is not None and reuse is not None and given is not None:
+            # A conftest.py's pytest_configure set config.option.rng_seed, which wins
+            # as --rng-seed does. The reused seed acts as --rng-seed: an RNG.seed()
+            # call there does not change it.
+            state.reuse = reuse = None
+        RNG.seed(reuse.seed if reuse is not None else given)
         if state is not None:
             state.run_seed = RNG.get_seed()
+            _read_failed_seeds(config, state)
         # From now on, a test module that imports a strategy file the plugin has
         # not loaded yet gets it loaded by the plugin (see _StrategyFileFinder)
         _install_strategy_file_finder()
@@ -238,11 +249,17 @@ class PytestStrategyPlugin:
     @pytest.hookimpl(optionalhook=True)
     def pytest_configure_node(self, node: Any) -> None:
         """
-        Send the controller's RNG seed to a pytest-xdist worker.
+        Send the controller's RNG seed to a pytest-xdist worker, and the failed rows
+        it deselects (recorded under another seed than the one a --lf run reuses) and
+        those recorded under this run's seed (see ``_read_failed_seeds``).
 
         Optional hook: only called when pytest-xdist is installed.
         """
         node.workerinput["pytest_strategies_seed"] = _run_seed()
+        state = runtime.current
+        if state is not None:
+            node.workerinput[_DESELECT] = sorted(state.deselect)
+            node.workerinput[_RECORDED] = sorted(state.recorded)
 
     @pytest.hookimpl
     def pytest_plugin_registered(self, plugin: object, plugin_name: str, manager: Any) -> None:
@@ -448,6 +465,28 @@ class PytestStrategyPlugin:
         # nothing instead; the controller stops the session with this message.
         items.clear()
         session.shouldfail = message
+
+    @pytest.hookimpl(specname="pytest_collection_modifyitems")
+    def pytest_collection_modifyitems_reuse(self, config: Config, items: list[pytest.Item]) -> None:
+        """
+        Deselect the failed rows a --lf or --sw run does not rerun: those recorded
+        under another seed than the one it reuses (``SessionState.deselect``), whose
+        values this seed would not give. A deselected test stays in pytest's
+        last-failed set, and the terminal summary gives the command that reruns it
+        (``_deselected_lines``). pytest's own --lf selection, a wrapper, runs after
+        this.
+        """
+        state = runtime.session_of(config)
+        if state is None or not state.deselect:
+            return
+        kept: list[pytest.Item] = []
+        deselected: list[pytest.Item] = []
+        for item in items:
+            (deselected if item.nodeid in state.deselect else kept).append(item)
+        if deselected:
+            items[:] = kept
+            config.hook.pytest_deselected(items=deselected)
+            state.deselected.extend(item.nodeid for item in deselected)
 
     @staticmethod
     def _clash_error() -> str | None:
@@ -680,13 +719,24 @@ class PytestStrategyPlugin:
         raised an error goes into the same section, before the row. A report whose
         error has no sections gets it as a section of its own.
 
+        A passing call of a row the failed-seeds map holds under this run's seed
+        (``SessionState.recorded``) notes the options of its rerun command, so the
+        entry leaves the map when they are the ones it was recorded with.
+
         It wraps the other plugins' wrappers (tryfirst), so it sees the outcome they
         set, such as an XPASS(strict) turned into a failure.
         """
         report = yield
         message = item.stash.get(_CTX_MESSAGES, {}).pop(call.when, None)
         repro: str | None = None
-        if report.failed and call.when in ("setup", "call"):
+        if report.passed and call.when == "call":
+            state = runtime.session_of(item.config)
+            if state is not None and item.nodeid in state.recorded:
+                infos = item.stash.get(VECTORS_KEY, ())
+                if infos:
+                    options = _repro.generation_options(item.config, infos)
+                    state.passed_rows[item.nodeid] = tuple(options)
+        elif report.failed and call.when in ("setup", "call"):
             infos = item.stash.get(VECTORS_KEY, ())
             if infos:
                 repro, attribute = _repro.failure(item, infos)
@@ -903,8 +953,14 @@ class PytestStrategyPlugin:
 
     @pytest.hookimpl
     def pytest_report_header(self, config: Config, start_path: Path) -> list[str]:
-        """Add the RNG seed, and the constraints turned off, to the test report header."""
+        """
+        Add the RNG seed, whether it was reused from the failed run for --lf or --sw
+        (``_reuse_line``), and the constraints turned off, to the test report header.
+        """
         lines = [f"pytest-strategies: RNG seed = {_run_seed()}"]
+        state = runtime.session_of(config)
+        if state is not None and state.reuse is not None:
+            lines.append(_reuse_line(config, state.reuse))
         items = runtime.session_options(config).constraints_off_items
         if items:
             lines.append(f"pytest-strategies: constraints off: {', '.join(items)}")
@@ -950,8 +1006,9 @@ class PytestStrategyPlugin:
         """
         Say how to reproduce a failed run, with the contexts the failed tests'
         factories received, list the failed strategy rows' rerun commands
-        (``_failed_rows_lines``), and summarize the strategies and the contexts with
-        -v.
+        (``_failed_rows_lines``), give the commands that rerun the failed rows a
+        --lf run deselected (``_deselected_lines``), and summarize the strategies
+        and the contexts with -v.
 
         On the pytest-xdist controller, which collects nothing, first print what the
         workers printed after their collection (the contexts, the unmatched
@@ -984,6 +1041,9 @@ class PytestStrategyPlugin:
                 f"pytest-strategies: reproduce with --rng-seed={_run_seed()}{suffix}"
             )
             for line in _failed_rows_lines(state.failed_rows, self._verbosity(config)):
+                terminalreporter.write_line(line)
+        if state is not None:
+            for line in _deselected_lines(state):
                 terminalreporter.write_line(line)
 
         if self._verbosity(config) < 1:
@@ -1033,7 +1093,8 @@ class PytestStrategyPlugin:
     @pytest.hookimpl
     def pytest_sessionfinish(self, session: Session) -> None:
         """
-        Note the contexts the failed tests' strategy factories received.
+        Note the contexts the failed tests' strategy factories received, and update
+        the failed-seeds map in pytest's cache (``_record_failed_seeds``).
 
         A pytest-xdist worker sends the controller its -v summary and its part of the
         check that every worker generated the same vectors: the fingerprint of each
@@ -1043,6 +1104,9 @@ class PytestStrategyPlugin:
         collected nothing), and the terminal summary names them. Every worker
         collects every test, so their contexts and values must be the same; names
         in the test IDs no longer make pytest-xdist notice different values.
+
+        A worker also sends the failed rows it deselected for a --lf run and those
+        that passed under their recorded seed; only the controller writes the map.
         """
         state = runtime.current
         if state is not None and state.worker_summaries:
@@ -1057,8 +1121,15 @@ class PytestStrategyPlugin:
         if workeroutput is not None:
             workeroutput["pytest_strategies_summary"] = _summary(state)
             workeroutput[_CHECK] = _check(state)
+            if state is not None:
+                workeroutput[_REUSE] = {
+                    "deselected": list(state.deselected),
+                    "passed": {nodeid: list(o) for nodeid, o in state.passed_rows.items()},
+                }
         if state is None:
             return
+        if workeroutput is None:
+            _record_failed_seeds(session.config, state)
         state.worker_differences = _differences(state.worker_checks)
         if state.worker_differences and session.exitstatus in (
             pytest.ExitCode.OK,
@@ -1071,9 +1142,9 @@ class PytestStrategyPlugin:
         """
         Keep what a pytest-xdist worker sent when its session finished, by worker ID:
         its summary (the -v summary shown is the first worker's that finished, with
-        the Contexts of every worker) and
-        its part of the check that the workers generated the same vectors. A worker
-        that crashed sent nothing.
+        the Contexts of every worker), its part of the check that the workers
+        generated the same vectors, and the failed rows it deselected for a --lf run
+        or saw pass under their recorded seed. A worker that crashed sent nothing.
 
         The controller collects nothing, and every worker collects all the tests.
         Optional hook: only called when pytest-xdist is installed.
@@ -1091,6 +1162,9 @@ class PytestStrategyPlugin:
         check = output.get(_CHECK)
         if isinstance(check, dict):
             state.worker_checks[worker] = check
+        reuse = output.get(_REUSE)
+        if isinstance(reuse, dict):
+            state.worker_reuse[worker] = reuse
 
     # ==== HELPER METHODS ====
 
@@ -1910,6 +1984,116 @@ def _failed_rows_lines(rows: Mapping[str, Mapping[str, str]], verbosity: int) ->
     return lines
 
 
+# What the pytest-xdist controller sends each worker (workerinput): the node IDs of
+# the failed rows the worker deselects, and of those recorded under the run's seed
+_DESELECT = "pytest_strategies_deselect"
+_RECORDED = "pytest_strategies_recorded"
+
+# What a worker sends back (workeroutput): the rows it deselected, and the options
+# of the recorded rows whose call passed
+_REUSE = "pytest_strategies_reuse"
+
+
+def _read_failed_seeds(config: Config, state: Any) -> None:
+    """
+    Note, once the run's seed is set, which failed rows the run deselects (those a
+    --lf or --sw run did not reuse the seed of; ``_reuse.plan``) and which rows the
+    failed-seeds map holds under the run's seed, whose entries leave the map when
+    they pass (see ``pytest_runtest_makereport``).
+
+    A pytest-xdist worker gets both from the controller (``pytest_configure_node``)
+    and reads nothing from the cache. Without pytest's cache plugin there is no
+    ``config.cache``, and nothing is read.
+    """
+    workerinput = getattr(config, "workerinput", None)
+    if workerinput is not None:
+        state.deselect = set(workerinput.get(_DESELECT, ()))
+        state.recorded = set(workerinput.get(_RECORDED, ()))
+        return
+    if state.reuse is not None:
+        state.deselect = set(state.reuse.others)
+    cache = getattr(config, "cache", None)
+    if cache is not None:
+        seed = state.seed()
+        state.recorded = {
+            nodeid for nodeid, entry in _reuse.read(cache).items() if entry.seed == seed
+        }
+
+
+def _record_failed_seeds(config: Config, state: Any) -> None:
+    """
+    Update the failed-seeds map in pytest's cache when the session finishes, on the
+    process that reports the run (not on a pytest-xdist worker): record each strategy
+    row whose setup or call failed, as the newest entry, and remove the entries of
+    the rows that passed under their seed and their options (``_reuse.updated``). The
+    map is read again first, and written only when it changed.
+    """
+    cache = getattr(config, "cache", None)
+    if cache is None:
+        return
+    passed: dict[str, Sequence[str]] = dict(state.passed_rows)
+    for output in _by_worker(state.worker_reuse):
+        rows = output.get("passed")
+        if isinstance(rows, dict):
+            passed.update(
+                (nodeid, options)
+                for nodeid, options in rows.items()
+                if isinstance(options, list) and all(isinstance(o, str) for o in options)
+            )
+    if not passed and not state.failed_rows:
+        return
+    entries = _reuse.read(cache)
+    new = _reuse.updated(entries, state.seed(), passed, state.failed_rows)
+    if list(new.items()) != list(entries.items()):
+        _reuse.write(cache, new)
+
+
+def _reuse_line(config: Config, reuse: _reuse.Reuse) -> str:
+    """
+    Return the header line that says a --lf or --sw run reused the failed run's
+    seed, naming the options the newest reused row was recorded with when they
+    differ from the run's (``recorded with --nsamples=13``); they are not applied.
+    """
+    text = (
+        f"pytest-strategies: seed reused from the failed run for {reuse.flag} "
+        "(--rng-seed overrides)"
+    )
+    differences = _reuse.differences(
+        list(reuse.rows.values()),
+        _repro.generation_options(config, ()),
+        runtime.session_options(config).constraints_off,
+    )
+    return text if differences is None else f"{text}; recorded {differences}"
+
+
+def _deselected_lines(state: Any) -> list[str]:
+    """
+    Return the lines that give the commands rerunning the failed rows a --lf or --sw
+    run deselected, because they were recorded under another seed than the one it
+    reused: ``pytest --lf --rng-seed=S ...`` for each of their seeds, followed by the
+    number of rows (``_reuse.commands``). Under pytest-xdist the workers deselected
+    them. Nothing when no row was deselected.
+    """
+    reuse = state.reuse
+    if reuse is None:
+        return []
+    deselected = dict.fromkeys(state.deselected)
+    for output in _by_worker(state.worker_reuse):
+        rows = output.get("deselected")
+        if isinstance(rows, list):
+            deselected.update(dict.fromkeys(row for row in rows if isinstance(row, str)))
+    rows = [entry for nodeid, entry in reuse.others.items() if nodeid in deselected]
+    if not rows:
+        return []
+    seeds = "another seed" if len({row.seed for row in rows}) == 1 else "other seeds"
+    rows_text = "1 failed row" if len(rows) == 1 else f"{len(rows)} failed rows"
+    them = "it" if len(rows) == 1 else "them"
+    lines = [f"pytest-strategies: deselected {rows_text} recorded under {seeds}; run {them} with:"]
+    for command, n in _reuse.commands(reuse.flag, rows):
+        lines.append(f"  {command}  # {n} row{'' if n == 1 else 's'}")
+    return lines
+
+
 def _junit_family(config: Config) -> str | None:
     """
     Return the family of the run's ``--junitxml`` report, ``xunit1`` for
@@ -2640,7 +2824,9 @@ def pytest_configure_session(config: Config) -> None:
     so ``get_context()`` works there (with the conftest.py files loaded so far).
     Until the plugin instance seeds the RNG (``pytest_configure`` below), the
     session's seed is the one ``--rng-seed`` or the pytest-xdist controller gives,
-    so a context computed there follows it.
+    or the one a ``--lf`` or ``--sw`` run reuses (``_reuse.plan``, which reads
+    pytest's cache before pytest's cache plugin sets ``config.cache``), so a context
+    computed there follows it.
     """
     # A bad ini value stops the run with a usage error (exit code 4), before the
     # session starts
@@ -2663,6 +2849,12 @@ def pytest_configure_session(config: Config) -> None:
         # have a current state.
         state = runtime.push(config)
         state.run_seed = _given_seed(config)
+        if state.run_seed is None:
+            # --lf or --sw without --rng-seed reuses the failed run's seed, which a
+            # context computed in a pytest_configure follows too
+            state.reuse = _reuse.plan(config)
+            if state.reuse is not None:
+                state.run_seed = state.reuse.seed
         # Config does not declare this attribute, so the type checker needs setattr
         setattr(config, "_strategy_plugin_instance", _plugin_instance)  # noqa: B010
 

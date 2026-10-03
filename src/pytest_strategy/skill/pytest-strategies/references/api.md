@@ -345,7 +345,7 @@ usage error listing each strategy's directed vectors.
 
 | Option | Meaning |
 | --- | --- |
-| `--rng-seed=S` | integer seed; without it a new seed is chosen each run |
+| `--rng-seed=S` | integer seed; without it a new seed is chosen each run, except that `--lf` and `--sw` reuse the failed run's (see Reporting) |
 | `--nsamples=N` or `--nsamples=auto` | random rows per strategy (int >= 0), or enumerate sequences; anything else is a usage error |
 | `--vector-mode=MODE` | `all`, `random_only`, `directed_only`, `mixed`, `test` |
 | `--vector-name=NAME` | only the directed vector named NAME |
@@ -387,6 +387,17 @@ Reporting:
   `.value.<argument>`, `.seed`, `.context`, `.constraints_off` and `.command` (run
   from the rootdir), as `pytest_strategies.<i>.*` for stacked strategies; the
   default `xunit2` gets none per test case.
+- `--lf`, `--sw` and `--sw-skip` without `--rng-seed` reuse the seed of the newest
+  failed row they rerun (recorded in pytest's cache under
+  `pytest-strategies/failed-seeds` with the options of its rerun command), so the
+  rows fail with the same values. The header adds `pytest-strategies: seed reused
+  from the failed run for --lf (--rng-seed overrides)`, ending with `; recorded
+  with --nsamples=13` when the recorded options differ (they are not applied).
+  Failed rows recorded under another seed are deselected (pytest keeps them in its
+  last-failed set) and the run ends with `pytest-strategies: deselected 2 failed
+  rows recorded under another seed; run them with:` and `  pytest --lf
+  --rng-seed=S1  # 2 rows`. A row leaves the record when it passes under its seed
+  and options. `--rng-seed` wins; `--ff`, `--nf` and `--sw-reset` draw a new seed.
 - `-v` adds, per strategy, the counts of directed and random rows (and of test,
   exhaustive and skipped rows when there are some) and where `nsamples` came from,
   then a "Contexts" block with each context's fingerprint.

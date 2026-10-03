@@ -35,6 +35,8 @@ from .rng import RNG
 if TYPE_CHECKING:
     import pytest
 
+    from ._reuse import Reuse
+
 
 @dataclass
 class Resolution:
@@ -184,6 +186,23 @@ class SessionState:
         # after that line. Under pytest-xdist the controller gets them from the
         # workers' reports.
         self.failed_rows: dict[str, dict[str, str]] = {}
+        # --lf and --sw without --rng-seed: the seed the run reuses, the failed rows
+        # recorded under it and those recorded under other seeds (see _reuse.plan),
+        # on the process that reads the cache (not on a pytest-xdist worker)
+        self.reuse: Reuse | None = None
+        # The node IDs of the failed rows the run deselects, recorded under another
+        # seed than the one it reuses, and those of the failed rows recorded under
+        # this run's seed (a pytest-xdist worker gets both from the controller)
+        self.deselect: set[str] = set()
+        self.recorded: set[str] = set()
+        # The rows the run deselected, and the rows of ``recorded`` whose call
+        # passed, with the options of their rerun command in this run, by node ID:
+        # an entry leaves the failed-seeds map when its row passes under its seed
+        # and its options
+        self.deselected: list[str] = []
+        self.passed_rows: dict[str, tuple[str, ...]] = {}
+        # On the controller: what each worker sent of those two, by worker ID
+        self.worker_reuse: dict[str, dict[str, Any]] = {}
         # Where each fixture that drew is defined and registered
         # (plugin._fixture_definition and _fixture_base), the last parts of its
         # random stream's key, by FixtureDef

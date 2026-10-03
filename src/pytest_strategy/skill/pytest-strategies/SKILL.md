@@ -275,7 +275,7 @@ def esm_rw(nsamples, ctx):
 
 | Option | Effect |
 | --- | --- |
-| `--rng-seed=S` | use seed S (otherwise a new seed each run) |
+| `--rng-seed=S` | use seed S (otherwise a new seed each run, but `--lf` and `--sw` reuse the failed run's) |
 | `--nsamples=N` / `--nsamples=auto` | random rows per strategy (overrides `Parameter(nsamples=)`), or enumerate `Series`/`RNGSequence` |
 | `--vector-mode=MODE` | `all` (default), `random_only`, `directed_only`, `mixed`, `test` |
 | `--vector-name=NAME` / `--vector-index=I` | only that directed vector |
@@ -303,6 +303,12 @@ To reproduce a failure:
    factories take `ctx`. Without an ini file the rootdir depends on where pytest
    is run from, so run from the same folder as CI (or add a `pytest.ini` or
    `[tool.pytest.ini_options]`).
+4. Locally, `pytest --lf` (or `--sw`) without `--rng-seed` reruns the failed rows
+   with the seed they failed under: a second header line says
+   `seed reused from the failed run for --lf`, and ends with
+   `recorded with --nsamples=13` when the failed run had options this one lacks
+   (add them). Failed rows recorded under another seed are deselected, and the run
+   ends with the `pytest --lf --rng-seed=S` command that reruns them.
 4. Once fixed, add the failing values as a directed vector (`"bug_1234": (17, "EUR")`;
    one argument needs a trailing comma, `(-2,)`) so they run every time, not only
    under that seed. Run it with `--vector-name=bug_1234`, which needs no seed. Its ID
