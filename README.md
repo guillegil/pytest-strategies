@@ -439,7 +439,7 @@ Values that a strategy file draws when it is imported come from a random stream 
 
 ### 11. Configuration-Dependent Strategies (New in v2.0.0)
 
-Some vectors depend on configuration that is only known when the session runs, such as a testbench description whose file is named on the command line. Strategy factories run before any fixture exists, so they cannot use one. Instead, implement the `pytest_strategies_context` hook in the rootdir's `conftest.py`: what it returns is passed as `ctx` to every factory that has a `ctx` parameter.
+Some vectors depend on configuration that is only known when the session runs, such as a testbench description whose file is named on the command line. Strategy factories run before any fixture exists, so they cannot use one. Instead, implement the `pytest_strategies_context` hook in a `conftest.py` (or a plugin): what it returns is passed as `ctx` to every factory with a `ctx` parameter that a test in that `conftest.py`'s folder, or below it, uses.
 
 ```python
 # conftest.py
@@ -473,13 +473,14 @@ def esm_rw(nsamples, ctx):
 
 Tests use the strategy as usual, with `@strategy("esm_rw")`. With two Esm channels in the configuration they run 10 writes per channel; with none they are skipped with the reason.
 
-- The hook is called at most once per session, the first time a factory with a `ctx` parameter runs, and its result is reused for the others. Factories without `ctx` are called as before and never trigger it.
+- Each test gets the context of its own folder. The plugin calls the implementations it can see from there in this order: `tryfirst` ones, then the `conftest.py` files from the test's folder upward, then the other plugins (last registered first), then `trylast` ones. The first that returns something other than `None` answers: the nearest `conftest.py` wins, one that returns `None` defers to the folder above, and a plugin answers only where no `conftest.py` does. A `wrapper=True` implementation can change the answer. A factory registered in another folder gets the context of the test's folder.
+- Each implementation is called at most once per session, the first time a factory with a `ctx` parameter needs it, and its result is reused: tests in folders that end at the same implementation share one object. Factories without `ctx` are called as before and never trigger it.
 - When no implementation returns a value, a `ctx` parameter keeps its default (or a value bound with `functools.partial`), and is `None` without one.
-- If the hook raises, each test module that uses a factory with `ctx` fails collection with `Strategy factory '<name>' has a 'ctx' parameter, but the pytest_strategies_context hook raised <error>`. `pytest.fail()` in the hook is reported as it is. The hook can also call `pytest.skip(..., allow_module_level=True)` to skip those modules.
-- Implement it in the rootdir's `conftest.py` or in a plugin. The result is shared by the whole session, and factories run while test modules are collected: a `conftest.py` further down is only loaded when pytest reaches its directory, so the hook there may be called too late, and once loaded its result also applies to modules outside that directory.
-- Random draws in the hook come from a stream of their own, derived from the seed, so they are reproduced by `--rng-seed` and do not change any test's vectors.
+- If an implementation raises, each test module that uses a factory with `ctx` in a folder that consults it fails collection with `Strategy factory '<name>' has a 'ctx' parameter, but the pytest_strategies_context hook raised <error>`. `pytest.fail()` in the hook is reported as it is. The hook can also call `pytest.skip(..., allow_module_level=True)` to skip those modules.
+- When a factory fails with `ctx` set to `None` while a `conftest.py` in another folder implements the hook, the error adds which folders implement it, so that the hook can be moved to a common parent `conftest.py`.
+- Random draws in the hook come from a stream of their own, derived from the seed and started anew for each implementation, so they are reproduced by `--rng-seed`, do not depend on which tests run, and do not change any test's vectors.
 - Under pytest-xdist every worker calls the hook, so it must return the same configuration in each, or the workers collect different tests.
-- `export_strategies()` passes the same `ctx`.
+- `export_strategies()` passes the context of the rootdir.
 
 Your testbench fixture does not change: the hook only has to describe the configuration the vectors depend on.
 

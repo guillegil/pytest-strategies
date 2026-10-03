@@ -46,3 +46,16 @@ class TestStrategyRuntimeStack:
         assert rt.discovered_files == ["real"]
         rt.pop()
         assert rt.discovered_files == []
+
+    def test_each_session_has_a_context_store_of_its_own(self):
+        rt = StrategyRuntime()
+        outer = rt.push("outer").contexts
+        assert outer.config == "outer"
+        inner = rt.push("inner").contexts
+        assert inner is not outer
+        assert inner.config == "inner"
+        rt.pop()
+        # The outer session's store, with what its implementations answered, is back
+        assert rt.current.contexts is outer
+        rt.pop()
+        assert rt.current is None

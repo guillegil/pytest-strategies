@@ -21,6 +21,7 @@ from typing import Any, NamedTuple, cast
 
 import pytest
 
+from ._context import FolderContext
 from ._factory import FactoryInputs, call_factory
 from ._ids import (
     ID_FORMATS,
@@ -321,6 +322,18 @@ def _test_location(test_fn: Callable[..., Any], config: pytest.Config | None) ->
     return test_fn.__module__
 
 
+def _test_file(test_fn: Callable[..., Any]) -> str | None:
+    """Return the test's file, or None when it is unknown."""
+    fn = inspect.unwrap(test_fn)
+    file: str | None = getattr(fn, "__globals__", {}).get("__file__")
+    if file:
+        return file
+    try:
+        return inspect.getsourcefile(fn)
+    except TypeError:
+        return None
+
+
 def _fallback_test_key(test_fn: Callable[..., Any], config: pytest.Config | None) -> str:
     """
     Return the test's key for its random streams without a node ID (a call that
@@ -439,6 +452,7 @@ def build_parametrization(
     validate: bool = True,
     fixturenames: Collection[str] | None = None,
     test_key: str | None = None,
+    context: FolderContext | None = None,
 ) -> Parametrization:
     """
     Call a strategy's factory and build the parametrization of a test.
@@ -457,6 +471,9 @@ def build_parametrization(
             parameters (``metafunc.definition.nodeid``), so inherited methods in
             two subclasses get rows of their own. None uses the test's location
             and qualified name.
+        context: The context of the test's folder, which a factory that declares
+            ``ctx`` receives (``runtime.test_context(metafunc.definition)``). None
+            uses the context of the test's file's folder (``runtime.path_context``).
 
     Raises:
         ValueError: With a message naming the strategy when the factory, the
@@ -483,8 +500,10 @@ def build_parametrization(
     # is RNG.generator() during the call. Its nsamples is the --nsamples value,
     # "auto", or 10 without the option, never None (FR-8). The count the rows use is
     # resolved below, once the Parameter's own nsamples is known.
+    if context is None:
+        context = runtime.path_context(_test_file(test_fn))
     with _Stream(stream_key.child("factory")) as rng:
-        inputs = FactoryInputs(options=options, rng=rng, ctx=runtime.strategy_context)
+        inputs = FactoryInputs(options=options, rng=rng, ctx=context, why_no_ctx=context.why_none)
         result = call_factory(name, factory, inputs, rootpath=_rootpath(config))
     param = check_factory_result(name, factory, result)
 

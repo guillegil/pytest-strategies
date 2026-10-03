@@ -56,11 +56,14 @@ class FactoryInputs:
         ctx: Returns the context (``pytest_strategies_context``). It is called
             only for a factory that declares ``ctx``, after its signature passed
             the checks.
+        why_no_ctx: Returns why the context is None, or None: added to the error
+            of a factory that raised with ``ctx`` None (passed, or its default)
     """
 
     options: StrategyOptions
     rng: random.Random
     ctx: Callable[[], Any]
+    why_no_ctx: Callable[[], str | None] = lambda: None
 
 
 @dataclass(frozen=True)
@@ -387,12 +390,19 @@ def analyse(factory: Callable[..., Any]) -> CallPlan:
     )
 
 
-def _factory_error(name: str, nsamples: int | str, error: Exception, plan: CallPlan) -> ValueError:
-    """Return the error reported when a strategy factory raises ``error``."""
+def _factory_error(
+    name: str, nsamples: int | str, error: Exception, plan: CallPlan, note: str | None = None
+) -> ValueError:
+    """
+    Return the error reported when a strategy factory raises ``error``, ending with
+    ``note`` when there is one.
+    """
     message = (
         f"Error calling strategy factory '{name}' (nsamples={nsamples!r}): "
         f"{type(error).__name__}: {error}"
     )
+    if note:
+        message += f". {note}"
     if plan.opaque and isinstance(error, TypeError):
         message += (
             ". The plugin called it with no arguments, because its signature takes only "
@@ -463,7 +473,17 @@ def call_factory(
     try:
         result = factory(*args, **kwargs)
     except Exception as e:
-        raise _factory_error(name, inputs.options.nsamples, e, plan) from e
+        # A factory whose ctx was None (passed, or a default of None that it kept)
+        # is told why, when a conftest.py elsewhere implements the hook (the
+        # folder's own conftest.py files and above do not)
+        received_none = any(
+            slot.name == "ctx"
+            and values["ctx"] is None
+            and (slot.default is _EMPTY or slot.default is None)
+            for slot in (*plan.positional, *plan.keyword)
+        )
+        note = inputs.why_no_ctx() if received_none else None
+        raise _factory_error(name, inputs.options.nsamples, e, plan, note) from e
     if inspect.iscoroutine(result):
         # Closed, so no "coroutine was never awaited" warning follows the error
         result.close()

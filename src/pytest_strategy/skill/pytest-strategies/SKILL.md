@@ -26,7 +26,8 @@ every option, the error messages and upgrade notes from 2.x, read
 - List what already exists: `pytest --list-strategies` prints every registered
   name and exits. Reuse or extend a strategy before writing a new one.
 - Look for strategies files next to the tests and in parent folders, and for a
-  `pytest_strategies_context` hook in the rootdir `conftest.py`.
+  `pytest_strategies_context` hook in the `conftest.py` files (each folder can
+  have its own).
 
 ## The basic pattern
 
@@ -212,8 +213,8 @@ Both walk a fixed list of values; `RNG` in the name means random order.
 
 Factories run at collection, before any fixture exists, so they cannot use
 fixtures. When the vectors depend on configuration (a testbench file named on the
-command line, say), return it from the context hook in the rootdir `conftest.py`
-and give the factory a `ctx` parameter:
+command line, say), return it from the context hook in a `conftest.py` (the
+rootdir's for the whole project) and give the factory a `ctx` parameter:
 
 ```python
 # conftest.py (rootdir)
@@ -241,11 +242,16 @@ def esm_rw(nsamples, ctx):
     )
 ```
 
-- The hook runs at most once per session, the first time a factory with `ctx` is
-  called. Factories without `ctx` never trigger it. With no hook result, `ctx`
-  keeps its default, or is `None`.
-- A `conftest.py` deeper than the rootdir may load too late for the hook. Under
-  pytest-xdist every worker calls it, so it must return the same data in each.
+- Each test gets the context of its own folder: the nearest `conftest.py` whose
+  hook returns something other than `None` answers (a plugin's hook only where no
+  `conftest.py` does), so `tests/a/conftest.py` can give `tests/a` another
+  testbench than the rootdir's gives the rest. A factory from another folder gets
+  the test's folder's context.
+- Each implementation runs at most once per session, the first time a factory
+  with `ctx` needs it. Factories without `ctx` never trigger it. With no hook
+  result, `ctx` keeps its default, or is `None`.
+- Under pytest-xdist every worker calls it, so it must return the same data in
+  each.
 - `skip_if_empty="reason"` (keyword-only) turns an empty `Series`/`RNGSequence`
   into one skipped row (test ID `[skipped]`) instead of a collection error.
 

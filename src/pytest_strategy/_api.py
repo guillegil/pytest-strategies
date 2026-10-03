@@ -107,7 +107,8 @@ def export_strategies(*, format: str = "json") -> str:
     Each factory is called once with the inputs it declares, as at collection,
     and gets the session's options for its strategy: its ``nsamples`` is the
     ``--nsamples`` value, ``"auto"``, or 10 without the option or outside a
-    session. The context hook runs only for a factory that declares ``ctx``.
+    session. The context hook runs only for a factory that declares ``ctx``,
+    which receives the rootdir's context.
     Each call draws from a random stream of its own, keyed by the run's seed, the
     strategy's name and where its factory is defined: the name of the factory's
     module, the same wherever a package is installed or checked out, or for a

@@ -83,8 +83,8 @@ def factory(nsamples, ctx, rng, options):   # each one optional, any order, by n
   - `nsamples`: the `--nsamples` integer, 10 when the option is not given, or the
     string `"auto"` under `--nsamples=auto`. A factory returning a `Parameter` can
     ignore it; the plugin applies the count.
-  - `ctx`: the result of the `pytest_strategies_context` hook (section 12). Only
-    factories that declare a `ctx` parameter trigger the hook.
+  - `ctx`: the result of the `pytest_strategies_context` hook for the test's folder
+    (section 12). Only factories that declare a `ctx` parameter trigger the hook.
   - `rng`: the plugin's `random.Random`; `rng is RNG.generator()` during the call.
   - `options`: a frozen `StrategyOptions` (keyword-only fields `strategy`, `nsamples`,
     `nsamples_source`, `mode`, `vector_name`, `vector_index`, `constraints_off`, and
@@ -419,7 +419,7 @@ failed to load or were skipped.
 ## 12. The pytest_strategies_context hook
 
 ```python
-# conftest.py at the rootdir (or a plugin)
+# conftest.py at the rootdir, or in the folder it is for (or a plugin)
 import pytest
 
 @pytest.hookimpl(optionalhook=True)
@@ -430,19 +430,30 @@ def pytest_strategies_context(config):
 - A `firstresult` hook; `config` is the pytest config. Return any object.
 - `optionalhook=True` keeps the `conftest.py` usable when the plugin is not loaded
   (without it pytest stops with "unknown hook").
-- Called at most once per session, the first time a factory with a `ctx` parameter
-  runs; the result (or the exception) is reused for every later factory.
+- Each test gets the context of its own folder. The plugin asks the
+  implementations the folder sees in this order: `tryfirst` ones, the
+  `conftest.py` files from the test's folder upward, the other plugins (last
+  registered first), `trylast` ones; the first that is not `None` answers. A
+  `wrapper=True` implementation can change the answer. A factory registered in
+  another folder gets the test's folder's context.
+- Each implementation is called at most once per session, the first time a
+  factory with a `ctx` parameter needs it; the result (or the exception) is reused
+  for every later factory, and folders that end at the same implementation share
+  one object.
 - When no implementation returns a value, `ctx` keeps its default (or a value bound
   with `functools.partial`), else `None`.
-- If the hook raises, each test that uses a factory with `ctx` fails collection with
+- If an implementation raises, each test that uses a factory with `ctx` in a
+  folder that asks it fails collection with
   `Strategy factory '<name>' has a 'ctx' parameter, but the pytest_strategies_context
   hook raised <error>`. `pytest.fail()` is reported as is, and
   `pytest.skip(..., allow_module_level=True)` skips those tests.
-- Implement it in the rootdir `conftest.py`: a deeper `conftest.py` is loaded only
-  when pytest reaches its folder, which may be too late, and its result then applies
-  to the whole session.
-- Random draws in the hook come from a stream of their own, derived from the seed, and
-  do not shift any test's rows.
+- When a factory fails with `ctx` None while a `conftest.py` in another folder
+  implements the hook, the error says where: `ctx is None for tests/b: no
+  pytest_strategies_context implementation in this folder or above answered
+  (implemented in tests/a/conftest.py; move it to a common parent conftest)`.
+- Random draws in the hook come from a stream of their own, derived from the seed and
+  started anew for each implementation, and do not shift any test's rows.
+- `export_strategies()` passes the rootdir's context.
 - Under pytest-xdist every worker calls it; it must return the same configuration in
   each, or xdist reports "Different tests were collected".
 - Use it for data the rows depend on; the live objects (a testbench connection) stay

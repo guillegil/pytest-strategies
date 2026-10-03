@@ -97,8 +97,9 @@ src/pytest_strategy/
 ├── skill/               # The agent skill that pytest-strategies skill install copies
 ├── py.typed             # PEP 561 marker: type checkers use the package's annotations
 └── _*.py                # Other internal helpers (introspection, test IDs, record mode,
-                         # StrategyOptions, factory calls, runtime state, warning categories,
-                         # the value encoding of schema 1 documents, the random stream keys)
+                         # StrategyOptions, factory calls, the context of each folder,
+                         # runtime state, warning categories, the value encoding of
+                         # schema 1 documents, the random stream keys)
 ```
 
 ## Core Components
@@ -709,10 +710,35 @@ registration decorator (so were not imported).
 A factory with a `ctx` parameter gets its result as `ctx` (when no
 implementation returns a value, `ctx` keeps its default, or a value bound with
 `functools.partial`, and is `None` without one); other factories never trigger
-it. `_factory.call_factory` calls it through `runtime.strategy_context()` the
-first time a factory needs it, and the session keeps the result, or the
-exception it raised, for every later factory. Each (nested) session and each pytest-xdist worker
-calls it once. See the README for an example.
+it. `_context.py` gives each folder its own context (D7). For a test,
+`runtime.test_context(metafunc.definition)` takes the implementations from
+`definition.ihook` (pytest's hook proxy for the test's folder: every plugin and
+the conftests of the folder and above); for a path,
+`runtime.path_context(path)` takes every implementation and drops the conftests
+whose folder does not contain it (`_context.visible_from()`; not
+`session.gethookproxy()`, which drops the conftests of a folder pytest has not
+collected). An implementation is a conftest's when its `plugin_name` ends with
+`conftest.py`. `_context.call_order()` orders them: `tryfirst`, the conftests
+from the deepest folder upward, the other plugins in pluggy's order (last
+registered first), `trylast`, the same order within the `tryfirst` and
+`trylast` groups. The first that is not None answers. The session's
+`ContextStore` calls each implementation on its own, with the arguments it
+declares, at most once per session, and keeps its `Answer` (the value and its
+label, or the exception with its traceback, re-raised for every folder that
+consults it before an answer). When a `wrapper=True` or `hookwrapper=True`
+implementation is visible, the ordered list goes through pluggy's call loop
+(`PluginManager._hookexec`, private) with the other implementations replaced
+by stand-ins that return their kept answers. A folder's answer is kept per
+list of the implementations it sees, so later tests look it up.
+The label is the conftest's path relative to the rootdir, the plugin's name
+(its class's name when pluggy named it by its id), `none` when nothing
+answered, or with a wrapper the deepest visible conftest. A `FolderContext`
+computes its folder's answer only when a factory that declares `ctx` is called;
+when such a factory fails with `ctx` None while another folder's conftest
+implements the hook, `FolderContext.why_none()` adds where. Each (nested)
+session and each pytest-xdist worker calls each implementation at most once.
+`export_strategies()` passes the rootdir's context. See the README for an
+example.
 
 ---
 
@@ -905,7 +931,7 @@ a `StreamKey` under the run seed S (`runtime.run_seed()`, never the mutable
 | `T/"row"/pos/j/name`, `T/"order"/name` | the rows (below) |
 | `root(S, "file", path)` | a strategy file's import; `path` is the file's (`_streams.file_part()`) |
 | `root(S, "module", path)` | a test module's import (a `pytest_make_collect_report` wrapper for a `Module`); `path` is the module's (`_streams.file_part()`) |
-| `root(S, "ctx")` | the `pytest_strategies_context` call |
+| `root(S, "ctx")` | each `pytest_strategies_context` implementation call, reseeded before each |
 | `root(S, "fixture", scope, name, param_index, where, qualname, base)` | a fixture's setup (a `pytest_fixture_setup` wrapper); `scope` is the node ID of the node it is set up for, `""` for the session and the rootdir's node (`plugin._node_part()`); `where` and `qualname` are the fixture function's module or file and its qualified name (`plugin._fixture_definition()`), `base` the node ID pytest registered the fixture for (`plugin._fixture_base()`) |
 | `root(S, "body", nodeid, phase)` | one phase of a test, `setup`, `call` or `teardown` (wrappers around `pytest_runtest_setup`, `_call` and `_teardown`) |
 | `root(RNG.get_seed(), "user", key)` | `RNG.refresh_seed(key=...)` |

@@ -20,16 +20,17 @@ enclosing session or in later sibling sessions.
 
 from __future__ import annotations
 
+import os
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import ModuleType, TracebackType
+from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
+from ._context import HOOK, ContextStore, FolderContext, folder_of, visible_from
 from ._options import SessionOptions, StrategyOptions, parse_session_options
 from ._registry import Registration, registry
-from ._streams import StreamKey, seed_part
-from .rng import RNG, _Stream
+from .rng import RNG
 
 if TYPE_CHECKING:
     import pytest
@@ -123,13 +124,10 @@ class SessionState:
         # config on first use, and each strategy's instance, by resolved name
         self.options: SessionOptions | None = None
         self.strategy_options: dict[str, StrategyOptions] = {}
-        # pytest_strategies_context: called when a factory first needs ctx. Its
-        # result, or the exception it raised (with that traceback), is kept for
-        # the rest of the session, so the hook runs at most once.
-        self.context_loaded: bool = False
-        self.context: Any = None
-        self.context_error: BaseException | None = None
-        self.context_traceback: TracebackType | None = None
+        # The pytest_strategies_context implementations' answers: each one is called
+        # when a folder first needs it, and its result, or the exception it raised,
+        # is kept for the rest of the session (see _context.ContextStore)
+        self.contexts: ContextStore = ContextStore(config)
         # Where each fixture that drew is defined and registered
         # (plugin._fixture_definition and _fixture_base), the last parts of its
         # random stream's key, by FixtureDef
@@ -141,6 +139,11 @@ class SessionState:
         self.prev_rng_state: Any = None
         self.prev_generator: random.Random | None = None
         self.prev_registry: dict[str, list[Registration]] | None = None
+
+
+def _no_folder() -> None:
+    """The folder of a context without a session: none."""
+    return None
 
 
 class StrategyRuntime:
@@ -255,37 +258,67 @@ class StrategyRuntime:
 
         _plugin_instance.load_all_strategy_files(state.config)
 
-    def strategy_context(self) -> Any:
+    def test_context(self, node: Any) -> FolderContext:
         """
-        Return the active session's ``pytest_strategies_context`` result.
+        Return the context of a test's folder, computed when a factory asks for it.
 
-        The hook is called on first use and its result reused afterwards. Without
-        a session or a config there is no hook to call, and the result is ``None``.
+        The implementations it consults are those the test's folder-scoped hook
+        relay (``node.ihook``) sees, as for ``pytest_generate_tests``: every plugin's,
+        and those of the conftest.py files in the test's folder and above it.
 
-        Raises:
-            Whatever the hook raised (an exception, ``pytest.skip``, ``pytest.fail``),
-            again on every later call in the session.
+        Args:
+            node: The test's node (``metafunc.definition``)
         """
-        import pytest
-
         state = self.current
         if state is None or state.config is None:
-            return None
-        if not state.context_loaded:
-            state.context_loaded = True
-            # The hook is first needed while a factory's random stream is active. It
-            # draws from a stream of its own, root(S, "ctx") (streams v1), which puts
-            # the factory's back: its draws do not depend on which factory asked first.
-            try:
-                with _Stream(StreamKey.root(seed_part(self.run_seed()), "ctx")):
-                    state.context = state.config.hook.pytest_strategies_context(config=state.config)
-            except (Exception, pytest.skip.Exception, pytest.fail.Exception) as e:
-                state.context_error = e
-                state.context_traceback = e.__traceback__
-        if state.context_error is not None:
-            # Restore the original traceback, so re-raising does not stack frames
-            raise state.context_error.with_traceback(state.context_traceback)
-        return state.context
+            return FolderContext(None, tuple, _no_folder, self.run_seed)
+        return FolderContext(
+            state.contexts,
+            lambda: getattr(node.ihook, HOOK).get_hookimpls(),
+            lambda: node.path.parent,
+            self.run_seed,
+        )
+
+    def path_context(self, path: str | os.PathLike[str] | None = None) -> FolderContext:
+        """
+        Return the context of the folder of ``path`` (a file, or a folder), computed
+        when it is first asked for: the context a test in that folder gets.
+
+        The implementations it consults are every plugin's, and those of the loaded
+        conftest.py files in that folder and above it (``_context.visible_from``).
+        Without ``path``, the folder is the rootdir.
+        """
+        state = self.current
+        config = state.config if state is not None else None
+        if state is None or config is None:
+            return FolderContext(None, tuple, _no_folder, self.run_seed)
+        if path is None:
+            path = getattr(config, "rootpath", None)
+            if path is None:
+                return FolderContext(None, tuple, _no_folder, self.run_seed)
+        target = path
+        return FolderContext(
+            state.contexts,
+            lambda: visible_from(config, target),
+            lambda: folder_of(target),
+            self.run_seed,
+        )
+
+    def strategy_context(self, path: str | os.PathLike[str] | None = None) -> Any:
+        """
+        Return the context of the folder of ``path`` (a file, or a folder; the rootdir
+        without one) in the active session (see :meth:`path_context`).
+
+        Each ``pytest_strategies_context`` implementation is called when a folder
+        first needs it, and its result is reused afterwards. Without a session or a
+        config there is no hook to call, and the result is ``None``.
+
+        Raises:
+            Whatever the implementation that answered for the folder raised (an
+            exception, ``pytest.skip``, ``pytest.fail``), again on every later call
+            in the session.
+        """
+        return self.path_context(path)()
 
     def session_options(self, config: pytest.Config | None) -> SessionOptions:
         """

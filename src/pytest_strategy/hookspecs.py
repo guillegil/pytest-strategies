@@ -34,26 +34,43 @@ def pytest_strategies_context(config: pytest.Config) -> Any:
     ``optionalhook=True`` keeps the ``conftest.py`` usable when pytest-strategies
     is not loaded; without it, pytest stops with "unknown hook".
 
-    The hook is called at most once per session, when the first factory with a
-    ``ctx`` parameter is called, and its result is reused for every other one.
-    Factories without a ``ctx`` parameter never trigger it, and they are called
-    as before. When no implementation returns a value, ``ctx`` keeps its default
-    (or a value bound with ``functools.partial``), and is ``None`` without one.
-    Random draws in the hook come from a stream derived from the seed, and do
-    not change any test's vectors.
+    Each folder has its own context. A test's factories get the context of the
+    test's folder, from the implementations that folder sees: every plugin's that
+    is not a ``conftest.py``, and those of the ``conftest.py`` files in the folder
+    and in each folder above it. The plugin asks them in this order, and the first
+    value that is not None answers:
 
-    The result is shared by the whole session, and factories run while test
-    modules are collected. Implement the hook in the rootdir's ``conftest.py``
-    (or a plugin): a ``conftest.py`` further down is only loaded when pytest
-    reaches its directory, so it may be too late, and once loaded its result
-    also applies to modules elsewhere. Under pytest-xdist every worker calls the
-    hook, and the result must be the same in all of them, or the workers collect
-    different tests.
+    1. ``tryfirst`` implementations;
+    2. the ``conftest.py`` files, from the test's folder upward;
+    3. the other plugins, last registered first;
+    4. ``trylast`` implementations.
 
-    An exception raised by the hook fails the collection of each module that
-    uses a factory with ``ctx``, with a message naming the strategy;
-    ``pytest.fail()`` is reported as it is, and ``pytest.skip(...,
-    allow_module_level=True)`` skips those modules.
+    Within the ``tryfirst`` and ``trylast`` groups the ``conftest.py`` files come
+    first too, from the test's folder upward. So the nearest ``conftest.py`` that
+    answers wins, one that returns None defers to the one above, and a plugin
+    answers only where no ``conftest.py`` does, whatever order pytest loaded them
+    in. One test tree can hold two testbench configurations, one per folder. A
+    ``wrapper=True`` (or ``hookwrapper=True``) implementation that a folder sees
+    runs around the others, and can change their answer.
+
+    A factory registered in one folder and used by a test in another gets the
+    context of the test's folder.
+
+    Each implementation is called at most once per session, the first time a
+    folder that needs it asks, and only for a factory with a ``ctx`` parameter:
+    the folders that end at the same implementation share its result. Factories
+    without a ``ctx`` parameter never trigger it. When nothing answers, ``ctx``
+    keeps its default (or a value bound with ``functools.partial``), and is
+    ``None`` without one. Random draws in an implementation come from a stream
+    derived from the seed, started anew for each implementation, and do not
+    change any test's vectors. Under pytest-xdist every worker calls the
+    implementations it needs, and the results must be the same in all of them.
+
+    An exception raised by an implementation fails the collection of each module
+    whose folder asks it before any other implementation answers, and that uses
+    a factory with ``ctx``, with a message naming the strategy; ``pytest.fail()``
+    is reported as it is, and ``pytest.skip(..., allow_module_level=True)``
+    skips those modules.
 
     Args:
         config: The pytest config object.

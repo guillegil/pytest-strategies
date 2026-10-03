@@ -335,6 +335,7 @@ class PytestStrategyPlugin:
                     validate=validate,
                     fixturenames=metafunc.fixturenames,
                     test_key=metafunc.definition.nodeid,
+                    context=runtime.test_context(metafunc.definition),
                 )
             except ValueError as e:
                 if metafunc.config.getoption("fulltrace", False):
