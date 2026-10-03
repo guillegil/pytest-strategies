@@ -471,13 +471,18 @@ def pytest_strategies_context(config):
   The encoding does not depend on `PYTHONHASHSEED` (sets are sorted), the checkout
   folder (rootdir paths are relative) or `--import-mode` (types by qualified name).
   A pydantic v2 model is its `model_dump()`: `Field(exclude=True)` fields are left
-  out and a `SecretStr` stays masked. Other objects are their repr without memory
-  addresses; one with the default repr counts by its type alone, shown as
-  `(partial: Plain)`. One that cannot be encoded is `unavailable`. Keep volatile
-  values (temporary paths, times) out of the context, or exclude them.
+  out and a `SecretStr` stays masked. Dataclasses, attrs classes and NamedTuples
+  count field by field, `SimpleNamespace` and `argparse.Namespace` by attribute.
+  Other objects are their repr without memory addresses (a mock's `id='...'`
+  too); one with the default repr counts by its type alone, shown as
+  `(partial: Plain)`, and so does one whose repr may show a set in hash order (it
+  holds a set of strings, Enum members or objects). One that cannot be encoded is
+  `unavailable`. Keep volatile values (temporary paths, times) out of the context,
+  or exclude them.
 - The reproduce line of a failed run ends with the contexts the failed tests'
   factories received (`(context 976bcfdf)`, or `(contexts conftest.py 976bcfdf,
-  tests/tb_a/conftest.py b1e1b237)`), `-v` lists each context with its number of
+  tests/tb_a/conftest.py b1e1b237)`; a failed setup or call counts, an error in
+  teardown alone does not), `-v` lists each context with its number of
   tests, and `item.stash[VECTOR_KEY].context` is the fingerprint for the rows of a
   factory that received `ctx` (else `None`). A factory or test that changes the
   object changes no fingerprint.
@@ -511,7 +516,9 @@ def tb_a(request):
   tests/tb_a/conftest.py: ...). In a folder with its own pytest_strategies_context,
   use pytest_strategy.get_context(request.config, __file__) in that folder's
   conftest.py fixtures.` Deselecting one folder's tests also makes the run pass.
-  A `request.getfixturevalue("strategies_ctx")` counts every test of the run.
+  A `request.getfixturevalue("strategies_ctx")` counts every test of the run. The
+  tests of a folder whose `conftest.py` defines its own `strategies_ctx` (one that
+  does not request the plugin's) do not count.
 - `get_context(config, path)` returns the context of the folder of `path` (a file
   or a folder), the object a test there gets. A folder whose `conftest.py` pytest
   did not load (no test there collected) gets the nearest loaded one's above. Call
@@ -579,7 +586,8 @@ defined at module level. IDs look like `x=1,y=2`.
   CHANGELOG before comparing with a 3.x run (4.0.0 changed the random rows).
 - pytest-xdist works with or without `--rng-seed`: the controller sends its seed to
   the workers. Each worker sends back the fingerprint of each context it computed
-  and a digest of each strategy's node IDs and values; when two workers differ,
+  and a digest of each strategy's node IDs and values (in the fingerprint's
+  encoding, so sets are sorted); when two workers differ,
   the run fails with exit code 4 (when it would have passed or collected nothing)
   and prints, before the reproduce line:
 

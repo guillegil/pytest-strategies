@@ -5,6 +5,7 @@ import mode, volatile parts (memory addresses, hash order, excluded pydantic fie
 secrets) are left out, and nothing makes it raise.
 """
 
+import argparse
 import dataclasses
 import datetime
 import decimal
@@ -15,11 +16,14 @@ import os
 import subprocess
 import sys
 import uuid
-from collections import OrderedDict, namedtuple
+from collections import OrderedDict, deque, namedtuple
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
+from pytest_strategy import _fingerprint
 from pytest_strategy._fingerprint import UNAVAILABLE, fingerprint
 
 
@@ -53,16 +57,29 @@ class Other:
     """Another class that keeps the default repr."""
 
 
+class Shown:
+    """A class with a repr of its own, which shows its value."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def __repr__(self):
+        return f"Shown({self.value!r})"
+
+
 @dataclasses.dataclass
 class Bench:
     name: str
     lanes: frozenset[str]
 
 
-# Prints the fingerprints of the four contexts the acceptance names, one JSON list,
-# and how the set of strings iterates in this process (which PYTHONHASHSEED changes)
+# Prints the fingerprints of the four contexts the acceptance names and of other
+# objects whose repr shows a set in hash order (or a mock's address), with the
+# types reported partial, one JSON list, and how the set of strings iterates in
+# this process (which PYTHONHASHSEED changes)
 SCRIPT = """
-import dataclasses, datetime, enum, json
+import argparse, collections, dataclasses, datetime, enum, json, types
+from unittest.mock import MagicMock
 from pytest_strategy._fingerprint import fingerprint
 
 NAMES = {"alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"}
@@ -74,12 +91,24 @@ class Color(enum.Enum):
 class Bench:
     lanes: frozenset
 
+class Shown:
+    \"\"\"A class whose own repr shows a set of strings in hash order\"\"\"
+    def __init__(self, lanes):
+        self.lanes = lanes
+    def __repr__(self):
+        return f"Shown({self.lanes!r})"
+
 values = [
     Bench(frozenset(NAMES)),
     {Color.RED: datetime.date(2026, 10, 3), "names": NAMES},
     float("nan"),
+    types.SimpleNamespace(lanes=NAMES, width=8),
+    argparse.Namespace(lanes=NAMES, width=16),
+    {"dut": MagicMock(name="dut"), "width": 8},
+    Shown(frozenset(NAMES)),
+    collections.deque([NAMES]),
 ]
-if MODEL:
+if EXTRA == "pydantic":
     import pydantic
 
     class Config(pydantic.BaseModel):
@@ -87,14 +116,35 @@ if MODEL:
         nested: dict[str, frozenset[str]]
 
     values.append(Config(names=NAMES, nested={"lanes": frozenset(NAMES)}))
-print(json.dumps({"fingerprints": [fingerprint(v)[0] for v in values], "order": list(NAMES)}))
+if EXTRA == "attrs":
+    import attrs
+
+    @attrs.frozen
+    class Frozen:
+        lanes: frozenset
+
+    @attrs.define(slots=False)
+    class Defined:
+        lanes: set
+        nested: dict
+
+    values += [Frozen(frozenset(NAMES)), Defined(NAMES, {"lanes": Frozen(frozenset(NAMES))})]
+found = [fingerprint(v) for v in values]
+print(json.dumps({
+    "fingerprints": [f[0] for f in found],
+    "partial": [f[1] for f in found],
+    "order": list(NAMES),
+}))
 """
 
 
-def _run(model, hash_seed):
-    """Run SCRIPT in a new interpreter under PYTHONHASHSEED ``hash_seed``."""
+def _run(extra, hash_seed):
+    """
+    Run SCRIPT in a new interpreter under PYTHONHASHSEED ``hash_seed``, with the
+    objects of the library ``extra`` too.
+    """
     output = subprocess.run(
-        [sys.executable, "-c", f"MODEL = {model}\n{SCRIPT}"],
+        [sys.executable, "-c", f"EXTRA = {extra!r}\n{SCRIPT}"],
         env={**os.environ, "PYTHONHASHSEED": hash_seed},
         capture_output=True,
         text=True,
@@ -104,18 +154,23 @@ def _run(model, hash_seed):
 
 
 class TestAcrossProcesses:
-    @pytest.mark.parametrize("model", [False, True], ids=["builtins", "pydantic"])
-    def test_one_hex_under_every_hash_seed(self, model):
-        if model:
-            pytest.importorskip("pydantic")
-        runs = [_run(model, seed) for seed in ("1", "2", "3")]
+    @pytest.mark.parametrize("extra", [None, "pydantic", "attrs"])
+    def test_one_hex_under_every_hash_seed(self, extra):
+        if extra is not None:
+            pytest.importorskip(extra)
+        runs = [_run(extra, seed) for seed in ("1", "2", "3")]
 
         # The set really iterates in other orders, so its order is left out
         assert len({tuple(run["order"]) for run in runs}) > 1
+        # A mock's repr holds its address, which differs in every process too
         assert len({tuple(run["fingerprints"]) for run in runs}) == 1
         fingerprints = runs[0]["fingerprints"]
         assert all(len(f) == 8 and int(f, 16) >= 0 for f in fingerprints)
         assert len(set(fingerprints)) == len(fingerprints)
+        # The objects whose own repr shows the set count by their type alone
+        partial = runs[0]["partial"]
+        assert partial[6:8] == [["Shown"], ["deque"]]
+        assert not any(partial[:6] + partial[8:])
 
 
 class TestPaths:
@@ -230,6 +285,82 @@ class TestPartial:
                 return f"Register(0x{self.address:x})"
 
         assert fp(Register(0x1000)) != fp(Register(0x2000))
+
+    def test_a_mock_s_address_is_removed(self):
+        first, second = MagicMock(name="dut"), MagicMock(name="dut")
+
+        assert "id='" in repr(first)
+        assert fingerprint({"dut": first}) == fingerprint({"dut": second})
+        assert fingerprint(first)[1] == ()
+        # Its name and spec are in its repr
+        assert fp(first) != fp(MagicMock(name="other"))
+        assert fp(Mock(spec=Plain)) != fp(Mock(spec=Other))
+        # Nested in a repr of its own
+        assert fp(Shown(first)) == fp(Shown(second))
+
+    def test_an_id_that_does_not_end_a_repr_is_kept(self):
+        class Device:
+            def __init__(self, ident):
+                self.ident = ident
+
+            def __repr__(self):
+                return f"<Device id='{self.ident}' bus=0>"
+
+        assert fp(Device(1)) != fp(Device(2))
+
+    @pytest.mark.parametrize(
+        "lanes",
+        [
+            frozenset({"alpha", "beta"}),
+            [{"alpha", "beta"}],
+            {"lanes": frozenset({b"a", b"b"})},
+            Shown({Color.RED, Color.GREEN}),
+            deque([{Plain(1), Plain(2)}]),
+        ],
+        ids=["strings", "in_a_list", "bytes_in_a_dict", "enums_in_an_object", "objects_in_a_deque"],
+    )
+    def test_a_repr_that_may_show_a_set_in_hash_order_counts_by_its_type(self, lanes):
+        digest, partial = fingerprint(Shown(lanes))
+
+        assert partial == ("Shown",)
+        # Its type alone: another such set gives the same fingerprint
+        assert digest == fp(Shown({"other", "set"}))
+
+    @pytest.mark.parametrize(
+        "lanes",
+        [frozenset({1, 2, 3}), {(1, 2.5), (None, True)}, frozenset({"one"}), set()],
+        ids=["numbers", "tuples_of_numbers", "one_element", "empty"],
+    )
+    def test_a_set_that_iterates_alike_in_every_process_keeps_the_repr(self, lanes):
+        digest, partial = fingerprint(Shown(lanes))
+
+        assert partial == ()
+        assert digest != fp(Shown({"other", "set"}))
+
+    def test_slots_are_looked_into_without_getattr(self):
+        class Slotted:
+            __slots__ = ("lanes", "unset")
+
+            def __init__(self, lanes):
+                self.lanes = lanes
+
+            def __getattr__(self, name):
+                raise AssertionError(f"looked up {name}")
+
+            def __repr__(self):
+                return f"Slotted({self.lanes!r})"
+
+        assert fingerprint(Slotted({"alpha", "beta"}))[1] == (Slotted.__qualname__,)
+        assert fingerprint(Slotted({1, 2}))[1] == ()
+
+    def test_the_look_into_the_attributes_is_bounded(self, monkeypatch):
+        monkeypatch.setattr(_fingerprint, "_ATTRIBUTE_LIMIT", 3)
+        # The set is beyond the objects looked at
+        deep = Shown([0, 1, 2, [frozenset({"alpha", "beta"})]])
+
+        assert fingerprint(deep)[1] == ()
+        monkeypatch.setattr(_fingerprint, "_ATTRIBUTE_LIMIT", 10_000)
+        assert fingerprint(deep)[1] == ("Shown",)
 
 
 class TestNeverRaises:
@@ -351,6 +482,36 @@ class TestEncoding:
         assert fp(Bench("tb", frozenset({"a"}))) != fp(Bench("tb", frozenset({"b"})))
         assert fp(Point(1, 2)) != fp((1, 2))
         assert fp(Point(1, 2)) != fp(Point(2, 1))
+
+    @pytest.mark.parametrize("slots", [True, False], ids=["slots", "dict"])
+    def test_attrs_classes_by_field(self, slots):
+        attrs = pytest.importorskip("attrs")
+
+        @attrs.define(slots=slots)
+        class Lanes:
+            names: frozenset[str]
+            width: int = 8
+            later: int = attrs.field(init=False)
+
+        one = Lanes(frozenset({"alpha", "beta"}))
+
+        # By field, so the set is sorted, and not by its repr
+        assert fingerprint(one) == (fp(Lanes(frozenset({"beta", "alpha"}))), ())
+        assert fp(one) != fp(Lanes(frozenset({"alpha"})))
+        assert fp(one) != fp(Lanes(frozenset({"alpha", "beta"}), width=16))
+        assert fp(one) != fp(Bench("Lanes", frozenset({"alpha", "beta"})))
+        # A field never set
+        assert fp(one) != UNAVAILABLE
+        one.later = 1
+        assert fp(one) != fp(Lanes(frozenset({"alpha", "beta"})))
+
+    @pytest.mark.parametrize("kind", [SimpleNamespace, argparse.Namespace])
+    def test_namespaces_by_attribute(self, kind):
+        one = kind(lanes={"alpha", "beta"}, width=8)
+
+        assert fingerprint(one) == (fp(kind(lanes={"beta", "alpha"}, width=8)), ())
+        assert fp(one) != fp(kind(lanes={"alpha"}, width=8))
+        assert fp(one) != fp({"lanes": {"alpha", "beta"}, "width": 8})
 
     def test_type_names_are_qualified_names_not_module_names(self):
         def make(module):

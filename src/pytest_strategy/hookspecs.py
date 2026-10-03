@@ -51,7 +51,9 @@ def pytest_strategies_context(config: pytest.Config) -> Any:
     answers only where no ``conftest.py`` does, whatever order pytest loaded them
     in. One test tree can hold two testbench configurations, one per folder. A
     ``wrapper=True`` (or ``hookwrapper=True``) implementation that a folder sees
-    runs around the others, and can change their answer.
+    runs around the one that answered, and can change its answer; folders that
+    see the same wrappers and get their answer from the same implementation share
+    the wrapped result.
 
     A factory registered in one folder and used by a test in another gets the
     context of the test's folder; ``export_strategies()``, which has no test, gives

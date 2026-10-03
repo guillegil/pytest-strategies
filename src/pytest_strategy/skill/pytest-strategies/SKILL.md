@@ -265,7 +265,7 @@ def esm_rw(nsamples, ctx):
   paths relative, pydantic `Field(exclude=True)` left out), so two runs can tell
   whether they built the same one. Keep volatile values (temp paths, times) out
   of it. The reproduce line of a failed run ends with `(context 976bcfdf)`, and
-  `VECTOR_KEY.context` holds it for factories that received `ctx`.
+  `item.stash[VECTOR_KEY].context` holds it for factories that received `ctx`.
 - `skip_if_empty="reason"` (keyword-only) turns an empty `Series`/`RNGSequence`
   into one skipped row (test ID `[skipped]`) instead of a collection error.
 

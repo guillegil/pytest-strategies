@@ -38,7 +38,10 @@ HOOK = "pytest_strategies_context"
 
 # What an implementation may raise that the store keeps for the folders that consult
 # it, as a factory error, a skip or a failure of each test module that needs ctx.
-# Anything else (KeyboardInterrupt, pytest.exit()) goes up at once.
+# pytest.exit() is kept too, as in 3.0 (its exception is an Exception): pytest itself
+# reports it as an error of the module being collected, and strategies_ctx and
+# get_context() raise it again as it is. Anything else (KeyboardInterrupt,
+# SystemExit) goes up at once.
 _KEPT = (Exception, pytest.skip.Exception, pytest.fail.Exception)
 
 
@@ -206,8 +209,10 @@ class Answer:
         value: The context, or None when nothing answered
         label: The rootdir-relative path of the conftest.py whose implementation
             answered or raised, the plugin's name for a plugin's, or ``none`` when
-            nothing answered. With a wrapper, the deepest conftest.py the folder
-            sees that implements the hook.
+            nothing answered. With a wrapper, the deepest conftest.py among the
+            wrappers and the implementation that answered; when none of them is a
+            conftest.py, the name of the plugin that answered, or of the first
+            wrapper when nothing did.
         error: What the implementation raised, or None
         traceback: The error's traceback when it was raised, so raising it again
             for another folder does not stack frames
@@ -288,10 +293,16 @@ class ContextStore:
     implementation that raised it comes before any answer, so it affects only those
     folders.
 
-    When a wrapper is among the implementations, they run through pluggy's call
-    loop, so the wrapper can change the answer. Each implementation still runs at
-    most once. A folder's answer is kept for its list of implementations, so the
-    other tests of the folder, and of folders that see the same ones, look it up.
+    When wrappers are among the implementations, the others are asked first, as
+    without one, and the wrappers then run around the one that answered (or none)
+    through pluggy's call loop, so they can change the answer. That answer is kept
+    for those wrappers and that implementation: folders that see the same wrappers
+    and get their answer from the same implementation (a child folder whose
+    conftest.py returns None) share its one call, object and label. Each
+    implementation still runs at most once, so a wrapper's code before its yield
+    runs after the implementations it wraps. A folder's answer is also kept for
+    its list of implementations, so the other tests of the folder, and of folders
+    that see the same ones, look it up.
 
     Each call, a wrapper's included, draws from the random stream root(S, "ctx")
     (streams v1), started anew for each, so what an implementation draws does not
@@ -305,6 +316,9 @@ class ContextStore:
         self.config = config
         self._answers: dict[HookImpl, Answer] = {}
         self._folders: dict[tuple[HookImpl, ...], Answer] = {}
+        # The wrappers' answers, by the wrappers (in call order) and the
+        # implementation they wrapped that answered (None when none did)
+        self._wrapped: dict[tuple[tuple[HookImpl, ...], HookImpl | None], Answer] = {}
 
     def answer(self, impls: Sequence[HookImpl], seed: int | str) -> Answer:
         """
@@ -320,21 +334,33 @@ class ContextStore:
         return answer
 
     def _first_answer(self, ordered: list[HookImpl], seed: int | str) -> Answer:
-        """Return the first answer of the implementations ``ordered`` (call order)."""
-        if any(_is_wrapper(impl) for impl in ordered):
-            return self._through_pluggy(ordered, seed)
+        """
+        Return the first answer of the implementations ``ordered`` (call order),
+        changed by the wrappers among them.
+        """
+        answering: HookImpl | None = None
+        answer = NO_ANSWER
         for impl in ordered:
-            answer = self._call(impl, seed)
-            if answer.error is not None or answer.value is not None:
-                return answer
-        return NO_ANSWER
+            if _is_wrapper(impl):
+                continue
+            found = self._call(impl, seed)
+            if found.error is not None or found.value is not None:
+                answering, answer = impl, found
+                break
+        wrappers = tuple(impl for impl in ordered if _is_wrapper(impl))
+        if not wrappers:
+            return answer
+        key = (wrappers, answering)
+        wrapped = self._wrapped.get(key)
+        if wrapped is None:
+            wrapped = self._wrapped[key] = self._through_pluggy(wrappers, answering, seed)
+        return wrapped
 
     def scopes(self) -> dict[str, Answer]:
         """
         Return the answers the folders that consulted the store got, by label,
-        sorted by label: one per answering implementation (or per conftest.py that
-        ends a list with a wrapper), ``none`` for the folders where nothing
-        answered, and the errors.
+        sorted by label: one per answering implementation (or per wrapped answer),
+        ``none`` for the folders where nothing answered, and the errors.
         """
         found: dict[str, Answer] = {}
         for answer in self._folders.values():
@@ -386,14 +412,18 @@ class ContextStore:
             self._answers[impl] = answer
         return answer
 
-    def _through_pluggy(self, ordered: list[HookImpl], seed: int | str) -> Answer:
+    def _through_pluggy(
+        self, wrappers: tuple[HookImpl, ...], answering: HookImpl | None, seed: int | str
+    ) -> Answer:
         """
-        Return the context of a folder whose implementations include a wrapper,
-        running them through pluggy's own call loop (``_hookexec``, private API),
-        which calls the last one in its list first.
+        Return the answer of ``wrappers`` (call order) around the implementation
+        that answered, or around none, running them through pluggy's own call loop
+        (``_hookexec``, private API), which calls the last one in its list first.
         """
+        ordered = [*wrappers] if answering is None else [*wrappers, answering]
         conftests = [impl for impl in ordered if is_conftest(impl)]
-        label = self.label(max(conftests, key=_depth) if conftests else ordered[0])
+        named = max(conftests, key=_depth) if conftests else answering or wrappers[0]
+        label = self.label(named)
         methods = [
             impl if _is_wrapper(impl) else _Kept(self, impl, seed) for impl in reversed(ordered)
         ]

@@ -12,7 +12,6 @@ from __future__ import annotations
 import os
 import warnings
 from collections.abc import Callable
-from pathlib import PurePath
 from typing import Any, TypeVar
 
 import pytest
@@ -213,19 +212,21 @@ def _context_folder(
     Return the folder whose context ``export_strategies()`` gives a factory, the
     context a test there gets: its file's folder, when that is inside the rootdir
     (as it is spelled, or by its real path) and not in an installed package (a
-    ``site-packages`` or ``dist-packages`` folder, such as a virtualenv's inside
-    the rootdir, which pytest does not collect); otherwise the rootdir. None
-    without a rootdir (outside a session).
+    ``site-packages`` or ``dist-packages`` folder below the rootdir, such as a
+    virtualenv's, which pytest does not collect; one above the rootdir, which a
+    checkout may be in, does not count); otherwise the rootdir. None without a
+    rootdir (outside a session).
     """
     if rootpath is None:
         return None
     source = factory_source(factory)[0]
     if not source or not os.path.isfile(source):
         return rootpath
-    if not INSTALLED_FOLDERS.isdisjoint(PurePath(source).parts):
-        return rootpath
     folder = os.path.dirname(os.path.abspath(source))
-    return folder if below(folder, rootpath) is not None else rootpath
+    parts = below(folder, rootpath)
+    if parts is None or not INSTALLED_FOLDERS.isdisjoint(parts):
+        return rootpath
+    return folder
 
 
 def _not_loaded(conftests: list[str], rootpath: str | os.PathLike[str] | None) -> str:

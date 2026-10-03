@@ -6,7 +6,11 @@ controller compares what the workers sent, with fake worker nodes and sessions.
 """
 
 import hashlib
+import json
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,7 +18,7 @@ import pytest
 
 from pytest_strategy import VECTORS_KEY, VectorInfo
 from pytest_strategy._context import NO_ANSWER, Answer
-from pytest_strategy._ids import _value_repr
+from pytest_strategy._fingerprint import canonical
 from pytest_strategy._runtime import runtime
 from pytest_strategy._vector import vector_type
 from pytest_strategy.plugin import (
@@ -55,11 +59,59 @@ def item(nodeid, *infos):
 
 
 def expected_digest(*rows):
-    """The digest of rows given as (node ID, values), computed as D9 says."""
+    """
+    The digest of rows given as (node ID, values): the SHA-256 of the canonical
+    JSON text of each row, the encoding of the context fingerprint.
+    """
     digest = hashlib.sha256()
+    text = canonical()
     for nodeid, values in rows:
-        digest.update(repr((nodeid, [_value_repr(v) for v in values])).encode() + b"\n")
+        digest.update(text([nodeid, list(values)]).encode() + b"\n")
     return digest.hexdigest()[:8]
+
+
+# Prints the value digests of rows that hold a pydantic model and an attrs instance
+# with sets of strings, and the reprs of those values, one JSON object
+DIGESTS = """
+import json
+from types import SimpleNamespace
+
+import attrs
+import pydantic
+
+from pytest_strategy import VECTORS_KEY, VectorInfo
+from pytest_strategy.plugin import _value_digests
+
+NAMES = {"alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"}
+
+@attrs.define
+class Bench:
+    lanes: frozenset
+
+class Txn(pydantic.BaseModel):
+    lanes: set[str]
+
+values = (Bench(frozenset(NAMES)), Txn(lanes=NAMES), SimpleNamespace(lanes=NAMES))
+row = VectorInfo(
+    strategy="benches", origin="strategies.py:3", kind="random", name=None, index=0,
+    enumerated=(), values=values, id="rand-0", seed=1, context=None,
+    constraints_off=(),
+)
+items = [SimpleNamespace(nodeid="t.py::test_a[rand-0]", stash={VECTORS_KEY: (row,)})]
+print(json.dumps({"digests": _value_digests(items), "reprs": [repr(v) for v in values]}))
+"""
+
+
+def _digests_under(hash_seed):
+    """Run DIGESTS in a new interpreter under PYTHONHASHSEED ``hash_seed``."""
+    output = subprocess.run(
+        [sys.executable, "-c", DIGESTS],
+        env={**os.environ, "PYTHONHASHSEED": hash_seed},
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return json.loads(output)
 
 
 def node(worker, contexts=None, values=None, **summary):
@@ -269,7 +321,7 @@ class TestValueDigests:
 
         assert one != other
 
-    def test_values_by_their_stable_repr(self):
+    def test_values_by_their_canonical_encoding(self):
         class Handle:
             pass
 
@@ -279,7 +331,27 @@ class TestValueDigests:
             "burst": expected_digest(("t.py::test_a[rand-0]", values))
         }
         # Sets in sorted order, an object with the default repr by its type's name
-        assert [_value_repr(v) for v in values] == ["{'alpha', 'beta'}", "Handle"]
+        assert json.loads(canonical()(list(values))) == [
+            {"set": ["alpha", "beta"]},
+            {"object": Handle.__qualname__},
+        ]
+
+    def test_paths_inside_the_rootdir_by_their_relative_path(self, tmp_path):
+        def digest(root):
+            values = info("burst", root / "data" / "a.bin")
+            return _value_digests([item("t.py::test_a[rand-0]", values)], root)
+
+        assert digest(tmp_path / "one") == digest(tmp_path / "two")
+
+    def test_one_digest_under_every_hash_seed(self):
+        pytest.importorskip("attrs")
+        pytest.importorskip("pydantic")
+        runs = [_digests_under(seed) for seed in ("1", "2", "3")]
+
+        # The values' reprs show their sets in other orders
+        assert len({tuple(run["reprs"]) for run in runs}) > 1
+        assert len({json.dumps(run["digests"]) for run in runs}) == 1
+        assert "unavailable" not in runs[0]["digests"].values()
 
     def test_a_value_whose_repr_raises_makes_its_strategy_unavailable(self):
         class Broken:

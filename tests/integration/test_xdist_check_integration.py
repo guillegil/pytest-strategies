@@ -9,9 +9,10 @@ xdist itself no longer notices workers that generated different values under the
 same IDs. The controller also prints the context line and the reproduce line's
 contexts from what the workers sent, since it collects nothing itself.
 
-The projects' rootdir conftest.py files write, on each worker, every item's node ID
-and the reprs of its values to ``values-<worker>.json``, from which the expected
-digests are computed here.
+The projects' rootdir conftest.py files write, on each worker, the canonical JSON
+text of every item's node ID and values (the fingerprint's encoding) and their
+reprs to ``values-<worker>.json``, from which the expected digests are computed
+here.
 """
 
 import hashlib
@@ -29,21 +30,39 @@ pytest_plugins = ["pytester"]
 
 SEED = 5
 
-# Writes, on each worker, every item's node ID and the reprs of its strategies' values
+# Writes, on each worker, the canonical text of every item's node ID and strategy
+# values, and the reprs of those values
 DUMP = """
 import json
 import os
 
 from pytest_strategy import VECTORS_KEY
+from pytest_strategy._fingerprint import canonical
 
 def pytest_collection_finish(session):
+    text = canonical(session.config.rootpath)
     rows = [
-        [info.strategy, item.nodeid, [repr(value) for value in info.values]]
+        [
+            info.strategy,
+            text([item.nodeid, list(info.values)]),
+            [repr(value) for value in info.values],
+        ]
         for item in session.items
         for info in item.stash.get(VECTORS_KEY, ())
     ]
     worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
     (session.config.rootpath / f"values-{worker}.json").write_text(json.dumps(rows))
+"""
+
+# Starts each worker with a hash seed of its own (1, then 2), as two machines would
+PER_WORKER_HASH_SEED = """
+import os
+
+def pytest_xdist_setupnodes(config, specs):
+    os.environ["PYTHONHASHSEED"] = "1"
+
+def pytest_xdist_newgateway(gateway):
+    os.environ["PYTHONHASHSEED"] = str(int(os.environ["PYTHONHASHSEED"]) + 1)
 """
 
 # A context that differs between the workers, and is used only as a bound
@@ -105,10 +124,30 @@ def digests(pytester, worker):
     """The digest of each strategy's values on ``worker``, computed from its dump."""
     rows = json.loads((pytester.path / f"values-{worker}.json").read_text())
     hashes = {}
-    for strategy, nodeid, reprs in rows:
-        line = repr((nodeid, reprs)).encode() + b"\n"
-        hashes.setdefault(strategy, hashlib.sha256()).update(line)
+    for strategy, text, _ in rows:
+        hashes.setdefault(strategy, hashlib.sha256()).update(text.encode() + b"\n")
     return {strategy: digest.hexdigest()[:8] for strategy, digest in hashes.items()}
+
+
+def reprs(pytester, worker):
+    """The reprs of every row's values on ``worker``, from its dump."""
+    rows = json.loads((pytester.path / f"values-{worker}.json").read_text())
+    return [shown for _, _, shown in rows]
+
+
+def assert_two_hash_orders():
+    """Check that hash seeds 1 and 2 give list({"a", "b", "c"}) two orders."""
+    orders = {
+        subprocess.run(
+            [sys.executable, "-c", 'print(list({"a", "b", "c"}))'],
+            env={**os.environ, "PYTHONHASHSEED": seed},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for seed in ("1", "2")
+    }
+    assert len(orders) == 2, "hash seeds 1 and 2 give one order: pick two others"
 
 
 def fp(value, pytester):
@@ -174,28 +213,7 @@ class TestWorkersThatDiffer:
         )
 
     def test_a_list_built_from_a_set_under_two_hash_seeds_exits_4(self, pytester):
-        # The order of list({"a", "b", "c"}) under hash seeds 1 and 2
-        orders = {
-            subprocess.run(
-                [sys.executable, "-c", 'print(list({"a", "b", "c"}))'],
-                env={**os.environ, "PYTHONHASHSEED": seed},
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout
-            for seed in ("1", "2")
-        }
-        assert len(orders) == 2, "hash seeds 1 and 2 give one order: pick two others"
-        conftest = """
-import os
-
-# Each worker starts with a hash seed of its own (1, then 2), as two machines would
-def pytest_xdist_setupnodes(config, specs):
-    os.environ["PYTHONHASHSEED"] = "1"
-
-def pytest_xdist_newgateway(gateway):
-    os.environ["PYTHONHASHSEED"] = str(int(os.environ["PYTHONHASHSEED"]) + 1)
-"""
+        assert_two_hash_orders()
         strategies = """
 from pytest_strategy import Parameter, RNGChoice, TestArg, register
 
@@ -206,7 +224,7 @@ def lanes():
         write(
             pytester,
             {
-                "conftest.py": DUMP + conftest,
+                "conftest.py": DUMP + PER_WORKER_HASH_SEED,
                 "strategies.py": strategies,
                 "test_x.py": "from pytest_strategy import strategy\n\n"
                 "@strategy('lanes')\ndef test_lane(lane):\n    pass\n",
@@ -331,6 +349,65 @@ def test_bounded(x, strategies_ctx):
         result.stdout.fnmatch_lines(
             [f"pytest-strategies: context {fp({'limit': 5, 'runs': []}, pytester)}"]
         )
+
+    def test_values_and_a_context_whose_reprs_show_sets_in_hash_order_exit_0(self, pytester):
+        pytest.importorskip("attrs")
+        pytest.importorskip("pydantic")
+        assert_two_hash_orders()
+        conftest = """
+import attrs
+
+NAMES = {"alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"}
+
+@attrs.frozen
+class Bench:
+    lanes: frozenset
+    width: int
+
+def pytest_strategies_context(config):
+    return Bench(frozenset(NAMES), 8)
+"""
+        strategies = """
+import attrs
+import pydantic
+from conftest import NAMES
+from pytest_strategy import Parameter, RNGInteger, TestArg, register
+
+@attrs.define
+class Lanes:
+    names: frozenset
+
+class Txn(pydantic.BaseModel):
+    lanes: set[str]
+
+@register("benches")
+def benches(ctx):
+    return Parameter(
+        TestArg("width", rng_type=RNGInteger(1, ctx.width)),
+        TestArg("lanes", value=Lanes(frozenset(NAMES))),
+        TestArg("txn", value=Txn(lanes=NAMES)),
+        nsamples=4,
+    )
+"""
+        write(
+            pytester,
+            {
+                "conftest.py": DUMP + PER_WORKER_HASH_SEED + conftest,
+                "strategies.py": strategies,
+                "test_x.py": "from pytest_strategy import strategy\n\n"
+                "@strategy('benches')\ndef test_bench(width, lanes, txn):\n    pass\n",
+            },
+        )
+
+        result = run(pytester)
+
+        result.assert_outcomes(passed=4)
+        assert result.ret == pytest.ExitCode.OK, result.stdout.str()
+        result.stdout.no_fnmatch_line("*different vectors*")
+        result.stdout.fnmatch_lines(["pytest-strategies: context ????????"])
+        # The reprs show the sets in each worker's order, the digests do not
+        assert reprs(pytester, "gw0") != reprs(pytester, "gw1")
+        assert digests(pytester, "gw0") == digests(pytester, "gw1")
 
     def test_the_controller_prints_the_context_line(self, pytester):
         write(

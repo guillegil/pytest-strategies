@@ -636,7 +636,10 @@ strategies of its tests may not have been resolved). It is not checked under
 - `pytest_configure` - Checks the `strategies_ids` ini option (any value but
   `names` or `values` is a `UsageError`, exit code 4), opens the session's state
   and sets the run's seed, restarting the plugin's generator from it; a
-  pytest-xdist worker without `--rng-seed` takes the controller's seed
+  pytest-xdist worker without `--rng-seed` takes the controller's seed. The
+  module's implementation is `tryfirst`, so the state exists when the other
+  plugins' and the conftest.py files' `pytest_configure` run (`get_context()`
+  works there, with the conftest.py files loaded so far)
 - `pytest_configure_node` - (pytest-xdist only) sends the controller's seed to
   each worker
 - `pytest_plugin_registered` - Records a `conftest.py` that pytest imported by
@@ -742,14 +745,21 @@ registered first), `trylast`, the same order within the `tryfirst` and
 `ContextStore` calls each implementation on its own, with the arguments it
 declares, at most once per session, and keeps its `Answer` (the value and its
 label, or the exception with its traceback, re-raised for every folder that
-consults it before an answer). When a `wrapper=True` or `hookwrapper=True`
-implementation is visible, the ordered list goes through pluggy's call loop
-(`PluginManager._hookexec`, private) with the other implementations replaced
-by stand-ins that return their kept answers. A folder's answer is kept per
-list of the implementations it sees, so later tests look it up.
+consults it before an answer). When `wrapper=True` or `hookwrapper=True`
+implementations are visible, the others are asked first as without them, and
+the wrappers then go through pluggy's call loop (`PluginManager._hookexec`,
+private) around the one that answered (or none), replaced by a stand-in that
+returns its kept answer. That answer is kept per wrappers and answering
+implementation (`ContextStore._wrapped`), so a child folder whose conftest
+returns None shares its parent's wrapped object and label, and the wrappers run
+once for it; a wrapper's code before its yield runs after the implementations
+it wraps. A folder's answer is also kept per list of the implementations it
+sees, so later tests look it up.
 The label is the conftest's path relative to the rootdir, the plugin's name
 (its class's name when pluggy named it by its id), `none` when nothing
-answered, or with a wrapper the deepest visible conftest. A `FolderContext`
+answered, or with a wrapper the deepest conftest among the wrappers and the
+implementation that answered (when none is a conftest, the answering plugin's
+name, or the first wrapper's when nothing answered). A `FolderContext`
 computes its folder's answer only when a factory that declares `ctx` is called;
 when such a factory fails with `ctx` None while another folder's conftest
 implements the hook, `FolderContext.why_none()` adds where. Each (nested)
@@ -757,7 +767,8 @@ session and each pytest-xdist worker calls each implementation at most once.
 `export_strategies()`, which has no test, gives a factory the path caller's
 context of the folder of its file (`_api._context_folder()`), or the rootdir's
 for a file outside the rootdir or in a `site-packages` or `dist-packages`
-folder. A factory that declares `ctx` is not called when
+folder below the rootdir (one above it, which a checkout may be in, does not
+count). A factory that declares `ctx` is not called when
 `_context.unloaded_conftests()` finds a `conftest.py` that a test in that
 folder would see and pytest has not loaded: one on disk in the rootdir, the
 folder or a folder between them, that pytest considers
@@ -772,7 +783,14 @@ Tests and fixtures read the same objects (D8). `strategies_ctx`, a
 session-scoped fixture defined in `plugin.py`, takes its consumers from
 `session.items`: the items whose `fixturenames` contain it, or every item when
 the requesting item (`request._pyfuncitem`, private) does not, because it asked
-through `request.getfixturevalue()`. It computes each consumer file's
+through `request.getfixturevalue()`, each kept only when the name resolves to
+this fixture's definition for it (`plugin._gets_this_fixture()`, private API:
+`request._fixturedef`, the item's `_fixtureinfo.name2fixturedefs`, and for a
+dynamic request `session._fixturemanager.getfixturedefs()`): the last
+definition it sees, or one reached from it through definitions that request the
+name in turn. A folder whose `conftest.py` overrides the fixture without
+requesting it, or a test that parametrizes the name, is no consumer. It
+computes each consumer file's
 `SessionState.test_context(item).answer()`; when their labels differ it fails
 with `pytest.fail(..., pytrace=False)`, which pytest caches for the session, so
 each consumer fails with the message (`plugin._ctx_scopes_message()`, labels
@@ -793,11 +811,21 @@ value that JSON does not hold as it is becomes an object with one key, its tag
 relative to the rootdir as spelled or through `realpath`, tagged strings for
 dates, times, `Decimal`, `UUID` and `complex`, `type` by qualified name, `model`
 for a pydantic v2 model through `model_dump(mode="python")`, recognized on its
-type by `model_fields` and `model_dump`, `dataclass` and `namedtuple` field by
-field, `map` as pairs in their order, `set` sorted by the elements' JSON, `repr`
-without `" at 0x..."`, and `object` for a type that keeps `object.__repr__`,
-which goes in `partial`). Lists and tuples are arrays. A container met again
-below itself is `{"cycle": n}`. Any exception while encoding (a raising repr, a
+type by `model_fields` and `model_dump`, `dataclass`, `attrs` (recognized on
+its type by `__attrs_attrs__`) and `namedtuple` field by field, `namespace` for a
+`SimpleNamespace` or `argparse.Namespace` as its `vars()` pairs, `map` as pairs
+in their order, `set` sorted by the elements' JSON, `repr` without `" at 0x..."`
+and a mock's `" id='...'"` before its closing `>`, and `object` for a type that
+keeps `object.__repr__` or whose repr may show a set in hash order, which goes
+in `partial`). `_shows_hash_order()` decides the latter: it walks the object's
+`__dict__` and slots (read through `object.__getattribute__` and the slot
+descriptors, never a `__getattr__`), into lists, tuples, deques, dicts, sets and
+other objects' attributes, at most `_ATTRIBUTE_LIMIT` objects, and answers yes
+for a set of two or more elements one of which is not a number, None or a
+tuple of those, whose hash depends on `PYTHONHASHSEED` or an address. Lists and
+tuples are arrays; the exact types str, int, bool, None and float, and exact
+lists and tuples, take a fast path, for the value digests below. A container
+met again below itself is `{"cycle": n}`. Any exception while encoding (a raising repr, a
 `RecursionError`) gives `unavailable`. `ContextStore._call()` and
 `_through_pluggy()` compute it right after the call returns, inside the same
 `_Stream(root(S, "ctx"))`, and keep it on the `Answer` (`fingerprint`,
@@ -821,10 +849,12 @@ vectors (D9), because names in the test IDs no longer make xdist notice workers
 that generated different values. When its collection finishes, before any test
 can change a value, a worker notes the digest of each strategy's values
 (`plugin._value_digests()`: the first 8 hex characters of the SHA-256 of the
-`repr((nodeid, reprs))` of each of its rows, in collection order, the reprs
-being `_ids._value_repr`'s, which orders sets; `unavailable` when a repr
-raises) and the contexts the collection computed, as the line printed after the
-collection shows them (`SessionState.value_digests`, `collection_contexts`).
+canonical JSON text of `[nodeid, values]` of each of its rows, in collection
+order, written by the fingerprint's encoder (`_fingerprint.canonical()`), so a
+set, a model or an attrs instance among the values does not depend on the
+worker's `PYTHONHASHSEED`; `unavailable` when the encoding raises) and the
+contexts the collection computed, as the line printed after the collection
+shows them (`SessionState.value_digests`, `collection_contexts`).
 When its session finishes, it writes `workeroutput["pytest_strategies_check"]`
 (`plugin._check()`): `contexts`, each label of `ContextStore.scopes()` with its
 fingerprint, `none` or `error: <type>`, and `values`, the digests; strings only,

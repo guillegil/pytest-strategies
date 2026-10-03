@@ -36,8 +36,7 @@ from _pytest.pathlib import ImportPathMismatchError, import_path
 from pytest import Config, Session
 
 from ._context import Answer
-from ._fingerprint import UNAVAILABLE
-from ._ids import _value_repr
+from ._fingerprint import UNAVAILABLE, canonical
 from ._options import VectorMode, constraint_off_item, parse_constraint_off
 from ._registry import (
     STRATEGY_FILE_PATTERNS,
@@ -540,7 +539,9 @@ class PytestStrategyPlugin:
         if state is None:
             return
         if getattr(session.config, "workerinput", None) is not None:
-            state.value_digests = _value_digests(session.items)
+            state.value_digests = _value_digests(
+                session.items, getattr(session.config, "rootpath", None)
+            )
             state.collection_contexts = {
                 label: _fingerprint_text(answer)
                 for label, answer in _computed_contexts(state).items()
@@ -1801,17 +1802,19 @@ _DIFFERENT_VECTORS_HINT = (
 )
 
 
-# The types whose repr is the stable repr (``_ids._value_repr``) as it is
-_PLAIN = frozenset({int, float, str, bytes, bool, type(None)})
-
-
-def _value_digests(items: Sequence[pytest.Item]) -> dict[str, str]:
+def _value_digests(
+    items: Sequence[pytest.Item], rootpath: str | os.PathLike[str] | None = None
+) -> dict[str, str]:
     """
     Return the digest of each strategy's values, by strategy name, sorted: the
-    first 8 hex characters of the SHA-256 of its items' node IDs and the stable
-    reprs of their values (``_ids._value_repr``, which orders sets), in collection
-    order. A strategy with a value whose repr raises gets ``unavailable``.
+    first 8 hex characters of the SHA-256 of the canonical JSON text of each of its
+    items' node ID and values, in collection order. That is the encoding of the
+    context fingerprint (``_fingerprint``), which sorts sets, writes models,
+    dataclasses and attrs classes field by field, and leaves out memory addresses,
+    so the digest does not depend on a worker's ``PYTHONHASHSEED``. A strategy
+    with a value that cannot be encoded (its repr raises) gets ``unavailable``.
     """
+    text = canonical(rootpath)
     hashes: dict[str, Any] = {}
     for item in items:
         for info in item.stash.get(VECTORS_KEY, ()):
@@ -1821,12 +1824,11 @@ def _value_digests(items: Sequence[pytest.Item]) -> dict[str, str]:
             elif isinstance(digest, str):
                 continue
             try:
-                reprs = [repr(v) if type(v) in _PLAIN else _value_repr(v) for v in info.values]
+                row = text([item.nodeid, list(info.values)])
             except Exception:
                 hashes[info.strategy] = UNAVAILABLE
                 continue
-            # The repr of a tuple of strings tells where each one ends
-            digest.update(repr((item.nodeid, reprs)).encode("utf-8", "surrogatepass") + b"\n")
+            digest.update(row.encode("ascii") + b"\n")
     return {
         name: digest if isinstance(digest, str) else digest.hexdigest()[:8]
         for name, digest in sorted(hashes.items())
@@ -2065,21 +2067,27 @@ def strategies_ctx(request: pytest.FixtureRequest) -> Any:
     ``pytest_strategy.get_context(request.config, __file__)`` in its conftest.py
     fixtures instead. The tests that use it are those that request it, directly or
     through other fixtures, or every test when one asks for it through
-    ``request.getfixturevalue()``. What the implementation raised is raised again
-    as it is, so a ``pytest.skip`` there skips the tests that use it.
+    ``request.getfixturevalue()``, except those in a folder whose conftest.py
+    defines a fixture of that name that does not request this one. What the
+    implementation raised is raised again as it is, so a ``pytest.skip`` there
+    skips the tests that use it.
     """
     state = runtime.session_of(request.config)
     if state is None:
         return None
     # The test that asked first (private API, as the session-scoped request's node
-    # is the session)
+    # is the session), and this fixture's definition (private API)
     item = getattr(request, "_pyfuncitem", None)
+    own = getattr(request, "_fixturedef", None)
     items = list(request.session.items)
-    if item is not None and _CTX_FIXTURE in getattr(item, "fixturenames", ()):
-        consumers = [i for i in items if _CTX_FIXTURE in getattr(i, "fixturenames", ())]
-    else:
-        # Asked for through request.getfixturevalue(): any test may use it
-        consumers = items
+    # Asked for through request.getfixturevalue(), any test may use it
+    dynamic = item is None or _CTX_FIXTURE not in getattr(item, "fixturenames", ())
+    consumers = [
+        i
+        for i in items
+        if (dynamic or _CTX_FIXTURE in getattr(i, "fixturenames", ()))
+        and _gets_this_fixture(i, own, dynamic)
+    ]
     if item is not None:
         consumers.append(item)
     if not consumers:
@@ -2095,6 +2103,35 @@ def strategies_ctx(request: pytest.FixtureRequest) -> Any:
     if len(scopes) > 1:
         pytest.fail(_ctx_scopes_message(scopes), pytrace=False)
     return answers[consumers[-1].path].get()
+
+
+def _gets_this_fixture(item: pytest.Item, own: Any, dynamic: bool) -> bool:
+    """
+    Whether ``item`` gets the plugin's ``strategies_ctx``, whose definition is
+    ``own``: the last definition of the name its folder sees, or one that a
+    definition it gets requests in turn (an override in a conftest.py that builds
+    on it). A test in a folder whose conftest.py overrides the fixture without
+    requesting it gets the override only. Unknown (private API: the item's fixture
+    closure, and for a dynamic request the fixture manager's lookup) counts as yes.
+    """
+    if own is None:
+        return True
+    info = getattr(item, "_fixtureinfo", None)
+    definitions = getattr(info, "name2fixturedefs", {}).get(_CTX_FIXTURE)
+    if definitions is None and dynamic:
+        manager = getattr(item.session, "_fixturemanager", None)
+        try:
+            definitions = manager.getfixturedefs(_CTX_FIXTURE, item) if manager else None
+        except Exception:
+            definitions = None
+    if not definitions:
+        return True
+    for definition in reversed(definitions):
+        if definition is own:
+            return True
+        if _CTX_FIXTURE not in getattr(definition, "argnames", ()):
+            return False
+    return False
 
 
 def _ctx_scopes_message(scopes: Mapping[str, Mapping[str, None]]) -> str:
@@ -2208,8 +2245,14 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
+@pytest.hookimpl(tryfirst=True)
 def pytest_configure(config: Config) -> None:
-    """Register the plugin instance and open a runtime session for this config."""
+    """
+    Register the plugin instance and open a runtime session for this config.
+
+    It runs before the other plugins' and the conftest.py files' pytest_configure,
+    so ``get_context()`` works there (with the conftest.py files loaded so far).
+    """
     # A bad ini value stops the run with a usage error (exit code 4), before the
     # session starts
     from ._resolver import check_ids_format

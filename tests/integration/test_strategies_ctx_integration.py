@@ -153,6 +153,28 @@ def pytest_sessionfinish(session):
         # One tb for the session, in the parent folder and the child folder
         assert (pytester.path / "tbs.txt").read_text() == "1"
 
+    def test_a_wrapper_keeps_one_object_for_the_parent_and_the_child(self, pytester):
+        wrapper = """
+
+@pytest.hookimpl(wrapper=True, specname="pytest_strategies_context")
+def pytest_wrap_context(config):
+    ctx = yield
+    with open(config.rootpath / "calls.txt", "a") as calls:
+        calls.write("wrap\\n")
+    return {**ctx, "wrapped": True}
+"""
+        self.one_scope_project(pytester)
+        conftest_py = pytester.path / "conftest.py"
+        conftest_py.write_text(conftest_py.read_text() + wrapper)
+
+        result = pytester.runpytest("-p", "no:cacheprovider")
+
+        result.assert_outcomes(passed=4)
+        # The wrapper runs once around the rootdir's answer, for both folders
+        assert calls(pytester) == {"root": 1, "none": 1, "wrap": 1}
+        assert (pytester.path / "tbs.txt").read_text() == "1"
+        result.stdout.fnmatch_lines(["pytest-strategies: context ????????"])
+
     def test_works_under_xdist(self, pytester):
         pytest.importorskip("xdist")
         self.one_scope_project(pytester)
@@ -252,8 +274,9 @@ def test_a_plain():
         result = pytester.runpytest("-p", "no:cacheprovider")
 
         result.assert_outcomes(passed=2, errors=3)
-        output = result.stdout.str()
-        assert output.count(GUARD) == 3, output
+        # The message is the whole of each error's lines (pytrace=False); the short
+        # test summary may repeat it (under CI, or with wide terminals)
+        assert result.stdout.lines.count(GUARD) == 3, result.stdout.str()
         for test in ("test_root", "test_a", "test_a2"):
             result.stdout.fnmatch_lines([f"*ERROR at setup of {test} *"])
 
@@ -264,7 +287,7 @@ def test_a_plain():
         result = pytester.runpytest_subprocess("-p", "no:cacheprovider", "-n", "2")
 
         result.assert_outcomes(passed=2, errors=3)
-        assert result.stdout.str().count(GUARD) == 3
+        assert result.stdout.lines.count(GUARD) == 3, result.stdout.str()
 
     @pytest.mark.parametrize(
         "args",
@@ -309,6 +332,71 @@ def test_dynamic(request):
             ]
         )
         pytester.runpytest("-p", "no:cacheprovider", "tests/test_root.py").assert_outcomes(passed=1)
+
+    # A folder's own strategies_ctx, which does not build on the plugin's
+    OVERRIDE = """
+@pytest.fixture(scope="session")
+def strategies_ctx(request):
+    return get_context(request.config, __file__)
+"""
+
+    @pytest.mark.parametrize("dynamic", [False, True], ids=["requested", "dynamic"])
+    def test_a_folder_that_overrides_it_does_not_use_it(self, pytester, dynamic):
+        root = (
+            'def test_root(request):\n    ctx = request.getfixturevalue("strategies_ctx")\n'
+            if dynamic
+            else "def test_root(strategies_ctx):\n    ctx = strategies_ctx\n"
+        )
+        write(
+            pytester,
+            {
+                "conftest.py": conftest("root"),
+                "tests/test_root.py": root + '    assert ctx == {"name": "root"}\n',
+                "tests/tb_a/conftest.py": conftest("A", self.OVERRIDE),
+                "tests/tb_a/test_a.py": """
+def test_a(strategies_ctx):
+    assert strategies_ctx == {"name": "A"}
+""",
+                "tests/tb_b/test_b.py": """
+import pytest
+
+@pytest.mark.parametrize("strategies_ctx", [{"name": "B"}])
+def test_b(strategies_ctx):
+    assert strategies_ctx == {"name": "B"}
+""",
+                "tests/tb_b/conftest.py": conftest("B"),
+            },
+        )
+
+        result = pytester.runpytest("-p", "no:cacheprovider")
+
+        result.assert_outcomes(passed=3)
+
+    def test_an_override_that_builds_on_it_uses_it(self, pytester):
+        override = """
+@pytest.fixture(scope="session")
+def strategies_ctx(strategies_ctx):
+    return {**strategies_ctx, "extended": True}
+"""
+        write(
+            pytester,
+            {
+                "conftest.py": conftest("root"),
+                "tests/test_root.py": "def test_root(strategies_ctx):\n    pass\n",
+                "tests/tb_a/conftest.py": conftest("A", override),
+                "tests/tb_a/test_a.py": "def test_a(strategies_ctx):\n    pass\n",
+            },
+        )
+
+        result = pytester.runpytest("-p", "no:cacheprovider")
+
+        result.assert_outcomes(errors=2)
+        result.stdout.fnmatch_lines(
+            [
+                "*have different contexts (conftest.py: tests/test_root.py::test_root; "
+                "tests/tb_a/conftest.py: tests/tb_a/test_a.py::test_a)*"
+            ]
+        )
 
 
 class TestGetContext:
@@ -382,6 +470,38 @@ def test_b_context(request):
         pytester.runpytest("-p", "no:cacheprovider", "tests/a").assert_outcomes(passed=1)
         assert (pytester.path / "b.txt").read_text() == "root"
         assert calls(pytester) == {"root": 1}
+
+    def test_in_a_conftest_s_pytest_configure_it_sees_the_conftests_loaded_so_far(self, pytester):
+        configure = """
+import ctx_calls
+
+def pytest_configure(config):
+    ctx_calls.TBS.append(get_context(config, __file__))
+    ctx_calls.TBS.append(get_context(config, config.rootpath / "tests" / "b"))
+"""
+        write(
+            pytester,
+            {
+                "conftest.py": conftest("root", configure),
+                "tests/test_root.py": """
+import ctx_calls
+
+def test_root(strategies_ctx):
+    assert ctx_calls.TBS == [{"name": "root"}, {"name": "root"}]
+    assert strategies_ctx is ctx_calls.TBS[0]
+""",
+                "tests/b/conftest.py": conftest("B"),
+                "tests/b/test_b.py": """
+from pytest_strategy import get_context
+
+def test_b(request):
+    assert get_context(request.config, __file__) == {"name": "B"}
+""",
+            },
+        )
+
+        pytester.runpytest("-p", "no:cacheprovider").assert_outcomes(passed=2)
+        assert calls(pytester) == {"root": 1, "B": 1}
 
 
 class TestHookErrors:

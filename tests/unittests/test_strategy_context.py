@@ -383,7 +383,24 @@ class TestVisibleFrom:
         assert seen("tests/b") == ["conftest.py", "plugin", "tests/b/conftest.py"]
         # A folder without a conftest.py of its own, and one pytest never collected
         assert seen("tests/c") == ["conftest.py", "plugin"]
+        # A folder whose name starts like tests/a's
+        (session.rootpath / "tests/ab").mkdir()
         assert seen("tests/ab") == ["conftest.py", "plugin"]
+        assert seen("tests/ab/test_x.py") == ["conftest.py", "plugin"]
+
+    def test_a_path_through_a_link_to_the_rootdir(self, session, tmp_path_factory):
+        session.conftest(".", Plugin())
+        session.conftest("tests/a", Plugin())
+        session.conftest("tests/b", Plugin())
+        link = tmp_path_factory.mktemp("links") / "checkout"
+        try:
+            link.symlink_to(session.rootpath, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("symbolic links are not available")
+
+        impls = visible_from(session.config, link / "tests/a/test_x.py")
+
+        assert sorted(session.names(impls)) == ["conftest.py", "tests/a/conftest.py"]
 
     def test_a_file_counts_as_its_folder(self, session):
         session.conftest("tests/a", Plugin())
@@ -525,6 +542,12 @@ class TestExportFolder:
         factory = _factory_in(site / "strategies.py")
 
         assert _context_folder(factory, tmp_path) == tmp_path
+
+    def test_an_installed_packages_folder_above_the_rootdir_does_not_count(self, tmp_path):
+        rootdir = tmp_path / "site-packages/proj"
+        factory = _factory_in(rootdir / "tests/a/a_strategies.py")
+
+        assert _context_folder(factory, rootdir) == str(rootdir / "tests/a")
 
     def test_the_rootdir_for_code_without_a_file(self, tmp_path):
         namespace = {}
@@ -677,6 +700,100 @@ class TestWrappers:
         with pytest.raises(RuntimeError, match="x"):
             session.context(".")
 
+    def test_a_conftest_returning_none_shares_the_wrapped_object_and_label(self, session):
+        class Extend(Plugin):
+            @pytest.hookimpl(wrapper=True)
+            def pytest_strategies_context(self, config):
+                self.calls += 1
+                ctx = yield
+                return {**ctx, "extended": True}
+
+        wrapper = session.plugin(Extend(), "extend")
+        root = session.conftest(".", Plugin({"name": "root"}))
+        a = session.conftest("tests/a", Plugin({"name": "A"}))
+        deep = session.conftest("tests/a/deep", Plugin(None))
+
+        in_a = runtime.path_context(session.rootpath / "tests/a").answer()
+        in_deep = runtime.path_context(session.rootpath / "tests/a/deep").answer()
+        in_b = runtime.path_context(session.rootpath / "tests/b").answer()
+
+        assert in_deep.value is in_a.value
+        assert in_a.value == {"name": "A", "extended": True}
+        assert in_deep.label == in_a.label == "tests/a/conftest.py"
+        assert in_deep.fingerprint == in_a.fingerprint
+        assert (in_b.value, in_b.label) == ({"name": "root", "extended": True}, "conftest.py")
+        # Once around each answering implementation
+        assert (wrapper.calls, root.calls, a.calls, deep.calls) == (2, 1, 1, 1)
+        assert list(runtime.current.contexts.scopes()) == ["conftest.py", "tests/a/conftest.py"]
+
+    def test_a_conftest_wrapper_names_its_folder_s_answer(self, session):
+        class Extend(Plugin):
+            @pytest.hookimpl(wrapper=True)
+            def pytest_strategies_context(self, config):
+                return {**(yield), "extended": True}
+
+        session.plugin(Plugin("unused"), "plugin")
+        session.plugin(Plugin({"name": "plugin"}), "answering plugin")
+        session.conftest("tests/w", Extend())
+
+        in_w = runtime.path_context(session.rootpath / "tests/w/deeper").answer()
+        in_b = runtime.path_context(session.rootpath / "tests/b").answer()
+
+        assert in_w.label == "tests/w/conftest.py"
+        assert in_w.value == {"name": "plugin", "extended": True}
+        assert (in_b.label, in_b.value) == ("answering plugin", {"name": "plugin"})
+
+    def test_a_plugin_wrapper_around_a_plugin_is_named_by_the_one_that_answered(self, session):
+        class Extend(Plugin):
+            @pytest.hookimpl(wrapper=True)
+            def pytest_strategies_context(self, config):
+                result = yield
+                return result if result is not None else "made up"
+
+        session.plugin(Extend(), "extend")
+        session.plugin(Plugin({"name": "plugin"}), "answering plugin")
+
+        assert runtime.path_context().answer().label == "answering plugin"
+
+    def test_a_wrapper_that_makes_up_an_answer_is_named_by_itself(self, session):
+        class MakeUp(Plugin):
+            @pytest.hookimpl(wrapper=True)
+            def pytest_strategies_context(self, config):
+                result = yield
+                return result if result is not None else "made up"
+
+        session.plugin(MakeUp(), "make up")
+        session.conftest(".", Plugin(None))
+
+        answer = runtime.path_context().answer()
+
+        assert (answer.value, answer.label) == ("made up", "make up")
+
+    def test_a_wrapper_around_no_answer_gives_no_answer(self, session):
+        class Through(Plugin):
+            @pytest.hookimpl(wrapper=True)
+            def pytest_strategies_context(self, config):
+                self.calls += 1
+                return (yield)
+
+        wrapper = session.plugin(Through(), "through")
+        root = session.conftest(".", Plugin(None))
+        a = session.conftest("tests/a", Plugin(None))
+        session.conftest("tests/b", Plugin({"x": 1}))
+
+        context = runtime.path_context(session.rootpath / "tests/a/test_a.py")
+
+        assert context.answer() is NO_ANSWER
+        assert context.answer().label == "none"
+        assert context() is None
+        runtime.path_context(session.rootpath / "tests/c").answer()
+        assert (wrapper.calls, root.calls, a.calls) == (1, 1, 1)
+        assert context.why_none() == (
+            "ctx is None for tests/a: no pytest_strategies_context implementation in this "
+            "folder or above answered (implemented in tests/b/conftest.py; move it to a "
+            "common parent conftest)"
+        )
+
     def test_a_wrapper_that_raises_fails_its_folders(self, session):
         class Broken(Plugin):
             @pytest.hookimpl(wrapper=True)
@@ -768,6 +885,19 @@ class TestHookErrors:
         for _ in range(2):
             with pytest.raises(pytest.skip.Exception, match="no testbench"):
                 _call(lambda ctx: ctx)
+        assert plugin.calls == 1
+
+    def test_pytest_exit_is_kept_like_any_other_exception(self, session):
+        def stop(config):
+            pytest.exit("no bench, stopping", returncode=3)
+
+        plugin = session.conftest(".", Plugin(fn=stop))
+
+        # A factory's error, as in 3.0, and raised as it is for get_context()
+        with pytest.raises(ValueError, match="raised Exit: no bench, stopping"):
+            _call(lambda ctx: ctx)
+        with pytest.raises(pytest.exit.Exception, match="no bench, stopping"):
+            get_context(session.config, session.rootpath)
         assert plugin.calls == 1
 
     def test_repeated_errors_keep_the_original_traceback(self, session):

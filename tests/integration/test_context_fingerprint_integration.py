@@ -256,6 +256,23 @@ class TestReproduceLine:
         result.assert_outcomes(errors=2)
         assert repro_line(result).endswith(f" (context {fp(ROOT, pytester)})")
 
+    def test_a_teardown_error_alone_adds_no_context(self, pytester):
+        # As the failed rows of the repro section (D18): setup and call failures only
+        write(
+            pytester,
+            {
+                "tests/test_x.py": module("bounded")
+                + "\nimport pytest\n\n@pytest.fixture(autouse=True)\n"
+                "def broken():\n    yield\n    raise RuntimeError('teardown')\n"
+            },
+        )
+
+        result = pytester.runpytest("-p", "no:cacheprovider", f"--rng-seed={SEED}")
+
+        result.assert_outcomes(passed=2, errors=2)
+        assert result.ret == pytest.ExitCode.TESTS_FAILED
+        assert repro_line(result) == f"pytest-strategies: reproduce with --rng-seed={SEED}"
+
 
 class TestVerboseSummary:
     def test_the_contexts_block(self, pytester):
