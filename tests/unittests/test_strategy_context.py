@@ -42,13 +42,18 @@ from pytest_strategy._context import (
 from pytest_strategy._factory import FactoryInputs, call_factory
 from pytest_strategy._fingerprint import fingerprint
 from pytest_strategy._resolver import build_parametrization
-from pytest_strategy._runtime import StrategyRuntime, runtime
+from pytest_strategy._runtime import CtxFixture, StrategyRuntime, runtime
 from pytest_strategy._streams import StreamKey
 from pytest_strategy.plugin import (
+    _check,
     _context_entries,
     _contexts_text,
     _ctx_scopes_message,
+    _ctx_users,
     _failed_contexts,
+    _hide_ctx_users,
+    _note_ctx_requester,
+    _requester_error,
     _test_key,
 )
 
@@ -949,6 +954,28 @@ class TestWrappers:
 
         assert session.context("tests/w") == {**root, "w": 1}
 
+    def test_the_answer_of_a_changed_object_is_left_out_of_the_xdist_check(self, session):
+        class Extend(Plugin):
+            @pytest.hookimpl(wrapper=True)
+            def pytest_strategies_context(self, config):
+                return {**(yield), "w": 1}
+
+        session.conftest(".", Plugin({"seen": []}))
+        session.conftest("tests/v", Extend())
+        session.conftest("tests/w", Extend())
+        before = runtime.path_context(session.rootpath / "tests/v").answer()
+        # A test changes the shared object before tests/w first asks: that answer's
+        # fingerprint shows what ran before, which another worker may not have run
+        session.context("tests/a")["seen"].append("a")
+        after = runtime.path_context(session.rootpath / "tests/w").answer()
+
+        assert not before.changed and after.changed
+        assert after.fingerprint == fingerprint({"seen": ["a"], "w": 1})[0]
+        assert _check(runtime.current)["contexts"] == {
+            "conftest.py": fingerprint({"seen": []})[0],
+            "tests/v/conftest.py": fingerprint({"seen": [], "w": 1})[0],
+        }
+
 
 class TestHookRandomStream:
     def test_draws_in_the_hook_leave_the_callers_random_state_alone(self, session):
@@ -1288,6 +1315,125 @@ class TestStrategiesCtxMessage:
             "its own pytest_strategies_context, use pytest_strategy.get_context(request.config, "
             "__file__) in that folder's conftest.py fixtures."
         )
+
+
+class _Fixture:
+    """A stand-in for pytest's FixtureDef of ``name``, which requests ``argnames``."""
+
+    def __init__(self, name, *argnames, cached=(1, None, None)):
+        self.argname = name
+        self.argnames = argnames
+        self.cached_result = cached
+
+
+class TestCtxUsers:
+    """
+    The fixtures a test's request resolved that used strategies_ctx, and the ones
+    the plugin hides while a fixture is set up, to see whether its setup asks for
+    them (pytest's private ``_fixture_defs``, name -> FixtureDef, faked here).
+    """
+
+    @staticmethod
+    def project():
+        own = _Fixture("strategies_ctx", "request")
+        requester = _Fixture("tb")
+        resolved = {
+            "plain": _Fixture("plain"),
+            "strategies_ctx": own,
+            "dut": _Fixture("dut", "strategies_ctx"),
+            "tb": requester,
+            "board": _Fixture("board", "dut"),
+            "rig": _Fixture("rig", "tb"),
+            "other": _Fixture("other", "plain"),
+        }
+        fixture = CtxFixture(own, "conftest.py", {}, {requester: requester.cached_result})
+        return resolved, fixture
+
+    def test_strategies_ctx_the_requesters_and_the_fixtures_that_request_them(self):
+        resolved, fixture = self.project()
+
+        assert _ctx_users(None, resolved, fixture) == {
+            "strategies_ctx",
+            "dut",
+            "tb",
+            "board",
+            "rig",
+        }
+
+    def test_a_requester_counts_only_with_the_value_it_cached_when_it_asked(self):
+        resolved, fixture = self.project()
+        del resolved["strategies_ctx"]
+        # Set up again for this test, without asking
+        resolved["tb"].cached_result = (2, None, None)
+
+        assert _ctx_users(None, resolved, fixture) == set()
+
+    def test_none_before_strategies_ctx_was_set_up(self):
+        resolved, _ = self.project()
+
+        assert _ctx_users(None, resolved, None) == set()
+
+    def test_they_are_hidden_during_a_setup_and_go_back_in_their_order(self):
+        resolved, fixture = self.project()
+        order = list(resolved)
+        request = SimpleNamespace(_pyfuncitem=object(), _fixture_defs=resolved)
+        setup = _Fixture("new", "other", cached=(3, None, None))
+
+        _, hidden, count = _hide_ctx_users(setup, request, SimpleNamespace(ctx_fixture=fixture))
+
+        assert list(resolved) == ["plain", "other"] and count == 2
+        assert list(hidden) == ["strategies_ctx", "dut", "tb", "board", "rig"]
+        # The setup asks for dut again: pytest resolves it from its cache
+        resolved["strategies_ctx"] = hidden["strategies_ctx"]
+        resolved["dut"] = hidden["dut"]
+        _note_ctx_requester(
+            setup, request, resolved, hidden, count, SimpleNamespace(ctx_fixture=fixture)
+        )
+
+        assert fixture.requesters[setup] is setup.cached_result
+        assert sorted(resolved) == sorted(order)
+        # Each fixture still comes after those it requests
+        for position, name in enumerate(resolved):
+            assert all(
+                list(resolved).index(arg) < position
+                for arg in resolved[name].argnames
+                if arg in resolved
+            )
+
+    def test_a_setup_that_asks_for_none_of_them_is_not_kept(self):
+        resolved, fixture = self.project()
+        request = SimpleNamespace(_pyfuncitem=object(), _fixture_defs=resolved)
+        setup = _Fixture("new", "plain")
+        state = SimpleNamespace(ctx_fixture=fixture)
+
+        _note_ctx_requester(setup, request, *_hide_ctx_users(setup, request, state), state)
+
+        assert setup not in fixture.requesters
+        assert list(resolved) == ["plain", "other", "strategies_ctx", "dut", "tb", "board", "rig"]
+
+    @pytest.mark.parametrize("argnames", [("strategies_ctx",), ("board",), ("rig",)])
+    def test_a_fixture_that_requests_one_of_them_is_not_watched(self, argnames):
+        resolved, fixture = self.project()
+        request = SimpleNamespace(_pyfuncitem=object(), _fixture_defs=resolved)
+
+        watched = _hide_ctx_users(
+            _Fixture("new", *argnames), request, SimpleNamespace(ctx_fixture=fixture)
+        )
+
+        assert watched is None
+        assert len(resolved) == 7
+
+    def test_a_cached_error_of_a_requester(self):
+        error = RuntimeError("no simulator")
+        sim = _Fixture("sim", cached=(None, None, (error, None)))
+        fixture = CtxFixture(None, "conftest.py", {}, {sim: sim.cached_result})
+
+        assert _requester_error(fixture, error)
+        assert not _requester_error(fixture, RuntimeError("no simulator"))
+        assert not _requester_error(fixture, None)
+        # Set up again since
+        sim.cached_result = (None, None, (error, None))
+        assert not _requester_error(fixture, error)
 
 
 class Opaque:

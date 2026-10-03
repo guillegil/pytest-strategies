@@ -425,6 +425,51 @@ def test_bounded(x, strategies_ctx):
             [f"pytest-strategies: context {fp({'limit': 5, 'runs': []}, pytester)}"]
         )
 
+    def test_a_change_before_a_wrapper_folder_asks_on_one_worker_exits_0(self, pytester):
+        # On gw0 a session fixture changes the rootdir's object before tests/w first
+        # asks for its context, which tests/w's wrapper builds from that object; gw1
+        # builds it from the unchanged object
+        conftest = """
+import os
+
+import pytest
+from pytest_strategy import get_context
+
+def pytest_strategies_context(config):
+    return {"seen": []}
+
+@pytest.fixture(autouse=True, scope="session")
+def _first(request):
+    if os.environ["PYTEST_XDIST_WORKER"] == "gw0":
+        get_context(request.config, __file__)["seen"].append("gw0")
+    get_context(request.config, request.config.rootpath / "tests/w")
+"""
+        wrapper = """
+import pytest
+
+@pytest.hookimpl(wrapper=True)
+def pytest_strategies_context(config):
+    return {**(yield), "w": 1}
+"""
+        tests = """
+import pytest
+from pytest_strategy import get_context
+
+@pytest.mark.parametrize("i", range(8))
+def test_w(request, i):
+    assert get_context(request.config, __file__)["w"] == 1
+"""
+        write(
+            pytester,
+            {"conftest.py": conftest, "tests/w/conftest.py": wrapper, "tests/w/test_w.py": tests},
+        )
+
+        result = run(pytester)
+
+        result.assert_outcomes(passed=8)
+        assert result.ret == pytest.ExitCode.OK
+        result.stdout.no_fnmatch_line("*different vectors*")
+
     def test_values_and_a_context_whose_reprs_show_sets_in_hash_order_exit_0(self, pytester):
         pytest.importorskip("attrs")
         pytest.importorskip("pydantic")

@@ -25,7 +25,15 @@ import os
 import re
 import sys
 import traceback
-from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
+from collections.abc import (
+    Callable,
+    Generator,
+    Iterable,
+    Iterator,
+    Mapping,
+    MutableMapping,
+    Sequence,
+)
 from pathlib import Path
 from types import ModuleType
 from typing import Any, get_args
@@ -588,18 +596,33 @@ class PytestStrategyPlugin:
                 seed, "fixture", scope, fixturedef.argname, param_index, *definition
             )
 
-        # The fixtures the test's request resolved (private API): strategies_ctx
-        # resolved during this setup was asked for through request.getfixturevalue(),
-        # so a later test that gets this fixture from its cache uses it too
-        resolved = getattr(request, "_fixture_defs", None)
-        if not isinstance(resolved, Mapping):
-            resolved = {_CTX_FIXTURE: None}
-        before = _CTX_FIXTURE in resolved
-        with _Stream(key):
-            result = yield
-        if not before and _CTX_FIXTURE in resolved and state.ctx_fixture is not None:
-            state.ctx_fixture.requesters.add(fixturedef)
-        return result
+        # A request.getfixturevalue() in this setup that reaches strategies_ctx, or a
+        # fixture that used it, makes the tests that get this value of the fixture
+        # from its cache use it too (_hide_ctx_users, _note_ctx_requester)
+        watched = _hide_ctx_users(fixturedef, request, state)
+        try:
+            with _Stream(key):
+                return (yield)
+        finally:
+            if watched is not None:
+                _note_ctx_requester(fixturedef, request, *watched, state)
+
+    def pytest_fixture_post_finalizer(
+        self, fixturedef: pytest.FixtureDef[Any], request: pytest.FixtureRequest
+    ) -> None:
+        """
+        Forget the value a fixture cached when its setup asked for strategies_ctx
+        (``CtxFixture.requesters``) when pytest tears it down, so the plugin does not
+        keep it alive.
+        """
+        state = runtime.session_of(request.config)
+        fixture = state.ctx_fixture if state is not None else None
+        if (
+            fixture is not None
+            and fixturedef in fixture.requesters
+            and fixture.requesters[fixturedef] is fixturedef.cached_result
+        ):
+            del fixture.requesters[fixturedef]
 
     @pytest.hookimpl(wrapper=True)
     def pytest_runtest_setup(self, item: pytest.Item) -> Generator[None, None, None]:
@@ -611,9 +634,9 @@ class PytestStrategyPlugin:
             try:
                 result = yield
             except BaseException as error:
-                _check_ctx(item, error)
+                _check_ctx(item, "setup", error)
                 raise
-            _check_ctx(item, None)
+            _check_ctx(item, "setup", None)
             return result
 
     @pytest.hookimpl(wrapper=True)
@@ -626,10 +649,30 @@ class PytestStrategyPlugin:
             try:
                 result = yield
             except BaseException as error:
-                _check_ctx(item, error)
+                _check_ctx(item, "call", error)
                 raise
-            _check_ctx(item, None)
+            _check_ctx(item, "call", None)
             return result
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_runtest_makereport(
+        self, item: pytest.Item, call: pytest.CallInfo[None]
+    ) -> Generator[None, pytest.TestReport, pytest.TestReport]:
+        """
+        Add the guard's message that ``_check_ctx`` kept for a test's setup or call
+        that raised an error to that phase's report, below the traceback: as a
+        section of the error's representation, or of the report when the error has
+        no such representation.
+        """
+        report = yield
+        message = item.stash.get(_CTX_MESSAGES, {}).pop(call.when, None)
+        if message is not None:
+            add = getattr(report.longrepr, "addsection", None)
+            if callable(add):
+                add(_CTX_SECTION, message)
+            else:
+                report.sections.append((_CTX_SECTION, message))
+        return report
 
     @pytest.hookimpl(wrapper=True)
     def pytest_runtest_teardown(
@@ -1874,12 +1917,17 @@ def _check(state: Any) -> dict[str, dict[str, str]]:
     Return a pytest-xdist worker's part of the check that the workers generated the
     same vectors: ``contexts``, each context the session computed by its label (its
     fingerprint, ``none`` where nothing answered, or ``error: <type>`` for an
-    implementation that raised), and ``values``, each strategy's digest.
+    implementation that raised), and ``values``, each strategy's digest. A
+    wrapper's answer computed from an object that had changed since its
+    implementation returned it (``Answer.changed``) is left out: its fingerprint
+    shows what the worker ran before, as a test that changes the object would.
     """
     if state is None:
         return {"contexts": {}, "values": {}}
     contexts = {}
     for label, answer in state.contexts.scopes().items():
+        if answer.changed:
+            continue
         if answer.error is not None:
             contexts[label] = f"error: {type(answer.error).__name__}"
         else:
@@ -2086,6 +2134,12 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
 # The name of the plugin's fixture of the testbench context
 _CTX_FIXTURE = "strategies_ctx"
 
+# The guard's message for a test's setup or call that raised an error after using
+# strategies_ctx with another folder's context, by phase (_check_ctx), and the title
+# of the report section that shows it
+_CTX_MESSAGES = pytest.StashKey[dict[str, str]]()
+_CTX_SECTION = "pytest-strategies"
+
 
 @pytest.fixture(scope="session")
 def strategies_ctx(request: pytest.FixtureRequest) -> Any:
@@ -2103,7 +2157,8 @@ def strategies_ctx(request: pytest.FixtureRequest) -> Any:
     through other fixtures, except those in a folder whose conftest.py defines a
     fixture of that name that does not request this one. When no test requests it
     and one asks for it through ``request.getfixturevalue()``, every test counts.
-    When some do, a test that asks for it that way gets their context, and fails
+    When some do, a test that asks for it that way, or gets the value a fixture
+    cached when its setup asked for it that way, gets their context, and fails
     after its setup or its call when its own folder's context is another one. What
     the implementation raised is raised again as it is, so a ``pytest.skip`` there
     skips the tests that use it.
@@ -2177,13 +2232,130 @@ def _gets_this_fixture(item: pytest.Item, own: Any, dynamic: bool) -> bool:
     return False
 
 
-def _ctx_mismatch(item: pytest.Item) -> str | None:
+def _ctx_users(item: Any, resolved: Mapping[str, Any], fixture: CtxFixture | None) -> set[str]:
+    """
+    Return the names of the fixtures that a test's request resolved (``resolved``,
+    name -> FixtureDef, private API) and that used the plugin's ``strategies_ctx``,
+    whose value is ``fixture`` (none while it has none): ``strategies_ctx`` when
+    the test gets the plugin's (``_gets_this_fixture``), the fixtures in
+    ``fixture.requesters`` with the very value they cached when their setup asked
+    for it, and the fixtures that request one of these, directly or through others.
+    """
+    if fixture is None:
+        return set()
+    users: set[str] = set()
+    for requester, cached in fixture.requesters.items():
+        name = requester.argname
+        if requester.cached_result is cached and resolved.get(name) is requester:
+            users.add(name)
+    own = resolved.get(_CTX_FIXTURE)
+    if own is not None and (
+        own is fixture.definition or _gets_this_fixture(item, fixture.definition, True)
+    ):
+        users.add(_CTX_FIXTURE)
+    if users:
+        # One pass: a fixture comes after the fixtures it requests in ``resolved``, as
+        # pytest resolves them first and _hide_ctx_users puts them back in order
+        for name, other in resolved.items():
+            if name not in users and not users.isdisjoint(getattr(other, "argnames", ())):
+                users.add(name)
+    return users
+
+
+def _hide_ctx_users(
+    fixturedef: pytest.FixtureDef[Any], request: pytest.FixtureRequest, state: Any
+) -> tuple[MutableMapping[str, Any], dict[str, Any], int] | None:
+    """
+    Take ``strategies_ctx`` and the fixtures that used it (``_ctx_users``) out of
+    the fixtures the test's request resolved (``request._fixture_defs``, private
+    API, name -> FixtureDef) while ``fixturedef`` is set up, and return that
+    mapping, what was taken out of it and how many fixtures are left in it: a
+    ``request.getfixturevalue()`` in the setup that reaches one of them then
+    resolves it again, from its cache, and puts it back, which shows also when the
+    test had resolved it before (``_note_ctx_requester``). None for a fixture that
+    is not watched: ``strategies_ctx`` itself or a folder's override of it, one that
+    requests it or one of those fixtures (the tests that get it request them too),
+    or a pytest without these private attributes.
+    """
+    # The test (private API)
+    item = getattr(request, "_pyfuncitem", None)
+    resolved = getattr(request, "_fixture_defs", None)
+    if (
+        fixturedef.argname == _CTX_FIXTURE
+        or item is None
+        or not isinstance(resolved, MutableMapping)
+    ):
+        return None
+    users = _ctx_users(item, resolved, state.ctx_fixture)
+    if _CTX_FIXTURE in resolved:
+        # A folder's override too: what the setup asks for is told after it
+        users.add(_CTX_FIXTURE)
+    if not users.isdisjoint(fixturedef.argnames):
+        return None
+    # In their order, which _ctx_users relies on
+    hidden = {name: resolved.pop(name) for name in [name for name in resolved if name in users]}
+    return resolved, hidden, len(resolved)
+
+
+def _note_ctx_requester(
+    fixturedef: pytest.FixtureDef[Any],
+    request: pytest.FixtureRequest,
+    resolved: MutableMapping[str, Any],
+    hidden: Mapping[str, Any],
+    count: int,
+    state: Any,
+) -> None:
+    """
+    After ``fixturedef`` was set up, or failed (pytest caches its error too), keep
+    it in ``CtxFixture.requesters`` with the value it cached when its setup reached
+    the plugin's ``strategies_ctx`` or a fixture that used it: those were hidden
+    (``_hide_ctx_users``), so any of them in ``resolved`` now was resolved by this
+    setup, which made ``resolved`` longer than the ``count`` it had then. Then put
+    the hidden ones back as they were.
+    """
+    try:
+        fixture = state.ctx_fixture
+        cached = fixturedef.cached_result
+        if (
+            fixture is not None
+            and cached is not None
+            and len(resolved) > count
+            and _ctx_users(getattr(request, "_pyfuncitem", None), resolved, fixture)
+        ):
+            fixture.requesters[fixturedef] = cached
+    finally:
+        resolved.update(hidden)
+
+
+def _requester_error(fixture: CtxFixture, error: BaseException | None) -> bool:
+    """
+    Whether ``error`` is the error that a fixture in ``fixture.requesters`` cached
+    when its setup asked for ``strategies_ctx`` and then raised: pytest raises that
+    object again for each test that gets the fixture, and does not count the
+    fixture among those the test's request resolved.
+    """
+    if error is None:
+        return False
+    for requester, cached in fixture.requesters.items():
+        failure = cached[2] if isinstance(cached, tuple) and len(cached) == 3 else None
+        if (
+            requester.cached_result is cached
+            and isinstance(failure, tuple)
+            and failure
+            and failure[0] is error
+        ):
+            return True
+    return False
+
+
+def _ctx_mismatch(item: pytest.Item, error: BaseException | None = None) -> str | None:
     """
     Return the guard's message when ``item`` used the plugin's ``strategies_ctx``
     without being one of the tests it counted when it was set up, through
     ``request.getfixturevalue()`` (its own, or that of a fixture whose setup asked
-    for it), and its folder's context is not the one the fixture returned; None
-    otherwise. Private API: the fixtures the test's request resolved
+    for it, ``_ctx_users``, including a fixture whose cached error is the ``error``
+    its phase raised), and its folder's context is not the one the fixture
+    returned; None otherwise. Private API: the fixtures the test's request resolved
     (``item._request._fixture_defs``).
     """
     state = runtime.session_of(item.config)
@@ -2195,9 +2367,7 @@ def _ctx_mismatch(item: pytest.Item) -> str | None:
         item.nodeid in tests for tests in fixture.consumers.values()
     ):
         return None
-    if not (
-        _CTX_FIXTURE in resolved and _gets_this_fixture(item, fixture.definition, True)
-    ) and not any(definition in fixture.requesters for definition in resolved.values()):
+    if not _ctx_users(item, resolved, fixture) and not _requester_error(fixture, error):
         return None
     label = state.test_context(item).answer().label
     if label == fixture.label:
@@ -2207,12 +2377,14 @@ def _ctx_mismatch(item: pytest.Item) -> str | None:
     return _ctx_scopes_message(scopes)
 
 
-def _check_ctx(item: pytest.Item, error: BaseException | None) -> None:
+def _check_ctx(item: pytest.Item, when: str, error: BaseException | None) -> None:
     """
-    Fail a test's setup or call that used ``strategies_ctx`` with another folder's
-    context (``_ctx_mismatch``): when the phase passed or skipped, with the guard's
-    message; when it raised an error, which that context may have caused, the
-    message is added to it as a note.
+    Fail a test's setup or call (``when``) that used ``strategies_ctx`` with another
+    folder's context (``_ctx_mismatch``): when the phase passed or skipped, with the
+    guard's message. When it raised an error, which that context may have caused,
+    the message is kept for the phase's report (``pytest_runtest_makereport``), not
+    added to the error: a fixture's error is the one object that pytest raises
+    again for each test that gets the fixture from its cache.
     """
     if isinstance(error, pytest.exit.Exception) or (
         error is not None and not isinstance(error, (Exception, pytest.skip.Exception))
@@ -2220,13 +2392,12 @@ def _check_ctx(item: pytest.Item, error: BaseException | None) -> None:
         # pytest.exit(), a KeyboardInterrupt, or a failure that pytest.fail() or
         # pytest.xfail() reported
         return
-    message = _ctx_mismatch(item)
+    message = _ctx_mismatch(item, error)
     if message is None:
         return
     if error is None or isinstance(error, pytest.skip.Exception):
         raise pytest.fail.Exception(message, pytrace=False) from None
-    if isinstance(error, Exception) and message not in getattr(error, "__notes__", ()):
-        error.add_note(message)
+    item.stash.setdefault(_CTX_MESSAGES, {})[when] = message
 
 
 def _ctx_scopes_message(scopes: Mapping[str, Mapping[str, None]]) -> str:

@@ -75,9 +75,11 @@ class CtxFixture:
     label: str
     # The tests it counted when it was set up: their node IDs by context label
     consumers: dict[str, dict[str, None]]
-    # The fixtures (FixtureDefs) that asked for it through request.getfixturevalue()
-    # when they were set up: a test that gets one of them uses it too
-    requesters: set[Any] = field(default_factory=set)
+    # The fixtures (FixtureDefs) whose setup reached it through
+    # request.getfixturevalue(), directly or through a fixture that used it, with the
+    # value they cached then (their cached_result): a test that gets that value of
+    # one of them uses it too
+    requesters: dict[Any, Any] = field(default_factory=dict)
 
 
 class SessionState:

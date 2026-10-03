@@ -6,6 +6,7 @@ own folder's context with ``get_context(request.config, __file__)``.
 """
 
 import random
+import re
 from collections import Counter
 from textwrap import dedent
 
@@ -446,9 +447,14 @@ def test_b_fixture_again(tb_dynamic):
         )
         for test in tests:
             result.stdout.fnmatch_lines([guard.format(test)])
-        # A test whose body raised keeps its own error, with the guard's message
+        # A test whose body raised keeps its own error, with the guard's message in a
+        # section below it
         result.stdout.fnmatch_lines(
-            ["E * assert {'name': 'root'} == {'name': 'B'}", "E " + guard.format("test_b_assert")]
+            [
+                "E * assert {'name': 'root'} == {'name': 'B'}",
+                "*- pytest-strategies -*",
+                guard.format("test_b_assert"),
+            ]
         )
 
     # A folder's own strategies_ctx, which does not build on the plugin's
@@ -515,6 +521,266 @@ def strategies_ctx(strategies_ctx):
                 "tests/tb_a/conftest.py: tests/tb_a/test_a.py::test_a)*"
             ]
         )
+
+
+# The ways to run a project: in one process, with the folders the other way round,
+# and on two pytest-xdist workers
+ORDERS = [(), ("tests/b", "tests/a"), ("-n", "2")]
+ORDER_IDS = ["one_process", "reversed", "xdist"]
+
+
+def run_in(pytester, args):
+    """Run the project as ``args`` (one of ``ORDERS``) says."""
+    if "-n" in args:
+        pytest.importorskip("xdist")
+        return pytester.runpytest_subprocess("-p", "no:cacheprovider", *args)
+    return pytester.runpytest("-p", "no:cacheprovider", *args)
+
+
+class TestFixturesThatAskForIt:
+    """
+    The tests that get a fixture whose setup asked for strategies_ctx through
+    request.getfixturevalue(): those that get the value it cached then use it, the
+    others do not, whichever test set the fixture up and in whichever order.
+    """
+
+    @pytest.mark.parametrize("args", ORDERS, ids=ORDER_IDS)
+    def test_a_fixture_that_asks_only_for_some_tests_leaves_the_others_alone(self, pytester, args):
+        write(
+            pytester,
+            {
+                "conftest.py": conftest(
+                    "root",
+                    """
+def pytest_configure(config):
+    config.addinivalue_line("markers", "sim: uses the simulator")
+
+@pytest.fixture
+def dut(request):
+    # Only the simulated tests need the testbench context
+    if request.node.get_closest_marker("sim"):
+        return request.getfixturevalue("strategies_ctx")
+    return None
+
+@pytest.fixture(autouse=True)
+def _log(request):
+    if request.node.get_closest_marker("sim"):
+        print(request.getfixturevalue("strategies_ctx"))
+""",
+                ),
+                "tests/a/test_a.py": """
+import pytest
+
+def test_static(strategies_ctx):
+    assert strategies_ctx == {"name": "root"}
+
+@pytest.mark.sim
+def test_a_sim(dut):
+    assert dut == {"name": "root"}
+""",
+                "tests/b/conftest.py": conftest("B"),
+                "tests/b/test_b.py": """
+import pytest
+
+def test_b_plain(dut):
+    assert dut is None
+
+@pytest.mark.parametrize("i", range(4))
+def test_b(i):
+    pass
+""",
+            },
+        )
+
+        result = run_in(pytester, args)
+
+        result.assert_outcomes(passed=7)
+
+    @pytest.mark.parametrize("args", ORDERS, ids=ORDER_IDS)
+    def test_a_session_fixture_set_up_for_a_test_that_requests_it_counts(self, pytester, args):
+        # test_a1 resolves strategies_ctx before tb asks for it, and test_a2 dut
+        # before tb_dut asks for it: the tests of "B" that get those fixtures fail in
+        # any order
+        write(
+            pytester,
+            {
+                "conftest.py": conftest(
+                    "root",
+                    """
+@pytest.fixture(scope="session")
+def tb(request):
+    return request.getfixturevalue("strategies_ctx")
+
+@pytest.fixture(scope="session")
+def dut(strategies_ctx):
+    return strategies_ctx
+
+@pytest.fixture(scope="session")
+def tb_dut(request):
+    return request.getfixturevalue("dut")
+""",
+                ),
+                "tests/a/test_a.py": """
+def test_a1(strategies_ctx, tb):
+    assert strategies_ctx == tb == {"name": "root"}
+
+def test_a2(dut, tb_dut):
+    assert dut == tb_dut == {"name": "root"}
+""",
+                "tests/b/conftest.py": conftest("B"),
+                "tests/b/test_b.py": """
+def test_b_tb(tb):
+    pass
+
+def test_b_tb_dut(tb_dut):
+    pass
+""",
+            },
+        )
+
+        result = run_in(pytester, args)
+
+        result.assert_outcomes(passed=2, errors=2)
+        for test in ("test_b_tb", "test_b_tb_dut"):
+            result.stdout.fnmatch_lines(
+                [
+                    "*strategies_ctx is a session fixture, but the tests that use it have "
+                    "different contexts (conftest.py: tests/a/test_a.py::test_a1 and 1 more; "
+                    f"tests/b/conftest.py: tests/b/test_b.py::{test})*"
+                ]
+            )
+
+    @staticmethod
+    def errors_by_test(result):
+        """The lines of each test's error in the report, by test name."""
+        blocks = {}
+        lines = None
+        for line in result.stdout.lines:
+            match = re.fullmatch(r"_+ ERROR at setup of (\w+) _+", line)
+            if match:
+                lines = blocks[match.group(1)] = []
+            elif line.startswith(("=", "pytest-strategies: reproduce")):
+                lines = None
+            elif lines is not None:
+                lines.append(line)
+        return blocks
+
+    @pytest.mark.parametrize(
+        "args", [(), ("tests/c", "tests/b", "tests/a"), ("-n", "2")], ids=ORDER_IDS
+    )
+    def test_a_fixture_s_cached_error_gets_the_message_in_the_wrong_context_only(
+        self, pytester, args
+    ):
+        write(
+            pytester,
+            {
+                "conftest.py": conftest(
+                    "root",
+                    """
+@pytest.fixture(scope="session")
+def sim(request):
+    ctx = request.getfixturevalue("strategies_ctx")
+    raise RuntimeError(f"no simulator for {ctx['name']}")
+""",
+                ),
+                "tests/a/test_a.py": "def test_static(strategies_ctx):\n    pass\n",
+                "tests/b/conftest.py": conftest("B"),
+                "tests/b/test_b.py": "def test_b(sim):\n    pass\n",
+                # The rootdir's context, as test_static's
+                "tests/c/test_c.py": "def test_c(sim):\n    pass\n",
+            },
+        )
+
+        result = run_in(pytester, args)
+
+        result.assert_outcomes(passed=1, errors=2)
+        errors = self.errors_by_test(result)
+        guard = (
+            "strategies_ctx is a session fixture, but the tests that use it have different "
+            "contexts (conftest.py: tests/a/test_a.py::test_static; tests/b/conftest.py: "
+            "tests/b/test_b.py::test_b). In a folder with its own pytest_strategies_context, "
+            "use pytest_strategy.get_context(request.config, __file__) in that folder's "
+            "conftest.py fixtures."
+        )
+        # pytest raises one error object for both: the message is in test_b's
+        # report only, below the error, which is left as it was
+        for test in ("test_b", "test_c"):
+            assert "E       RuntimeError: no simulator for root" in errors[test]
+            assert not any(line.startswith("E") and guard in line for line in errors[test])
+        assert errors["test_b"][-2:] == [
+            "------------------------------ pytest-strategies -------------------------------",
+            guard,
+        ]
+        assert not any(" pytest-strategies " in line for line in errors["test_c"])
+        assert result.stdout.lines.count(guard) == 1
+
+    @pytest.mark.parametrize(
+        "args", [(), ("tests/c", "tests/b", "tests/a"), ("-n", "2")], ids=ORDER_IDS
+    )
+    def test_a_fixture_s_cached_skip_fails_the_wrong_context_only(self, pytester, args):
+        write(
+            pytester,
+            {
+                "conftest.py": conftest(
+                    "root",
+                    """
+@pytest.fixture(scope="session")
+def sim(request):
+    request.getfixturevalue("strategies_ctx")
+    pytest.skip("no simulator")
+""",
+                ),
+                "tests/a/test_a.py": "def test_static(strategies_ctx):\n    pass\n",
+                "tests/b/conftest.py": conftest("B"),
+                "tests/b/test_b.py": "def test_b(sim):\n    pass\n",
+                "tests/c/test_c.py": "def test_c(sim):\n    pass\n",
+            },
+        )
+
+        result = run_in(pytester, args)
+
+        result.assert_outcomes(passed=1, skipped=1, errors=1)
+        result.stdout.fnmatch_lines(["*ERROR tests/b/test_b.py::test_b - Failed: strategies_ctx*"])
+
+    def test_the_value_a_fixture_cached_is_not_kept_after_its_teardown(self, pytester):
+        write(
+            pytester,
+            {
+                "conftest.py": conftest(
+                    "root",
+                    """
+import gc
+import weakref
+
+class Dut:
+    pass
+
+REFS = []
+
+@pytest.fixture
+def dut(request):
+    request.getfixturevalue("strategies_ctx")
+    value = Dut()
+    REFS.append(weakref.ref(value))
+    return value
+""",
+                ),
+                "test_x.py": """
+import gc
+
+import conftest
+
+def test_dut(dut):
+    pass
+
+def test_after():
+    gc.collect()
+    assert conftest.REFS[0]() is None
+""",
+            },
+        )
+
+        pytester.runpytest("-p", "no:cacheprovider").assert_outcomes(passed=2)
 
 
 class TestGetContext:

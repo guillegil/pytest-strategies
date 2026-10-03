@@ -221,6 +221,11 @@ class Answer:
             when the implementation returned it, before anything received it; None
             when the value is None or the implementation raised
         partial: The types in the value that its fingerprint has by name alone
+        changed: Whether the wrappers that returned the value received an object
+            that had changed since its implementation returned it (a test, a
+            fixture or a factory changed it before a folder that sees them first
+            asked): the fingerprint then shows what ran before, so the xdist check
+            leaves it out
     """
 
     value: Any
@@ -229,6 +234,7 @@ class Answer:
     traceback: TracebackType | None = None
     fingerprint: str | None = None
     partial: tuple[str, ...] = ()
+    changed: bool = False
 
     def get(self) -> Any:
         """Return the context, or raise what the implementation raised."""
@@ -241,16 +247,17 @@ class Answer:
 NO_ANSWER = Answer(None, "none")
 
 
-def _answered(value: Any, label: str, rootpath: Any) -> Answer:
+def _answered(value: Any, label: str, rootpath: Any, changed: bool = False) -> Answer:
     """
     Return the answer of an implementation (or a wrapper's call) that returned
     ``value``, with its fingerprint: computed now, so a factory, a fixture or a test
-    that changes the object later changes no fingerprint.
+    that changes the object later changes no fingerprint. ``changed`` is
+    ``Answer.changed``.
     """
     if value is None:
         return Answer(None, label)
     digest, partial = fingerprint(value, rootpath)
-    return Answer(value, label, fingerprint=digest, partial=partial)
+    return Answer(value, label, fingerprint=digest, partial=partial, changed=changed)
 
 
 class _Kept:
@@ -427,7 +434,8 @@ class ContextStore:
         When they return the very object the implementation returned (a wrapper
         that only checks or logs it), the answer is the implementation's own, with
         its label: the folders that see the wrappers and those that do not get one
-        object, so they share one context.
+        object, so they share one context. When that object had changed before they
+        ran, their answer is marked (``Answer.changed``).
         """
         ordered = [*wrappers] if answering is None else [*wrappers, answering]
         conftests = [impl for impl in ordered if is_conftest(impl)]
@@ -440,7 +448,8 @@ class ContextStore:
         kept = self._answers[answering] if answering is not None else NO_ANSWER
         # The object's fingerprint now, which a test, a fixture or a factory may have
         # changed since the implementation returned it: only what the wrappers
-        # change counts (_check_unchanged). On a stream of its own, so a repr that
+        # change counts (_check_unchanged), and the wrapped answer of a changed
+        # object is marked (Answer.changed). On a stream of its own, so a repr that
         # draws moves no other stream.
         before = None
         if kept.value is not None:
@@ -457,7 +466,7 @@ class ContextStore:
                     return NO_ANSWER
                 if value is kept.value:
                     return kept
-                return _answered(value, label, rootpath)
+                return _answered(value, label, rootpath, before != kept.fingerprint)
         except _KEPT as e:
             return Answer(None, label, e, e.__traceback__)
 

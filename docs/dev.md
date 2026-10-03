@@ -773,7 +773,11 @@ fingerprint does not show, in an object counted by its type alone, goes
 unnoticed). Comparing with the fingerprint taken before the wrappers, not the
 one taken when the implementation returned, leaves out what a test, a fixture or
 a factory changed in between, and an object whose fingerprint changes by itself
-(taken a third time, it differs again) blames no wrapper. When the wrappers
+(taken a third time, it differs again) blames no wrapper. When the two
+fingerprints of the implementation's object differ (taken when it returned and
+right before the wrappers), the wrapped answer is marked (`Answer.changed`): its
+fingerprint shows what ran before, which on another xdist worker may not have,
+so the xdist check leaves it out (below). When the wrappers
 return the very object the implementation returned, the wrapped answer is the
 implementation's own `Answer`, so the folders on both sides share one label (a
 deviation from D7's label rule below: one object is one context for
@@ -823,19 +827,42 @@ sorted, each with its first node ID). Otherwise it keeps the label and the
 consumers in `SessionState.ctx_fixture` (`_runtime.CtxFixture`) and returns
 their `Answer.get()`, the cached object or the implementation's own exception.
 So which items count does not depend on which one asks first, in one process
-or on any xdist worker. A test that asked through `request.getfixturevalue()`
-while others request it is checked after its setup and after its call, in the
-plugin's `pytest_runtest_setup` and `pytest_runtest_call` wrappers
-(`plugin._check_ctx()`): when its request resolved the fixture
-(`item._request._fixture_defs`, private) or a fixture in
-`CtxFixture.requesters`, and its own folder's label is another one, a phase
-that passed or skipped fails with the message, and an error gets it as a note
-(`add_note`). `CtxFixture.requesters` holds the fixtures whose setup resolved
-`strategies_ctx` (the plugin's `pytest_fixture_setup` wrapper compares the
-request's `_fixture_defs` before and after), so the tests that get one of them
-from its cache are checked too. A fixture set up for a test that had resolved
-`strategies_ctx` already cannot be told from the others; the tests that get it
-from its cache are not checked.
+or on any xdist worker. A test that used the fixture otherwise while others
+request it is checked after its setup and after its call, in the plugin's
+`pytest_runtest_setup` and `pytest_runtest_call` wrappers (`plugin._check_ctx()`,
+`_ctx_mismatch()`). It used it when `plugin._ctx_users()` finds the plugin's
+fixture among those its request resolved (`item._request._fixture_defs`,
+private), or a fixture of `CtxFixture.requesters` whose `cached_result` is still
+the one kept there, or when the error its phase raised is the error such a
+fixture cached (`_requester_error()`: pytest raises it again without adding the
+fixture to `_fixture_defs`). When its own folder's label is another one, a phase
+that passed or skipped fails with the message; for an error, the message is
+kept in `item.stash` and the plugin's `pytest_runtest_makereport` wrapper adds it
+to that phase's report, as a `pytest-strategies` section of the error's
+representation (`addsection()`, or of the report when it has none). The error
+is left as it is: a fixture's cached error is one object, which pytest raises
+again for every test that gets the fixture.
+`CtxFixture.requesters` maps each fixture whose setup reached the plugin's
+fixture through `request.getfixturevalue()`, directly or through fixtures that
+used it, to the `cached_result` that setup left (a value or an error), so only
+the tests that get that very value are checked: a function-scoped fixture that
+asks only for some tests leaves the others alone. The plugin's
+`pytest_fixture_setup` wrapper finds them. Before the setup of a fixture that
+requests none of them, `_hide_ctx_users()` takes `strategies_ctx` and the
+fixtures that used it (`_ctx_users()`: the plugin's fixture, the current
+requesters, and the fixtures that request one of these, in turn, found in one
+pass because `_fixture_defs` lists a fixture after those it requests: pytest
+resolves them first, and the hidden ones go back in their order) out of the
+request's `_fixture_defs`, so a `request.getfixturevalue()` in the setup
+resolves them again, from their caches, and puts them back; after it, also when
+it raised, `_note_ctx_requester()` keeps the fixture when any of them is back,
+and restores the hidden ones. That works when the test resolved
+`strategies_ctx` before the fixture too, so it does not depend on which test
+sets the fixture up. While the setup runs, `request.fixturenames` lacks the
+hidden names that are not in the item's own closure.
+`pytest_fixture_post_finalizer` drops a requester when pytest tears its value
+down, so the plugin keeps no value alive. A fixture whose setup catches a
+requester's cached error and returns or raises something else is not seen.
 `pytest_strategy.get_context(config, path)` (`_api.py`) finds the session of
 `config` with `runtime.session_of()` (the innermost one, so an outer session's
 config still works while an in-process `pytester` session runs; `RuntimeError`
@@ -911,7 +938,8 @@ contexts the collection computed, as the line printed after the collection
 shows them (`SessionState.value_digests`, `collection_contexts`).
 When its session finishes, it writes `workeroutput["pytest_strategies_check"]`
 (`plugin._check()`): `contexts`, each label of `ContextStore.scopes()` with its
-fingerprint, `none` or `error: <type>`, and `values`, the digests; strings only,
+fingerprint, `none` or `error: <type>`, except a wrapped answer marked
+`Answer.changed`, and `values`, the digests; strings only,
 because execnet carries builtin types. Its summary also carries the collection's
 contexts and the contexts its failed tests received. The controller keeps each
 worker's summary and check by worker ID in `pytest_testnodedown`

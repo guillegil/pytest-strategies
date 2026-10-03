@@ -524,9 +524,12 @@ def tb_a(request):
   The tests of a folder whose `conftest.py` defines its own `strategies_ctx` (one
   that does not request the plugin's) do not count. When no test requests it, a
   `request.getfixturevalue("strategies_ctx")` counts every test of the run. When
-  some do, a test that asks for it that way (or through a fixture that does) gets
-  their context, and fails with the message after its setup or its body when its
-  own folder's context is another one.
+  some do, a test that asks for it that way gets their context, and fails with the
+  message after its setup or its body when its own folder's context is another
+  one. So does a test that gets the value (or error) a fixture cached when its
+  setup asked for it that way, whichever test that setup ran for; a fixture that
+  asks only for some tests leaves the others alone. A raised error keeps its
+  traceback, with the message in a `pytest-strategies` report section below it.
 - `get_context(config, path)` returns the context of the folder of `path` (a file
   or a folder), the object a test there gets. A folder whose `conftest.py` pytest
   did not load (no test there collected) gets the nearest loaded one's above. Call
@@ -609,7 +612,8 @@ defined at module level. IDs look like `x=1,y=2`.
   causes: a factory drawing from Python's global `random` (use `rng`), a list
   built from a set of strings (sort it: its order follows `PYTHONHASHSEED`), a
   context holding temporary paths, process IDs or times. A context or strategy
-  only one worker computed is not compared. When the values change the IDs (a
+  only one worker computed is not compared, nor is a folder's context that a
+  wrapper built from an object a test had changed. When the values change the IDs (a
   `Series` from the context), xdist's "Different tests were collected" comes
   first.
 
