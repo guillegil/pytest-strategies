@@ -248,7 +248,9 @@ def esm_rw(nsamples, ctx):
   testbench than the rootdir's gives the rest. A factory from another folder gets
   the test's folder's context.
 - Each implementation runs at most once per session, the first time a factory
-  with `ctx` (or `strategies_ctx` or `get_context()`, below) needs it. Factories
+  with `ctx` (or `strategies_ctx` or `get_context()`, below) needs it. A
+  `wrapper=True` one must return a new object (`{**ctx, "extra": 1}`), never
+  change the one it receives. Factories
   without `ctx` never trigger it. With no hook result, `ctx` keeps its default,
   or is `None`.
 - Fixtures get the same object: `def tb(strategies_ctx)` (a session fixture of

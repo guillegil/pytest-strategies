@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -91,7 +92,14 @@ class Bench:
 class Txn(pydantic.BaseModel):
     lanes: set[str]
 
-values = (Bench(frozenset(NAMES)), Txn(lanes=NAMES), SimpleNamespace(lanes=NAMES))
+class Tags:
+    def __init__(self, names):
+        self.names = names
+
+    def __repr__(self):
+        return f"Tags({self.names!r})"
+
+values = (Bench(frozenset(NAMES)), Txn(lanes=NAMES), SimpleNamespace(lanes=NAMES), Tags(NAMES))
 row = VectorInfo(
     strategy="benches", origin="strategies.py:3", kind="random", name=None, index=0,
     enumerated=(), values=values, id="rand-0", seed=1, context=None,
@@ -362,12 +370,46 @@ class TestValueDigests:
             item("t.py::test_a[rand-0]", info("burst", 1)),
             item("t.py::test_a[rand-1]", info("burst", Broken())),
             item("t.py::test_b[rand-0]", info("esm", 2)),
+            # A later row of the strategy is not encoded
+            item("t.py::test_a[rand-2]", info("burst", 3)),
         ]
 
         digests = _value_digests(items)
 
         assert digests["burst"] == "unavailable"
         assert digests["esm"] == expected_digest(("t.py::test_b[rand-0]", (2,)))
+
+    def test_values_that_hold_a_large_object_their_repr_does_not_show(self):
+        """
+        Registers that hold their chip, which holds a set of strings and every
+        register: each is written by its repr, without looking into the chip.
+        """
+
+        class Chip:
+            def __init__(self, size):
+                self.tags = {"ro", "rw"}
+                self.regs = [Reg(self, f"r{i}") for i in range(size)]
+
+        class Reg:
+            def __init__(self, chip, name):
+                self.chip = chip
+                self.name = name
+                self.fields = {"enable": 0, "mode": 1}
+
+            def __repr__(self):
+                return f"Reg({self.name!r}, {self.fields})"
+
+        regs = Chip(20_000).regs
+        items = [
+            item(f"t.py::test_a[rand-{i}]", info("regs", regs[i % 5000])) for i in range(2_000)
+        ]
+
+        start = time.perf_counter()
+        digests = _value_digests(items)
+        # Well under a second; looking into the chip for each row took about 30 s
+        assert time.perf_counter() - start < 2
+        assert digests["regs"] != _value_digests(items[1:])["regs"]
+        assert json.loads(canonical()(regs[0]))["repr"][1] == "Reg('r0', {'enable': 0, 'mode': 1})"
 
 
 class TestWorker:

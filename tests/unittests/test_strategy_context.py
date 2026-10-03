@@ -45,7 +45,7 @@ from pytest_strategy._resolver import build_parametrization
 from pytest_strategy._runtime import StrategyRuntime, runtime
 from pytest_strategy._streams import StreamKey
 from pytest_strategy.plugin import (
-    _context_lines,
+    _context_entries,
     _contexts_text,
     _ctx_scopes_message,
     _failed_contexts,
@@ -808,6 +808,100 @@ class TestWrappers:
             session.context("tests/a")
         assert session.context("tests/b") == "root"
 
+    def test_a_wrapper_runs_once_per_answering_implementation_and_set_of_wrappers(self, session):
+        class Through(Plugin):
+            @pytest.hookimpl(wrapper=True)
+            def pytest_strategies_context(self, config):
+                self.calls += 1
+                return (yield)
+
+        outer = session.plugin(Through(), "outer")
+        root = session.conftest(".", Plugin("root"))
+        a = session.conftest("tests/a", Plugin("A"))
+        inner = session.conftest("tests/b", Through())
+
+        for folder in ("tests", "tests/a", "tests/a/deep", "tests/b", "tests/b/deep"):
+            session.context(folder)
+
+        # outer around root and A, and again with inner around root
+        assert (outer.calls, inner.calls, root.calls, a.calls) == (3, 1, 1, 1)
+
+    def test_a_wrapper_s_code_before_its_yield_runs_after_the_implementations(self, session):
+        events = []
+
+        class Prepare(Plugin):
+            @pytest.hookimpl(wrapper=True)
+            def pytest_strategies_context(self, config):
+                events.append("wrapper before yield")
+                ctx = yield
+                events.append("wrapper after yield")
+                return ctx
+
+        def implementation(config):
+            events.append("implementation")
+            return tuple(events)
+
+        session.conftest(".", Plugin(fn=implementation))
+        session.conftest("tests", Prepare())
+
+        assert session.context("tests") == ("implementation",)
+        assert events == ["implementation", "wrapper before yield", "wrapper after yield"]
+
+    def test_a_wrapper_draws_from_the_stream_of_the_hook(self, session):
+        class Draw(Plugin):
+            @pytest.hookimpl(wrapper=True)
+            def pytest_strategies_context(self, config):
+                return {**(yield), "draw": RNG.integer(0, 10**9)}
+
+        session.plugin(Draw(), "draw")
+        session.conftest(".", Plugin({"name": "root"}))
+        session.conftest("tests/a", Plugin({"name": "A"}))
+
+        # Whichever folder asks first, each call starts root(S, "ctx") anew
+        assert session.context("tests/a") == {"name": "A", "draw": _ctx_draw()}
+        assert session.context("tests/b") == {"name": "root", "draw": _ctx_draw()}
+
+    @pytest.mark.parametrize("old_style", [False, True], ids=["wrapper", "hookwrapper"])
+    def test_a_wrapper_that_changes_the_object_it_receives_fails(self, session, old_style):
+        class Change(Plugin):
+            if old_style:
+
+                @pytest.hookimpl(hookwrapper=True)
+                def pytest_strategies_context(self, config):
+                    outcome = yield
+                    outcome.get_result()["name"] += "+w"
+
+            else:
+
+                @pytest.hookimpl(wrapper=True)
+                def pytest_strategies_context(self, config):
+                    ctx = yield
+                    ctx["channels"].append(9)
+                    return {**ctx, "name": "new"}
+
+        session.conftest(".", Plugin({"name": "root", "channels": [1]}))
+        session.conftest("tests/a", Change())
+        clean = runtime.path_context(session.rootpath / "tests/b").answer()
+
+        message = (
+            r"a pytest_strategies_context wrapper \(tests/a/conftest.py\) changed the object "
+            r"conftest.py returned\. A wrapper must return a new object"
+        )
+        with pytest.raises(RuntimeError, match=message):
+            session.context("tests/a")
+        assert clean.fingerprint == fingerprint({"name": "root", "channels": [1]})[0]
+
+    def test_a_wrapper_that_returns_the_object_it_receives_unchanged(self, session):
+        class Through(Plugin):
+            @pytest.hookimpl(wrapper=True)
+            def pytest_strategies_context(self, config):
+                return (yield)
+
+        session.conftest(".", Plugin({"name": "root"}))
+        session.conftest("tests/a", Through())
+
+        assert session.context("tests/a") is session.context("tests/b")
+
 
 class TestHookRandomStream:
     def test_draws_in_the_hook_leave_the_callers_random_state_alone(self, session):
@@ -1313,6 +1407,35 @@ class TestVectorInfoContext:
         assert in_a == fingerprint({"name": "A"})[0]
         assert in_b == fingerprint({"name": "root"})[0]
 
+    @pytest.mark.parametrize("known_by", ["__file__", "source file"])
+    def test_without_context_the_folder_of_the_test_s_file(self, session, known_by):
+        session.conftest(".", Plugin({"name": "root"}))
+        session.conftest("tests/a", Plugin({"name": "A"}))
+        path = session.rootpath / "tests/a/test_x.py"
+        path.write_text("def test_x(x):\n    pass\n")
+        # A module's function knows its file by its globals' __file__; without one,
+        # by the file its code was compiled from
+        namespace = {"__file__": str(path)} if known_by == "__file__" else {}
+        exec(compile(path.read_text(), str(path), "exec"), namespace)
+        received = []
+
+        def factory(ctx):
+            received.append(ctx)
+            return _parameter()
+
+        # No context=: the resolver finds the folder from the test function
+        infos = build_parametrization(
+            "s",
+            factory,
+            namespace["test_x"],
+            config=None,
+            pytest_fixtures=set(),
+            test_key="tests/a/test_x.py::test_x",
+        ).infos
+
+        assert received == [{"name": "A"}]
+        assert infos[0].context == fingerprint({"name": "A"})[0]
+
     def test_a_factory_that_changes_ctx_changes_no_later_fingerprint(self, session):
         session.conftest(".", Plugin({"runs": 0}))
 
@@ -1340,10 +1463,10 @@ class TestVectorInfoContext:
             "tests/a/conftest.py": dict.fromkeys(["tests/a/t.py::test_1", "tests/a/t.py::test_2"]),
             "conftest.py": dict.fromkeys(["t.py::test_3"]),
         }
-        assert _context_lines(runtime.current) == [
-            f"conftest.py: {fingerprint({'name': 'root'})[0]}, 1 test(s)",
-            f"tests/a/conftest.py: {fingerprint({'name': 'A'})[0]}, 2 test(s)",
-        ]
+        assert _context_entries(runtime.current) == {
+            "conftest.py": f"{fingerprint({'name': 'root'})[0]}, 1 test(s)",
+            "tests/a/conftest.py": f"{fingerprint({'name': 'A'})[0]}, 2 test(s)",
+        }
 
 
 class TestContextOutput:
@@ -1364,17 +1487,17 @@ class TestContextOutput:
         session.conftest(".", Plugin({"handle": Opaque(), "other": Plugin()}))
         runtime.path_context().answer()
 
-        (line,) = _context_lines(runtime.current)
+        (text,) = _context_entries(runtime.current).values()
 
-        assert line.endswith(" (partial: Opaque, Plugin), 0 test(s)")
+        assert text.endswith(" (partial: Opaque, Plugin), 0 test(s)")
 
     def test_a_context_no_factory_received_counts_no_test(self, session):
         session.conftest(".", Plugin({"name": "root"}))
         runtime.path_context().answer()
 
-        assert _context_lines(runtime.current) == [
-            f"conftest.py: {fingerprint({'name': 'root'})[0]}, 0 test(s)"
-        ]
+        assert _context_entries(runtime.current) == {
+            "conftest.py": f"{fingerprint({'name': 'root'})[0]}, 0 test(s)"
+        }
 
     def test_the_test_key_of_an_item(self):
         item = SimpleNamespace(

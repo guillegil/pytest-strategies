@@ -198,21 +198,21 @@ class PytestStrategyPlugin:
 
     @pytest.hookimpl
     def pytest_configure(self, config: Config) -> None:
-        """Seed the RNG and register the strategy marker."""
-        rng_seed = config.getoption("--rng-seed", None)
-        workerinput = getattr(config, "workerinput", None)
-        worker_seed = workerinput.get("pytest_strategies_seed") if workerinput else None
-        if rng_seed is None and worker_seed is not None:
-            # A pytest-xdist worker without --rng-seed uses the controller's seed
-            # (see pytest_configure_node). Workers must generate identical vectors,
-            # or xdist aborts with "Different tests were collected".
-            RNG.seed(worker_seed)
-        else:
-            # Without --rng-seed the seed chosen for this process is kept. Either
-            # way the generator restarts from it, so values drawn when test
-            # modules are imported follow the printed seed. The global random
-            # state is not touched.
-            RNG.seed(rng_seed)
+        """
+        Seed the RNG and register the strategy marker.
+
+        The module's ``pytest_configure`` registers the instance, so this runs
+        after the pytest_configure of the initial conftest.py files and of the
+        plugins registered after the module: one that seeds there
+        (``RNG.seed(1234)``, or ``config.option.rng_seed = 99``) sets the run's
+        seed, as in 3.0.
+        """
+        # A pytest-xdist worker without --rng-seed uses the controller's seed (see
+        # pytest_configure_node): workers must generate identical vectors.
+        # Without either, the seed chosen for this process is kept. Either way the
+        # generator restarts from it, so values drawn when test modules are
+        # imported follow the printed seed. The global random state is not touched.
+        RNG.seed(_given_seed(config))
         state = runtime.current
         if state is not None:
             state.run_seed = RNG.get_seed()
@@ -885,11 +885,16 @@ class PytestStrategyPlugin:
                 # Show all strategy names in very verbose mode
                 for name in summary["names"]:
                     terminalreporter.write_line(f"  - {name}")
-        contexts = summary.get("contexts", [])
-        if contexts:
-            terminalreporter.write_line(f"Contexts: {len(contexts)}")
-            for line in contexts:
-                terminalreporter.write_line(f"  {line}")
+        entries: dict[str, str] = summary.get("contexts", {})
+        if state is not None and state.worker_summaries:
+            # Every worker's: a context computed only when a test ran (through
+            # strategies_ctx or get_context()) is in the summary of the worker
+            # that ran it
+            entries = _merged(s.get("contexts", {}) for s in _by_worker(state.worker_summaries))
+        if entries:
+            terminalreporter.write_line(f"Contexts: {len(entries)}")
+            for label, text in sorted(entries.items()):
+                terminalreporter.write_line(f"  {label}: {text}")
 
     @pytest.hookimpl
     def pytest_sessionfinish(self, session: Session) -> None:
@@ -931,7 +936,8 @@ class PytestStrategyPlugin:
     def pytest_testnodedown(self, node: Any, error: Any) -> None:
         """
         Keep what a pytest-xdist worker sent when its session finished, by worker ID:
-        its summary (the -v summary shown is the first worker's that finished) and
+        its summary (the -v summary shown is the first worker's that finished, with
+        the Contexts of every worker) and
         its part of the check that the workers generated the same vectors. A worker
         that crashed sent nothing.
 
@@ -1705,7 +1711,7 @@ def _summary(state: Any) -> dict[str, Any]:
         "unmatched_constraints_off": (
             list(state.unmatched_constraints_off) if state is not None else []
         ),
-        "contexts": _context_lines(state) if state is not None else [],
+        "contexts": _context_entries(state) if state is not None else {},
         "collection_contexts": dict(state.collection_contexts) if state is not None else {},
         "failed_contexts": dict(state.failed_contexts) if state is not None else {},
     }
@@ -1743,16 +1749,16 @@ def _contexts_text(fingerprints: Mapping[str, str]) -> str | None:
     return "contexts " + ", ".join(f"{label} {fp}" for label, fp in sorted(fingerprints.items()))
 
 
-def _context_lines(state: Any) -> list[str]:
+def _context_entries(state: Any) -> dict[str, str]:
     """
-    Describe each context the session computed for the -v summary: its label, its
-    fingerprint and the number of tests whose strategy factories received it.
+    Describe each context the session computed for the -v summary, by label,
+    sorted: its fingerprint and the number of tests whose strategy factories
+    received it.
     """
-    return [
-        f"{label}: {_fingerprint_text(answer)}, "
-        f"{len(state.context_tests.get(label, ()))} test(s)"
+    return {
+        label: f"{_fingerprint_text(answer)}, {len(state.context_tests.get(label, ()))} test(s)"
         for label, answer in _computed_contexts(state).items()
-    ]
+    }
 
 
 def _test_key(item: pytest.Item) -> str | None:
@@ -2245,13 +2251,16 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
-@pytest.hookimpl(tryfirst=True)
-def pytest_configure(config: Config) -> None:
+@pytest.hookimpl(tryfirst=True, specname="pytest_configure")
+def pytest_configure_session(config: Config) -> None:
     """
-    Register the plugin instance and open a runtime session for this config.
+    Open a runtime session for this config.
 
     It runs before the other plugins' and the conftest.py files' pytest_configure,
     so ``get_context()`` works there (with the conftest.py files loaded so far).
+    Until the plugin instance seeds the RNG (``pytest_configure`` below), the
+    session's seed is the one ``--rng-seed`` or the pytest-xdist controller gives,
+    so a context computed there follows it.
     """
     # A bad ini value stops the run with a usage error (exit code 4), before the
     # session starts
@@ -2272,16 +2281,46 @@ def pytest_configure(config: Config) -> None:
     if not hasattr(config, "_strategy_plugin_instance"):
         # Push the session state BEFORE registering, so the instance's hooks
         # have a current state.
-        runtime.push(config)
+        state = runtime.push(config)
+        state.run_seed = _given_seed(config)
         # Config does not declare this attribute, so the type checker needs setattr
         setattr(config, "_strategy_plugin_instance", _plugin_instance)  # noqa: B010
+
+
+def pytest_configure(config: Config) -> None:
+    """
+    Register the plugin instance, which runs its pytest_configure at once (the hook
+    is historic): it seeds the RNG.
+
+    It is not tryfirst, so the initial conftest.py files and the plugins registered
+    after this module run their pytest_configure before it, as in 3.0: one that
+    seeds there (``RNG.seed(1234)``, or ``config.option.rng_seed = 99``) sets the
+    run's seed.
+    """
+    if hasattr(config, "_strategy_plugin_instance") and not config.pluginmanager.is_registered(
+        _plugin_instance
+    ):
         config.pluginmanager.register(_plugin_instance, "pytest-strategies")
+
+
+def _given_seed(config: Config) -> int | None:
+    """
+    Return the run's seed that ``--rng-seed`` gives, or on a pytest-xdist worker
+    without it the controller's (``pytest_configure_node``); None when neither does.
+    """
+    rng_seed: int | None = config.getoption("--rng-seed", None)
+    if rng_seed is not None:
+        return rng_seed
+    workerinput = getattr(config, "workerinput", None)
+    worker_seed: int | None = workerinput.get("pytest_strategies_seed") if workerinput else None
+    return worker_seed
 
 
 def pytest_unconfigure(config: Config) -> None:
     """Unregister the plugin instance and close this config's runtime session."""
     if hasattr(config, "_strategy_plugin_instance"):
-        config.pluginmanager.unregister(_plugin_instance, "pytest-strategies")
+        if config.pluginmanager.is_registered(_plugin_instance):
+            config.pluginmanager.unregister(_plugin_instance, "pytest-strategies")
         delattr(config, "_strategy_plugin_instance")
         runtime.pop()
         if runtime.current is None and _strategy_file_finder in sys.meta_path:

@@ -51,9 +51,15 @@ def pytest_strategies_context(config: pytest.Config) -> Any:
     answers only where no ``conftest.py`` does, whatever order pytest loaded them
     in. One test tree can hold two testbench configurations, one per folder. A
     ``wrapper=True`` (or ``hookwrapper=True``) implementation that a folder sees
-    runs around the one that answered, and can change its answer; folders that
-    see the same wrappers and get their answer from the same implementation share
-    the wrapped result.
+    runs around the one that answered, and can change its answer by returning a
+    new object (``{**ctx, "extra": 1}``); folders that see the same wrappers and
+    get their answer from the same implementation share the wrapped result. A
+    wrapper must leave the object it receives as it is, since the folders that do
+    not see the wrapper get that object too: when its fingerprint (below) changed,
+    the folders that see the wrapper fail with an error that says so. Each
+    implementation runs once, for the first folder that asks, so a wrapper's code
+    before its ``yield`` runs after the implementations it wraps, not before them
+    as in other hooks.
 
     A factory registered in one folder and used by a test in another gets the
     context of the test's folder; ``export_strategies()``, which has no test, gives
@@ -63,10 +69,12 @@ def pytest_strategies_context(config: pytest.Config) -> Any:
     ``pytest_strategy.get_context(config, path)`` the context of a folder, for the
     fixtures of that folder's ``conftest.py``.
 
-    Each implementation is called at most once per session, the first time a
-    folder that needs it asks, and only for a factory with a ``ctx`` parameter,
-    ``strategies_ctx`` or ``get_context()``: the folders that end at the same
-    implementation share its result. Factories without a ``ctx`` parameter never
+    Each implementation that is not a wrapper is called at most once per session,
+    the first time a folder that needs it asks, and only for a factory with a
+    ``ctx`` parameter, ``strategies_ctx`` or ``get_context()``: the folders that
+    end at the same implementation share its result. A wrapper runs once for each
+    implementation that answers under it, and again for each other set of
+    wrappers it is in (a folder whose ``conftest.py`` adds a wrapper). Factories without a ``ctx`` parameter never
     trigger it. When nothing answers, ``ctx`` keeps its default (or a value bound
     with ``functools.partial``), and is ``None`` without one. Random draws in an
     implementation come from a stream derived from the seed, started anew for

@@ -13,6 +13,7 @@ import enum
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import uuid
@@ -65,6 +66,29 @@ class Shown:
 
     def __repr__(self):
         return f"Shown({self.value!r})"
+
+
+class Displayed:
+    """A class whose repr is a given text."""
+
+    def __init__(self, text):
+        self.text = text
+
+    def __repr__(self):
+        return self.text
+
+
+def _reverse_sets(text):
+    """``text`` with the items of each innermost {...} without a colon reversed."""
+
+    def reverse(match):
+        body = match.group(1)
+        # A dict's, and not an Enum member's <Color.RED: 1>
+        if ":" in re.sub(r"<[^<>]*>", "", body):
+            return match.group(0)
+        return "{" + ", ".join(reversed(body.split(", "))) + "}"
+
+    return re.sub(r"\{([^{}]*)\}", reverse, text)
 
 
 @dataclasses.dataclass
@@ -167,10 +191,9 @@ class TestAcrossProcesses:
         fingerprints = runs[0]["fingerprints"]
         assert all(len(f) == 8 and int(f, 16) >= 0 for f in fingerprints)
         assert len(set(fingerprints)) == len(fingerprints)
-        # The objects whose own repr shows the set count by their type alone
-        partial = runs[0]["partial"]
-        assert partial[6:8] == [["Shown"], ["deque"]]
-        assert not any(partial[:6] + partial[8:])
+        # The objects whose own repr shows the set keep their state: the set is
+        # written sorted
+        assert not any(runs[0]["partial"])
 
 
 class TestPaths:
@@ -308,59 +331,114 @@ class TestPartial:
 
         assert fp(Device(1)) != fp(Device(2))
 
+    def test_an_address_a_repr_of_its_own_shows_is_kept(self):
+        class Periph:
+            def __init__(self, name, address):
+                self.name = name
+                self.address = address
+
+            def __repr__(self):
+                return f"Periph({self.name!r} at 0x{self.address:x})"
+
+        uart, other = Periph("uart0", 0x40001000), Periph("uart0", 0x50002000)
+        assert fp({"uart": uart}) != fp({"uart": other})
+        assert fingerprint(uart)[1] == ()
+        # In a <...> repr, an address is a memory address
+        callbacks = [lambda: None for _ in range(2)]
+        assert fp(Shown(Plain(1))) == fp(Shown(Plain(2)))
+        assert fp(Shown(callbacks[0])) == fp(Shown(callbacks[1]))
+
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            ("<weakref at 0x7f3a; to 'A' at 0x7f3b>", "<weakref; to 'A'>"),
+            ("<cell at 0x7f3a: int object at 0xa2c0e8>", "<cell: int object>"),
+            (
+                '<code object f at 0x7f3a, file "<stdin>", line 4>',
+                '<code object f, file "<stdin>", line 4>',
+            ),
+            ("<function <lambda> at 0x7f3a>", "<function <lambda>>"),
+            ("Wrapper(<Plain object at 0x7f3a>, 0x10)", "Wrapper(<Plain object>, 0x10)"),
+            ("Periph('uart0' at 0x40001000)", "Periph('uart0' at 0x40001000)"),
+            ("Window(a < b at 0x10)", "Window(a < b)"),
+        ],
+    )
+    def test_which_addresses_are_removed(self, text, expected):
+        assert _fingerprint._without_addresses(text) == expected
+
     @pytest.mark.parametrize(
         "lanes",
         [
-            frozenset({"alpha", "beta"}),
+            frozenset({"alpha", "beta", "gamma"}),
             [{"alpha", "beta"}],
             {"lanes": frozenset({b"a", b"b"})},
-            Shown({Color.RED, Color.GREEN}),
-            deque([{Plain(1), Plain(2)}]),
+            {Color.RED, Color.GREEN},
+            deque([{Shown(1), Shown(2)}]),
+            {frozenset({"alpha", "beta"}), frozenset({"gamma", "delta"})},
         ],
-        ids=["strings", "in_a_list", "bytes_in_a_dict", "enums_in_an_object", "objects_in_a_deque"],
+        ids=["strings", "in_a_list", "bytes_in_a_dict", "enums", "objects_in_a_deque", "nested"],
     )
-    def test_a_repr_that_may_show_a_set_in_hash_order_counts_by_its_type(self, lanes):
-        digest, partial = fingerprint(Shown(lanes))
+    def test_a_repr_shows_its_sets_sorted(self, lanes):
+        """The same sets in another order (here reversed) give the same fingerprint."""
+        text = repr(Shown(lanes))
+        reversed_text = _reverse_sets(text)
 
-        assert partial == ("Shown",)
-        # Its type alone: another such set gives the same fingerprint
-        assert digest == fp(Shown({"other", "set"}))
+        assert reversed_text != text
+        assert fingerprint(Displayed(text)) == fingerprint(Displayed(reversed_text))
+        assert fingerprint(Displayed(text))[1] == ()
+        assert fp(Shown(lanes)) != fp(Shown({"other", "set"}))
 
     @pytest.mark.parametrize(
-        "lanes",
-        [frozenset({1, 2, 3}), {(1, 2.5), (None, True)}, frozenset({"one"}), set()],
-        ids=["numbers", "tuples_of_numbers", "one_element", "empty"],
+        "text, expected",
+        [
+            ("Bench({'beta', 'alpha'})", "Bench({'alpha', 'beta'})"),
+            ("Bench(frozenset({'b', 'a'}), {2, 1})", "Bench(frozenset({'a', 'b'}), {1, 2})"),
+            ("{'b': {'y', 'x'}, 'a': 2}", "{'b': {'x', 'y'}, 'a': 2}"),
+            ("{<Color.RED: 1>, <Color.GREEN: 2>}", "{<Color.GREEN: 2>, <Color.RED: 1>}"),
+            ("Range(a < b, {'b', 'a'}, c -> d)", "Range(a < b, {'a', 'b'}, c -> d)"),
+            ("<Foo tags={'b', 'a'}>", "<Foo tags={'a', 'b'}>"),
+            # A dict keeps its order, and a quoted brace is a string's
+            ("{'b': 1, 'a': 2}", "{'b': 1, 'a': 2}"),
+            ("Note('{b, a}', \"{d, c}\")", "Note('{b, a}', \"{d, c}\")"),
+            ("{'a, b', 'c'}", "{'a, b', 'c'}"),
+            ("{'it\\'s', 'a'}", "{'a', 'it\\'s'}"),
+            # Brackets that do not pair up: as it is
+            ("Interval[0, {'b', 'a'})", "Interval[0, {'b', 'a'})"),
+            ("{1}", "{1}"),
+            ("set()", "set()"),
+        ],
     )
-    def test_a_set_that_iterates_alike_in_every_process_keeps_the_repr(self, lanes):
-        digest, partial = fingerprint(Shown(lanes))
+    def test_which_sets_are_sorted(self, text, expected):
+        assert _fingerprint._sorted_sets(text) == expected
 
-        assert partial == ()
-        assert digest != fp(Shown({"other", "set"}))
-
-    def test_slots_are_looked_into_without_getattr(self):
-        class Slotted:
-            __slots__ = ("lanes", "unset")
-
-            def __init__(self, lanes):
-                self.lanes = lanes
-
-            def __getattr__(self, name):
-                raise AssertionError(f"looked up {name}")
+    def test_an_object_that_holds_a_set_its_repr_does_not_show_keeps_its_state(self):
+        class Testbench:
+            def __init__(self, channels):
+                # Stands in for pytest's config, which holds sets of strings
+                self.config = SimpleNamespace(markers={"slow", "fast"}, plugins={"a", "b"})
+                self.channels = channels
 
             def __repr__(self):
-                return f"Slotted({self.lanes!r})"
+                return f"Testbench(channels={self.channels}, options={{'width': 8}})"
 
-        assert fingerprint(Slotted({"alpha", "beta"}))[1] == (Slotted.__qualname__,)
-        assert fingerprint(Slotted({1, 2}))[1] == ()
+        assert fingerprint(Testbench(4))[1] == ()
+        assert fp(Testbench(4)) != fp(Testbench(8))
 
-    def test_the_look_into_the_attributes_is_bounded(self, monkeypatch):
-        monkeypatch.setattr(_fingerprint, "_ATTRIBUTE_LIMIT", 3)
-        # The set is beyond the objects looked at
-        deep = Shown([0, 1, 2, [frozenset({"alpha", "beta"})]])
+        class Chip:
+            def __init__(self):
+                self.tags = {"ro", "rw"}
+                self.regs = [Reg(self, f"r{i}") for i in range(3)]
 
-        assert fingerprint(deep)[1] == ()
-        monkeypatch.setattr(_fingerprint, "_ATTRIBUTE_LIMIT", 10_000)
-        assert fingerprint(deep)[1] == ("Shown",)
+        class Reg:
+            def __init__(self, chip, name):
+                self.chip = chip
+                self.name = name
+
+            def __repr__(self):
+                return f"Reg({self.name!r})"
+
+        regs = Chip().regs
+        assert len({fp(reg) for reg in regs}) == 3
 
 
 class TestNeverRaises:

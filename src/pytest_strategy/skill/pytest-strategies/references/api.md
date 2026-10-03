@@ -437,12 +437,16 @@ def pytest_strategies_context(config):
   implementations the folder sees in this order: `tryfirst` ones, the
   `conftest.py` files from the test's folder upward, the other plugins (last
   registered first), `trylast` ones; the first that is not `None` answers. A
-  `wrapper=True` implementation can change the answer. A factory registered in
-  another folder gets the test's folder's context.
-- Each implementation is called at most once per session, the first time a
-  factory with a `ctx` parameter (or `strategies_ctx` or `get_context()`) needs
-  it; the result (or the exception) is reused for every later factory, and
-  folders that end at the same implementation share one object.
+  `wrapper=True` implementation can change the answer by returning a new object
+  (`{**ctx, "extra": 1}`); changing the object it receives fails its folders,
+  since other folders get that object too. Its code before `yield` runs after
+  the implementations it wraps. A factory registered in another folder gets the
+  test's folder's context.
+- Each implementation that is not a wrapper is called at most once per session,
+  the first time a factory with a `ctx` parameter (or `strategies_ctx` or
+  `get_context()`) needs it; the result (or the exception) is reused for every
+  later factory, and folders that end at the same implementation share one
+  object. A wrapper runs once per answering implementation and set of wrappers.
 - When no implementation returns a value, `ctx` keeps its default (or a value bound
   with `functools.partial`), else `None`.
 - If an implementation raises, each test that uses a factory with `ctx` in a
@@ -473,11 +477,11 @@ def pytest_strategies_context(config):
   A pydantic v2 model is its `model_dump()`: `Field(exclude=True)` fields are left
   out and a `SecretStr` stays masked. Dataclasses, attrs classes and NamedTuples
   count field by field, `SimpleNamespace` and `argparse.Namespace` by attribute.
-  Other objects are their repr without memory addresses (a mock's `id='...'`
-  too); one with the default repr counts by its type alone, shown as
-  `(partial: Plain)`, and so does one whose repr may show a set in hash order (it
-  holds a set of strings, Enum members or objects). One that cannot be encoded is
-  `unavailable`. Keep volatile values (temporary paths, times) out of the context,
+  Other objects are their repr without memory addresses (` at 0x...` inside
+  `<...>`, a mock's `id='...'`), with the sets it shows as `{...}` sorted; one
+  with the default repr counts by its type alone, shown as `(partial: Plain)`. A
+  repr that shows a set another way (`",".join(tags)`) should sort it. One that
+  cannot be encoded is `unavailable`. Keep volatile values (temporary paths, times) out of the context,
   or exclude them.
 - The reproduce line of a failed run ends with the contexts the failed tests'
   factories received (`(context 976bcfdf)`, or `(contexts conftest.py 976bcfdf,

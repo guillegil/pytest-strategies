@@ -154,6 +154,12 @@ def fp(value, pytester):
     return fingerprint(value, pytester.path)[0]
 
 
+def fp_of_repr(name, text):
+    """The fingerprint of an object of the class ``name`` whose repr is ``text``."""
+    shown = type(name, (), {"__repr__": lambda self: text})
+    return fingerprint(shown())[0]
+
+
 def section(result):
     """The lines of the check's message, from its first line to its last."""
     lines = result.stdout.lines
@@ -274,6 +280,75 @@ def unseeded():
             ]
         )
 
+    def test_objects_whose_reprs_do_not_show_the_sets_they_hold_exit_4(self, pytester):
+        """
+        A context and values with reprs of their own that hold sets of strings they
+        do not show (pytest's config, a register's chip) keep their state.
+        """
+        conftest = """
+import os
+
+class Testbench:
+    def __init__(self, config, channels):
+        self.config = config
+        self.channels = channels
+
+    def __repr__(self):
+        return f"Testbench(channels={self.channels})"
+
+def pytest_strategies_context(config):
+    return Testbench(config, 4 if os.environ["PYTEST_XDIST_WORKER"] == "gw0" else 8)
+"""
+        strategies = """
+import os
+
+from pytest_strategy import Parameter, RNGChoice, TestArg, register
+
+class Reg:
+    def __init__(self, chip, name):
+        self.chip = chip
+        self.name = name
+
+    def __repr__(self):
+        return f"Reg({self.name!r})"
+
+class Chip:
+    def __init__(self):
+        self.tags = {"ro", "rw"}
+        self.regs = [Reg(self, f"r{i}") for i in range(8)]
+
+CHIP = Chip()
+
+@register("regs")
+def regs():
+    first = 0 if os.environ["PYTEST_XDIST_WORKER"] == "gw0" else 4
+    return Parameter(TestArg("reg", rng_type=RNGChoice(CHIP.regs[first : first + 4])), nsamples=3)
+"""
+        tests = """
+from pytest_strategy import strategy
+
+@strategy("regs")
+def test_reg(reg, strategies_ctx):
+    pass
+"""
+        write(
+            pytester,
+            {"conftest.py": DUMP + conftest, "strategies.py": strategies, "test_x.py": tests},
+        )
+
+        result = run(pytester)
+
+        result.assert_outcomes(passed=3)
+        assert result.ret == pytest.ExitCode.USAGE_ERROR
+        gw0, gw1 = digests(pytester, "gw0"), digests(pytester, "gw1")
+        four, eight = (fp_of_repr("Testbench", f"Testbench(channels={n})") for n in (4, 8))
+        assert section(result) == [
+            "pytest-strategies: the xdist workers generated different vectors:",
+            f"  context conftest.py: gw0 {four}, gw1 {eight}",
+            f"  values of strategy regs: gw0 {gw0['regs']}, gw1 {gw1['regs']}",
+            *HINT,
+        ]
+
     def test_series_values_per_worker_follow_xdist_s_own_message(self, pytester):
         conftest = """
 import os
@@ -380,12 +455,20 @@ class Lanes:
 class Txn(pydantic.BaseModel):
     lanes: set[str]
 
+class Tags:
+    def __init__(self, names):
+        self.names = names
+
+    def __repr__(self):
+        return f"Tags({self.names!r})"
+
 @register("benches")
 def benches(ctx):
     return Parameter(
         TestArg("width", rng_type=RNGInteger(1, ctx.width)),
         TestArg("lanes", value=Lanes(frozenset(NAMES))),
         TestArg("txn", value=Txn(lanes=NAMES)),
+        TestArg("tags", value=Tags(NAMES)),
         nsamples=4,
     )
 """
@@ -395,7 +478,7 @@ def benches(ctx):
                 "conftest.py": DUMP + PER_WORKER_HASH_SEED + conftest,
                 "strategies.py": strategies,
                 "test_x.py": "from pytest_strategy import strategy\n\n"
-                "@strategy('benches')\ndef test_bench(width, lanes, txn):\n    pass\n",
+                "@strategy('benches')\ndef test_bench(width, lanes, txn, tags):\n    pass\n",
             },
         )
 

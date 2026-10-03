@@ -298,6 +298,42 @@ def pytest_strategies_context(config):
         result.assert_outcomes(passed=8)
         assert calls(pytester) == {"root": 1, "A": 1, "deep": 1}
 
+    def test_a_wrapper_that_changes_the_object_it_receives_fails_its_folders(
+        self, pytester, values_dump
+    ):
+        """
+        The object it would change is the one tests/b gets without the wrapper, so
+        tests/b's values would depend on whether tests/w was collected.
+        """
+        wrapper = """
+import pytest
+
+@pytest.hookimpl(wrapper=True)
+def pytest_strategies_context(config):
+    ctx = yield
+    ctx["name"] += "+w"
+    return ctx
+"""
+        project(
+            pytester,
+            values_dump,
+            extra={"tests/w/conftest.py": wrapper, "tests/w/test_w.py": ctx_test_module("root+w")},
+        )
+        message = (
+            "*pytest_strategies_context hook raised RuntimeError: a pytest_strategies_context "
+            "wrapper (tests/w/conftest.py) changed the object conftest.py returned. A wrapper "
+            "must return a new object, such as {**ctx, ...}, and leave the one it receives as "
+            "it is: the folders that do not see the wrapper get that object too"
+        )
+
+        for paths in [(), ("tests/w",)]:
+            result = pytester.runpytest("-p", "no:cacheprovider", f"--rng-seed={SEED}", *paths)
+            result.assert_outcomes(errors=1)
+            result.stdout.fnmatch_lines(["*ERROR collecting tests/w/test_w.py*", message])
+
+        rows = values_dump.collect("-p", "no:cacheprovider", f"--rng-seed={SEED}", "tests/b")
+        assert names(dict(rows)) == {"tests/b/test_b.py": "root"}
+
     def test_a_tryfirst_rootdir_implementation_wins_everywhere(self, pytester, values_dump):
         root = """
 import pytest

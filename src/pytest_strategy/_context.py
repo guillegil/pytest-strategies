@@ -300,7 +300,9 @@ class ContextStore:
     and get their answer from the same implementation (a child folder whose
     conftest.py returns None) share its one call, object and label. Each
     implementation still runs at most once, so a wrapper's code before its yield
-    runs after the implementations it wraps. A folder's answer is also kept for
+    runs after the implementations it wraps. The wrappers receive the object the
+    implementation returned, which the folders without them get too, so changing
+    it is an error (:meth:`_check_unchanged`). A folder's answer is also kept for
     its list of implementations, so the other tests of the folder, and of folders
     that see the same ones, look it up.
 
@@ -427,16 +429,39 @@ class ContextStore:
         methods = [
             impl if _is_wrapper(impl) else _Kept(self, impl, seed) for impl in reversed(ordered)
         ]
+        rootpath = getattr(self.config, "rootpath", None)
         try:
             with _Stream(lambda: StreamKey.root(seed, "ctx")):
                 value = self.config.pluginmanager._hookexec(
                     HOOK, cast("list[HookImpl]", methods), {"config": self.config}, True
                 )
+                if answering is not None:
+                    self._check_unchanged(wrappers, answering, rootpath)
                 if value is None:
                     return NO_ANSWER
-                return _answered(value, label, getattr(self.config, "rootpath", None))
+                return _answered(value, label, rootpath)
         except _KEPT as e:
             return Answer(None, label, e, e.__traceback__)
+
+    def _check_unchanged(
+        self, wrappers: tuple[HookImpl, ...], answering: HookImpl, rootpath: Any
+    ) -> None:
+        """
+        Raise ``RuntimeError`` when ``wrappers`` changed the object ``answering``
+        returned in place, as far as its fingerprint shows: the folders that get
+        that object without those wrappers (or through others) would get it
+        changed, whichever folder asked first.
+        """
+        kept = self._answers[answering]
+        if kept.value is None or fingerprint(kept.value, rootpath)[0] == kept.fingerprint:
+            return
+        names = ", ".join(self.label(impl) for impl in wrappers)
+        raise RuntimeError(
+            f"a {HOOK} wrapper ({names}) changed the object {kept.label} returned. A "
+            "wrapper must return a new object, such as {**ctx, ...}, and leave the one "
+            "it receives as it is: the folders that do not see the wrapper get that "
+            "object too"
+        )
 
 
 class FolderContext:

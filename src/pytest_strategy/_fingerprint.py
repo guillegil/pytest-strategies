@@ -25,13 +25,16 @@ memory addresses, ``--import-mode`` or the folder the checkout is in.
   container met again inside itself is written as a reference to it, so a cycle
   ends.
 - A class is written as its qualified name. Anything else is written as its repr,
-  without the memory addresses in it (`` at 0x7f...``, and a mock's
-  ``id='140...'``). An object whose type keeps the default repr (``<Plain object
-  at 0x...>``) is written as its type's name alone: its state is not in the
-  fingerprint, which says so by listing the type as *partial*. So is an object
-  whose repr may show a set in hash order, which ``PYTHONHASHSEED`` changes: one
-  with a set of strings, Enum members or objects among its attributes, or in the
-  containers and objects they hold (:func:`_shows_hash_order`).
+  without the memory addresses in it: `` at 0x7f...`` inside a ``<...>`` repr
+  (``<function f at 0x7f...>``, ``<weakref at 0x...; to 'A' at 0x...>``), and a
+  mock's ``id='140...'``. An address that a repr of its own shows outside
+  ``<...>`` (``Periph('uart0' at 0x40001000)``) is kept. The sets the repr shows
+  as Python does (``{'b', 'a'}``) are written with their items sorted, so a repr
+  that shows a set in hash order, which ``PYTHONHASHSEED`` changes, gives one
+  text in every process (:func:`_sorted_sets`). An object whose type keeps the
+  default repr (``<Plain object at 0x...>``) is written as its type's name alone:
+  its state is not in the fingerprint, which says so by listing the type as
+  *partial*.
 
 Type names are qualified names, never module names, which depend on
 ``--import-mode``. An object that cannot be encoded (its repr raises, or it nests
@@ -42,7 +45,6 @@ never fails for it.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import dataclasses
 import datetime
 import decimal
@@ -52,16 +54,9 @@ import json
 import os
 import re
 import uuid
-from collections import deque
 from collections.abc import Callable, Mapping, Set
 from pathlib import Path, PurePath
-from types import (
-    BuiltinFunctionType,
-    FunctionType,
-    MemberDescriptorType,
-    ModuleType,
-    SimpleNamespace,
-)
+from types import SimpleNamespace
 from typing import Any
 
 # The fingerprint of a context that could not be encoded
@@ -70,34 +65,23 @@ UNAVAILABLE = "unavailable"
 # The hex characters of the SHA-256 that make the fingerprint
 _LENGTH = 8
 
-# A memory address in a repr: "<Plain object at 0x7f3a2b1c>", "<function f at 0x...>",
-# and a mock's, which ends its repr: "<MagicMock name='dut' id='140139121477264'>"
+# A memory address in a repr: "<Plain object at 0x7f3a2b1c>", "<function f at 0x...>"
+# (removed inside a <...> repr only, see _without_addresses), and a mock's, which
+# ends its repr: "<MagicMock name='dut' id='140139121477264'>"
 _ADDRESS = re.compile(r" at 0x[0-9a-fA-F]+| id='[0-9]+'(?=>)")
 
-# How many objects _shows_hash_order() looks at, at most, for a set an object's
-# repr may show in hash order
-_ATTRIBUTE_LIMIT = 10_000
+# The brackets _sorted_sets() pairs up in a repr: each opening one and its closing
+# one. "<" opens a <...> repr (<Color.RED: 1>) only when a ">" closes it.
+_BRACKETS = {"(": ")", "[": "]", "{": "}", "<": ">"}
 
-# The objects _shows_hash_order() does not look into: values that hold no set, and
-# those whose attributes are not what their repr shows
-_LEAVES = (
-    str,
-    bytes,
-    bytearray,
-    int,
-    float,
-    complex,
-    type(None),
-    PurePath,
-    type,
-    ModuleType,
-    FunctionType,
-    BuiltinFunctionType,
-)
+# What _sorted_sets() looks at in a repr: quotes, brackets, commas and colons
+_SPECIAL = re.compile(r"""['"()\[\]{}<>,:]""")
 
-# The types whose hash does not depend on PYTHONHASHSEED or on memory addresses,
-# so a set of them iterates in the same order in every process
-_HASHED_ALIKE = (bool, int, float, complex, type(None))
+# A quoted string in a repr, from its opening quote
+_QUOTED = {
+    "'": re.compile(r"'(?:[^'\\]|\\.)*'", re.DOTALL),
+    '"': re.compile(r'"(?:[^"\\]|\\.)*"', re.DOTALL),
+}
 
 # The types JSON holds as they are, written as they are when a value is of one of
 # them exactly (a subclass is written by its value, below)
@@ -271,12 +255,11 @@ class _Encoder:
             return [self.encode(item) for item in value]
         if isinstance(value, Set):
             return {"set": sorted((self.encode(item) for item in value), key=_dumps)}
-        if getattr(kind, "__repr__", None) is object.__repr__ or _shows_hash_order(value):
-            # The default repr shows only the type and the address; another may show
-            # a set in the order of this process's PYTHONHASHSEED
+        if getattr(kind, "__repr__", None) is object.__repr__:
+            # The default repr shows only the type and the address
             self.partial.add(name)
             return {"object": name}
-        return {"repr": [name, _ADDRESS.sub("", repr(value))]}
+        return {"repr": [name, _sorted_sets(_without_addresses(repr(value)))]}
 
     def _field(self, value: Any, name: str) -> list[Any]:
         """
@@ -305,69 +288,105 @@ class _Encoder:
         return value.as_posix()
 
 
-def _shows_hash_order(value: Any) -> bool:
+def _without_addresses(text: str) -> str:
     """
-    Whether the repr of ``value`` may show a set in the order of this process's
-    ``PYTHONHASHSEED``: a set of two or more elements, one of them hashed by its
-    text or its address (a str, bytes, an Enum member, an object), among its
-    attributes or in the containers and objects they hold. It looks at
-    ``_ATTRIBUTE_LIMIT`` objects at most, and answers no when it found none among
-    them.
+    Return a repr without the memory addresses in it: `` at 0x...`` inside a
+    ``<...>`` repr (``<function f at 0x7f...>``, ``<code object f at 0x..., file
+    ...>``, ``<weakref at 0x...; to 'A' at 0x...>``), and a mock's ``id='...'``,
+    which ends its repr. An address a repr of its own shows outside ``<...>``, such
+    as a register's (``Periph('uart0' at 0x40001000)``), is kept.
     """
-    seen: set[int] = set()
-    members: dict[type, list[MemberDescriptorType]] = {}
-    pending = [value]
-    while pending and len(seen) < _ATTRIBUTE_LIMIT:
-        item = pending.pop()
-        if isinstance(item, _LEAVES) or id(item) in seen:
-            continue
-        seen.add(id(item))
-        if isinstance(item, (set, frozenset)):
-            if len(item) > 1 and not all(_hashed_alike(element) for element in item):
-                return True
-            pending.extend(item)
-        elif isinstance(item, dict):
-            pending.extend(item.keys())
-            pending.extend(item.values())
-        elif isinstance(item, (list, tuple, deque)):
-            pending.extend(item)
+    if " at 0x" not in text and " id='" not in text:
+        return text
+    kept = []
+    end = 0
+    for match in _ADDRESS.finditer(text):
+        start = match.start()
+        if text.count("<", 0, start) > text.count(">", 0, start):
+            kept.append(text[end:start])
+            end = match.end()
+    kept.append(text[end:])
+    return "".join(kept)
+
+
+class _Unpaired(Exception):
+    """A repr whose brackets do not pair up."""
+
+
+def _sorted_sets(text: str) -> str:
+    """
+    Return a repr with the items of each set it shows as Python does sorted:
+    ``{...}`` with two or more items and no ``:`` between them (a dict's), inside
+    ``frozenset(...)`` too, nested sets first. So ``Bench({'beta', 'alpha'})``
+    becomes ``Bench({'alpha', 'beta'})``, whatever order this process's
+    ``PYTHONHASHSEED`` gave the set. Quoted strings are read as they are, so a
+    brace or a comma inside one is not a set's. A repr whose brackets do not pair
+    up is returned as it is, and so is a set shown in another form
+    (``",".join(tags)``).
+    """
+    if "{" not in text:
+        return text
+    try:
+        return _read(text, 0, "")[0]
+    except _Unpaired:
+        return text
+
+
+def _read(text: str, start: int, closer: str) -> tuple[str, int]:
+    """
+    Read a repr from ``start`` to the bracket ``closer``, or to its end for ``""``,
+    with the sets in it sorted (:func:`_sorted_sets`).
+
+    Returns:
+        What was read, the closing bracket included, and the index after it
+    """
+    # A {...}'s items read so far, and the item being read
+    items: list[str] = []
+    part: list[str] = []
+    # A colon between the items: a dict
+    keyed = False
+    position = start
+    while True:
+        match = _SPECIAL.search(text, position)
+        if match is None:
+            if closer:
+                raise _Unpaired
+            # The end of the repr: no {...} is open
+            part.append(text[position:])
+            return "".join(part), len(text)
+        index = match.start()
+        char = text[index]
+        part.append(text[position:index])
+        position = index + 1
+        if char in _QUOTED:
+            quoted = _QUOTED[char].match(text, index)
+            # An apostrophe in plain text starts no string
+            if quoted is not None:
+                position = quoted.end()
+            part.append(text[index:position])
+        elif char == "<":
+            try:
+                inner, position = _read(text, position, ">")
+            except _Unpaired:
+                # A "<" that no ">" closes, such as a comparison's
+                inner = ""
+            part.append(char + inner)
+        elif char in _BRACKETS:
+            inner, position = _read(text, position, _BRACKETS[char])
+            part.append(char + inner)
+        elif char == ">" and closer != ">":
+            # An arrow's or a comparison's
+            part.append(char)
+        elif char in ")]}>":
+            if char != closer:
+                raise _Unpaired
+            items.append("".join(part))
+            if closer == "}" and not keyed and len(items) > 1:
+                return ", ".join(sorted(item.strip() for item in items)) + char, position
+            return ",".join(items) + char, position
+        elif char == "," and closer == "}":
+            items.append("".join(part))
+            part = []
         else:
-            pending.extend(_attributes(item, members))
-    return False
-
-
-def _hashed_alike(value: Any) -> bool:
-    """Whether the hash of ``value`` is the same in every process."""
-    if type(value) in (tuple, frozenset):
-        return all(_hashed_alike(item) for item in value)
-    return type(value) in _HASHED_ALIKE
-
-
-def _attributes(value: Any, members: dict[type, list[MemberDescriptorType]]) -> list[Any]:
-    """
-    Return the values of an object's attributes: those in its ``__dict__``, and its
-    slots that are set. They are read without calling a ``__getattr__`` (a mock's
-    makes up any name).
-
-    Args:
-        value: The object
-        members: The slots of each type met so far, filled in as types are met
-    """
-    found: list[Any] = []
-    # No __dict__, or one that is not a mapping
-    with contextlib.suppress(Exception):
-        found.extend(object.__getattribute__(value, "__dict__").values())
-    kind = type(value)
-    slots = members.get(kind)
-    if slots is None:
-        slots = members[kind] = [
-            member
-            for klass in kind.__mro__
-            for member in vars(klass).values()
-            if isinstance(member, MemberDescriptorType)
-        ]
-    for member in slots:
-        # A slot never set
-        with contextlib.suppress(AttributeError):
-            found.append(member.__get__(value, kind))
-    return found
+            keyed = keyed or char == ":"
+            part.append(char)

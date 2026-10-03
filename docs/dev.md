@@ -637,9 +637,16 @@ strategies of its tests may not have been resolved). It is not checked under
   `names` or `values` is a `UsageError`, exit code 4), opens the session's state
   and sets the run's seed, restarting the plugin's generator from it; a
   pytest-xdist worker without `--rng-seed` takes the controller's seed. The
-  module's implementation is `tryfirst`, so the state exists when the other
-  plugins' and the conftest.py files' `pytest_configure` run (`get_context()`
-  works there, with the conftest.py files loaded so far)
+  module has two implementations. A `tryfirst` one opens the state, so it exists
+  when the other plugins' and the conftest.py files' `pytest_configure` run
+  (`get_context()` works there, with the conftest.py files loaded so far, and
+  with the seed of `--rng-seed` or of the pytest-xdist controller, when one is
+  given). The other, at the default priority, registers the plugin instance,
+  whose `pytest_configure` sets the seed: it runs after the initial conftest.py
+  files' `pytest_configure` and the plugins registered after the module, as in
+  3.0, so one that seeds there (`RNG.seed(1234)`, or `config.option.rng_seed =
+  99`) sets the run's seed. A context computed in `pytest_configure` without
+  `--rng-seed`, before such a call, draws from the seed in effect then
 - `pytest_configure_node` - (pytest-xdist only) sends the controller's seed to
   each worker
 - `pytest_plugin_registered` - Records a `conftest.py` that pytest imported by
@@ -752,9 +759,18 @@ private) around the one that answered (or none), replaced by a stand-in that
 returns its kept answer. That answer is kept per wrappers and answering
 implementation (`ContextStore._wrapped`), so a child folder whose conftest
 returns None shares its parent's wrapped object and label, and the wrappers run
-once for it; a wrapper's code before its yield runs after the implementations
-it wraps. A folder's answer is also kept per list of the implementations it
-sees, so later tests look it up.
+once for it, and once more for each other set of wrappers around the same
+implementation. A wrapper's code before its yield runs after the implementations
+it wraps (a deviation from D7's "pluggy's own call loop"): calling them inside
+the loop would run each one after the wrappers of the first folder that asks and
+before those of the others, so what a wrapper prepares would reach an
+implementation in one run and not in another. Since the wrappers receive the
+implementation's kept object, which the folders without them get too,
+`ContextStore._check_unchanged()` takes its fingerprint again after the wrappers
+ran, and when it changed the wrapped answer is a `RuntimeError` that says a
+wrapper must return a new object (a change the fingerprint does not show, in an
+object counted by its type alone, goes unnoticed). A folder's answer is also
+kept per list of the implementations it sees, so later tests look it up.
 The label is the conftest's path relative to the rootdir, the plugin's name
 (its class's name when pluggy named it by its id), `none` when nothing
 answered, or with a wrapper the deepest conftest among the wrappers and the
@@ -814,15 +830,20 @@ for a pydantic v2 model through `model_dump(mode="python")`, recognized on its
 type by `model_fields` and `model_dump`, `dataclass`, `attrs` (recognized on
 its type by `__attrs_attrs__`) and `namedtuple` field by field, `namespace` for a
 `SimpleNamespace` or `argparse.Namespace` as its `vars()` pairs, `map` as pairs
-in their order, `set` sorted by the elements' JSON, `repr` without `" at 0x..."`
-and a mock's `" id='...'"` before its closing `>`, and `object` for a type that
-keeps `object.__repr__` or whose repr may show a set in hash order, which goes
-in `partial`). `_shows_hash_order()` decides the latter: it walks the object's
-`__dict__` and slots (read through `object.__getattribute__` and the slot
-descriptors, never a `__getattr__`), into lists, tuples, deques, dicts, sets and
-other objects' attributes, at most `_ATTRIBUTE_LIMIT` objects, and answers yes
-for a set of two or more elements one of which is not a number, None or a
-tuple of those, whose hash depends on `PYTHONHASHSEED` or an address. Lists and
+in their order, `set` sorted by the elements' JSON, `repr` for other objects,
+and `object` for a type that keeps `object.__repr__`, which goes in `partial`).
+A `repr` is the object's repr without its memory addresses
+(`_without_addresses()`: `" at 0x..."` inside a `<...>` repr, counted by the
+`<` and `>` before it, and a mock's `" id='...'"` before its closing `>`; an
+address outside `<...>`, such as a register's, stays), with the sets it shows
+sorted (`_sorted_sets()`): it reads the text by its quotes and its brackets
+(`(`, `[`, `{`, and `<` when a `>` closes it), and writes the items of each
+`{...}` with two or more items and no `:` between them sorted, nested ones
+first, so the hash order of a set of strings or Enum members does not show; a
+repr whose brackets do not pair up stays as it is. It reads only the text: an
+object that holds a set its repr does not show (a testbench holding pytest's
+config, a register holding its chip) costs nothing more, and a set shown
+another way (`",".join(tags)`) is not recognized. Lists and
 tuples are arrays; the exact types str, int, bool, None and float, and exact
 lists and tuples, take a fast path, for the value digests below. A container
 met again below itself is `{"cycle": n}`. Any exception while encoding (a raising repr, a
@@ -842,7 +863,11 @@ records the node IDs of failed setups and calls, and `pytest_sessionfinish`
 maps them to the labels and fingerprints their factories received
 (`plugin._failed_contexts()`, through the test's node ID without parameters,
 `_test_key()`), which end the reproduce line. `_summary()` carries the
-`Contexts` lines of the `-v` summary, so a pytest-xdist worker sends them with it.
+`Contexts` block of the `-v` summary (`_context_entries()`, by label), so a
+pytest-xdist worker sends it with it; the controller prints the first finished
+worker's summary with the blocks of every worker merged by label, since a
+context computed only when a test ran (`strategies_ctx`, `get_context()`) is in
+the block of the worker that ran it.
 
 Under pytest-xdist the plugin checks that every worker generated the same
 vectors (D9), because names in the test IDs no longer make xdist notice workers

@@ -292,6 +292,45 @@ class TestVerboseSummary:
             ]
         )
 
+    def test_the_contexts_block_under_xdist_has_every_worker_s(self, pytester):
+        """
+        tests/tb_b's context is computed only when its test runs, on one worker, and
+        that worker finishes last: the block still lists it, as in one process.
+        """
+        pytest.importorskip("xdist")
+        B = {"name": "B"}
+        write(
+            pytester,
+            {
+                "tests/test_root.py": module("bounded", name="test_root"),
+                "tests/tb_b/conftest.py": f"def pytest_strategies_context(config):\n"
+                f"    return {B!r}\n",
+                "tests/tb_b/test_b.py": """
+import time
+
+from pytest_strategy import get_context
+
+def test_b(request):
+    time.sleep(0.5)
+    assert get_context(request.config, __file__) == {"name": "B"}
+""",
+            },
+        )
+        block = [
+            "Contexts: 2",
+            f"  conftest.py: {fp(ROOT, pytester)}, 1 test(s)",
+            f"  tests/tb_b/conftest.py: {fp(B, pytester)}, 0 test(s)",
+        ]
+
+        for args in [(), ("-n", "2")]:
+            result = pytester.runpytest_subprocess(
+                "-p", "no:cacheprovider", "-v", f"--rng-seed={SEED}", *args
+            )
+            result.assert_outcomes(passed=3)
+            lines = result.stdout.lines
+            start = lines.index("Contexts: 2")
+            assert lines[start : start + 3] == block, args
+
     def test_no_block_without_a_context(self, pytester):
         write(pytester, {"tests/test_x.py": module("plain")})
 

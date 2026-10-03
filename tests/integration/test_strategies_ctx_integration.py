@@ -5,10 +5,13 @@ tests span two contexts fails each of them, and a folder's conftest.py gets its
 own folder's context with ``get_context(request.config, __file__)``.
 """
 
+import random
 from collections import Counter
 from textwrap import dedent
 
 import pytest
+
+from pytest_strategy._streams import StreamKey
 
 pytest_plugins = ["pytester"]
 
@@ -502,6 +505,37 @@ def test_b(request):
 
         pytester.runpytest("-p", "no:cacheprovider").assert_outcomes(passed=2)
         assert calls(pytester) == {"root": 1, "B": 1}
+
+    @pytest.mark.parametrize("early", [True, False], ids=["pytest_configure", "test"])
+    def test_in_pytest_configure_it_draws_from_the_seed_rng_seed_gives(self, pytester, early):
+        """
+        The plugin seeds after the conftest.py files' pytest_configure, but a
+        context computed there already uses the seed of --rng-seed.
+        """
+        configure = "get_context(config, __file__)" if early else "pass"
+        write(
+            pytester,
+            {
+                "conftest.py": f"""
+from pytest_strategy import RNG, get_context
+
+def pytest_strategies_context(config):
+    return {{"draw": RNG.integer(0, 10**9)}}
+
+def pytest_configure(config):
+    {configure}
+""",
+                "test_draw.py": """
+def test_draw(strategies_ctx, request):
+    (request.config.rootpath / "draw.txt").write_text(str(strategies_ctx["draw"]))
+""",
+            },
+        )
+
+        pytester.runpytest("-p", "no:cacheprovider", "--rng-seed=7").assert_outcomes(passed=1)
+
+        expected = random.Random(StreamKey.root(7, "ctx").seed_int()).randint(0, 10**9)
+        assert (pytester.path / "draw.txt").read_text() == str(expected)
 
 
 class TestHookErrors:

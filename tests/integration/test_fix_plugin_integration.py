@@ -103,6 +103,43 @@ class TestUnseededRunReproducibility:
         assert values_dump.collect("--collect-only", f"--rng-seed={seed}") == unseeded_values
 
 
+class TestSeedSetInAConftest:
+    """
+    A conftest.py that seeds in its pytest_configure sets the run's seed, as in 3.0:
+    the plugin seeds after the initial conftest.py files' pytest_configure.
+    """
+
+    @pytest.mark.parametrize(
+        "seeding",
+        ["RNG.seed(1234)", "if config.option.rng_seed is None: config.option.rng_seed = 1234"],
+        ids=["RNG.seed", "option"],
+    )
+    def test_the_header_the_reproduce_line_and_the_values_follow_it(
+        self, pytester, values_dump, seeding
+    ):
+        pytester.makeconftest(f"""
+from pytest_strategy import RNG
+
+def pytest_configure(config):
+    {seeding}
+""" + values_dump.conftest)
+        pytester.makepyfile(strategies=STRATEGIES)
+        pytester.makepyfile(test_seeded=TESTS + "\n\ndef test_fails():\n    assert False\n")
+
+        first = values_dump.run(ret=1)
+        values = values_dump.read()
+        second = values_dump.run(ret=1)
+
+        for result in (first, second):
+            assert _seed_from_header(result) == 1234
+            result.stdout.fnmatch_lines(["pytest-strategies: reproduce with --rng-seed=1234"])
+        assert len(values) == 6
+        assert values_dump.read() == values
+        # The values of the seed it set
+        pytester.makeconftest(values_dump.conftest)
+        assert values_dump.collect("--collect-only", "--rng-seed=1234") == values
+
+
 class TestXdistSeedSharing:
     """pytest-xdist workers must all use the controller's seed."""
 
