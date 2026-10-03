@@ -292,6 +292,19 @@ class TestPathPart:
 
         assert path_part(path, None) == Path(os.path.realpath(path)).as_posix()
 
+    def test_a_path_on_another_drive_is_its_real_path(self, tmp_path, monkeypatch):
+        """On Windows, os.path.relpath() raises ValueError for a path on another drive."""
+        path = tmp_path / "s.py"
+
+        def relpath(path, start=None):
+            raise ValueError("path is on mount 'D:', start on mount 'C:'")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os.path, "relpath", relpath)
+            part = path_part(path, tmp_path)
+
+        assert part == Path(os.path.realpath(path)).as_posix()
+
 
 # ---------------------------------------------------------------------------
 # Goldens: streams v1

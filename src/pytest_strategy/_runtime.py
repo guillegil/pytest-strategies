@@ -122,9 +122,10 @@ class SessionState:
         self.context: Any = None
         self.context_error: BaseException | None = None
         self.context_traceback: TracebackType | None = None
-        # Where each fixture that drew is defined (plugin._fixture_definition), a
-        # part of its random stream's key, by FixtureDef
-        self.fixture_definitions: dict[Any, tuple[str, str]] = {}
+        # Where each fixture that drew is defined and registered
+        # (plugin._fixture_definition and _fixture_base), the last parts of its
+        # random stream's key, by FixtureDef
+        self.fixture_definitions: dict[Any, tuple[str, str, str]] = {}
         # Process-global state in effect when this session began, restored on pop:
         # a nested session's --rng-seed, random draws and strategy registrations
         # must not leak into the enclosing session or later sibling sessions.

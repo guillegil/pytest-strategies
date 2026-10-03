@@ -4,6 +4,7 @@ import _random
 import builtins
 import math
 import random
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from enum import Enum
@@ -47,6 +48,12 @@ class _Ambient(random.Random):
     ``getrandbits()``. So the values are those of a generator seeded when the
     stream is entered. ``seed()`` and ``setstate()`` replace the state, so they
     skip the pending seeding, but still save the state the stream puts back.
+
+    Seeding a pending stream, and entering or ending a stream, hold the
+    generator's lock: a thread that draws while another enters or ends a stream
+    (a stimulus thread started by a fixture) then never seeds the generator from
+    a stream that has ended, or saves the state on another stream. Its draws
+    still come from whichever stream is in use.
     """
 
     # random.Random's cached second value of gauss(), part of its state
@@ -58,53 +65,58 @@ class _Ambient(random.Random):
         self._pending: StreamKey | Callable[[], StreamKey] | None = None
         # The streams entered and not yet ended, the innermost last
         self._streams: list[_Stream] = []
+        # Held while a stream is seeded, entered or ended (see the class docstring);
+        # reentrant, so a signal handler that draws while its thread holds it cannot
+        # deadlock
+        self._lock = threading.RLock()
         super().__init__(x)
 
-    def _settle(self, pending: StreamKey | Callable[[], StreamKey], seed: bool = True) -> None:
+    def _settle(self, seed: bool = True) -> None:
         """
         Make the pending stream's state the real one: save the state in use, which
         belongs to the innermost stream seeded around it (or to no stream), for the
         stream to put back when it ends, and seed the generator from the stream's
         key, unless ``seed`` is False because the caller replaces the state.
         """
-        seed_int = None
-        if seed:
-            seed_int = (pending if isinstance(pending, StreamKey) else pending()).seed_int()
-        self._pending = None
-        self._streams[-1]._state = _mt_getstate(self)
-        if seed_int is not None:
-            # As random.Random.seed() seeds with an int; gauss_next was cleared when
-            # the stream was entered
-            _mt_seed(self, seed_int)
+        with self._lock:
+            # Read again under the lock: another thread may have seeded the stream,
+            # or ended it, since the caller saw it pending
+            pending = self._pending
+            if pending is None:
+                return
+            seed_int = None
+            if seed:
+                seed_int = (pending if isinstance(pending, StreamKey) else pending()).seed_int()
+            self._pending = None
+            self._streams[-1]._state = _mt_getstate(self)
+            if seed_int is not None:
+                # As random.Random.seed() seeds with an int; gauss_next was cleared
+                # when the stream was entered
+                _mt_seed(self, seed_int)
 
     def random(self) -> float:
-        pending = self._pending
-        if pending is not None:
-            self._settle(pending)
+        if self._pending is not None:
+            self._settle()
         return _mt_random(self)
 
     def getrandbits(self, k: int, /) -> int:
-        pending = self._pending
-        if pending is not None:
-            self._settle(pending)
+        if self._pending is not None:
+            self._settle()
         return _mt_getrandbits(self, k)
 
     def seed(self, a: Any = None, version: int = 2) -> None:
-        pending = self._pending
-        if pending is not None:
-            self._settle(pending, seed=False)
+        if self._pending is not None:
+            self._settle(seed=False)
         super().seed(a, version)
 
     def getstate(self) -> tuple[Any, ...]:
-        pending = self._pending
-        if pending is not None:
-            self._settle(pending)
+        if self._pending is not None:
+            self._settle()
         return super().getstate()
 
     def setstate(self, state: tuple[Any, ...]) -> None:
-        pending = self._pending
-        if pending is not None:
-            self._settle(pending, seed=False)
+        if self._pending is not None:
+            self._settle(seed=False)
         super().setstate(state)
 
     def _position(self) -> object:
@@ -114,7 +126,8 @@ class _Ambient(random.Random):
         something draws from the generator, seeds it or sets its state, and costs
         nothing while a stream is pending (the guard on the row streams compares it).
         """
-        return self._pending if self._pending is not None else self.getstate()
+        pending = self._pending
+        return pending if pending is not None else self.getstate()
 
 
 class RNG:
@@ -488,25 +501,29 @@ class _Stream:
 
     def __enter__(self) -> random.Random:
         ambient = RNG._ambient
-        self._saved = (ambient, ambient._pending, ambient.gauss_next, RNG._generator, RNG._seed)
-        # The state to put back, saved when the stream is seeded (_Ambient._settle)
-        self._state: tuple[Any, ...] | None = None
-        ambient._streams.append(self)
-        ambient._pending = self._key
-        # random.Random.seed() clears it; a pending stream must not see the outer one's
-        ambient.gauss_next = None
-        RNG._generator = ambient
+        # Under the generator's lock, so that another thread's draw seeds no stream
+        # meanwhile (see _Ambient)
+        with ambient._lock:
+            self._saved = (ambient, ambient._pending, ambient.gauss_next, RNG._generator, RNG._seed)
+            # The state to put back, saved when the stream is seeded (_Ambient._settle)
+            self._state: tuple[Any, ...] | None = None
+            ambient._streams.append(self)
+            ambient._pending = self._key
+            # random.Random.seed() clears it; a pending stream must not see the outer one's
+            ambient.gauss_next = None
+            RNG._generator = ambient
         return ambient
 
     def __exit__(self, *exc_info: object) -> None:
         ambient, pending, gauss_next, generator, seed = self._saved
-        ambient._streams.pop()
-        if self._state is not None:
-            _mt_setstate(ambient, self._state)
-        ambient._pending = pending
-        ambient.gauss_next = gauss_next
-        RNG._generator = generator
-        RNG._seed = seed
+        with ambient._lock:
+            ambient._streams.pop()
+            if self._state is not None:
+                _mt_setstate(ambient, self._state)
+            ambient._pending = pending
+            ambient.gauss_next = gauss_next
+            RNG._generator = generator
+            RNG._seed = seed
 
 
 # ====

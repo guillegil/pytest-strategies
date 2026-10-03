@@ -39,10 +39,10 @@ from ._registry import (
     Registration,
     _contains,
     _describe_factory,
-    _unwrap,
     display_path,
     factory_source,
     registry,
+    source_part,
 )
 from ._runtime import runtime
 from ._streams import StreamKey, path_part, seed_part
@@ -60,10 +60,6 @@ _UNFILLED_RECORDS = pytest.StashKey[list[tuple[str, str]]]()
 # (private API; None if a pytest moves it): it returns the argument's value and runs
 # no user code, so it gets no random stream
 _DIRECT_PARAM_FIXTURE: Any = getattr(_pytest.python, "get_direct_param_fixture_func", None)
-
-# The folders installed packages live in: a fixture defined in one is keyed by its
-# module's name, which does not depend on where the package is installed
-_INSTALLED_FOLDERS = frozenset({"site-packages", "dist-packages"})
 
 # Strategy file names; a file is imported only if it also contains a registration
 _STRATEGY_FILE_PATTERNS = ("strategies.py", "strategy.py", "*_strategies.py", "*_strategy.py")
@@ -517,10 +513,10 @@ class PytestStrategyPlugin:
     ) -> Generator[None, Any, Any]:
         """
         Set a fixture up on a random stream of its own (streams v1): root(S,
-        "fixture", scope, name, param_index, where, qualname), where scope is the
-        node ID of the fixture's scope node ("" for the session), and where and
-        qualname tell the fixture's definition from another of the same name
-        (``_fixture_definition``).
+        "fixture", scope, name, param_index, where, qualname, base), where scope is
+        the node ID of the fixture's scope node ("" for the session), and where,
+        qualname and base tell the fixture from another of the same name
+        (``_fixture_definition``, ``_fixture_base``).
 
         A module- or session-scoped fixture is set up during the setup of whichever
         test needs it first; with its own stream, its draws, and that test's, do
@@ -538,7 +534,10 @@ class PytestStrategyPlugin:
         def key() -> StreamKey:
             definition = state.fixture_definitions.get(fixturedef)
             if definition is None:
-                definition = _fixture_definition(fixturedef.func, request.config.rootpath)
+                definition = (
+                    *_fixture_definition(fixturedef.func, request.config.rootpath),
+                    _fixture_base(fixturedef),
+                )
                 state.fixture_definitions[fixturedef] = definition
             return StreamKey.root(
                 seed, "fixture", scope, fixturedef.argname, param_index, *definition
@@ -1409,7 +1408,7 @@ def _run_seed() -> int:
 def _fixture_definition(func: Callable[..., Any], rootpath: Path | None) -> tuple[str, str]:
     """
     Return where a fixture is defined, as two parts of its stream key: its file,
-    relative to the rootdir in posix form (``path_part()``), and its function's
+    relative to the rootdir in posix form (``source_part()``), and its function's
     qualified name (``TestDb.conn`` for one defined in a class).
 
     pytest sets up a fixture that overrides another of the same name (``def
@@ -1417,17 +1416,28 @@ def _fixture_definition(func: Callable[..., Any], rootpath: Path | None) -> tupl
     of one name in two sibling folders' conftest.py files, for the same scope
     node: their definitions give them streams of their own. A fixture of an
     installed package (a file in a site-packages or dist-packages folder, such as
-    a plugin's) is named by its module instead of its file, whose path depends on
-    where the package is installed.
+    a plugin's), or one whose code has no file (``exec``'d code), is named by its
+    module instead of its file, whose path depends on where the package is
+    installed, or on the working directory.
     """
-    source, qualname, _ = factory_source(func)
-    if source and _INSTALLED_FOLDERS.isdisjoint(PurePath(source).parts):
-        return path_part(source, rootpath), qualname or ""
-    # The function factory_source() read, through wrappers and partials
-    function = _unwrap(func)
-    while isinstance(function, functools.partial):
-        function = _unwrap(function.func)
-    return getattr(function, "__module__", None) or "", qualname or ""
+    return source_part(func, rootpath), factory_source(func)[1] or ""
+
+
+def _fixture_base(fixturedef: pytest.FixtureDef[Any]) -> str:
+    """
+    Return where pytest registered a fixture, as a part of its stream key: the
+    node ID below which it is visible (``FixtureDef.baseid``), the folder of its
+    conftest.py, its test module or class, or ``""`` for a plugin's fixture and
+    the rootdir's conftest.py (pytest 9 gives ``"."`` there, and pytest 8 ``""``).
+
+    One fixture function that two conftest.py files import (``from
+    helpers.fixtures import port``) is registered twice, and pytest sets both up
+    for the session: their bases give them streams of their own.
+    """
+    # pytest 9 registers a fixture for a node, and derives baseid from it
+    node = getattr(fixturedef, "node", None)
+    base = node.nodeid if node is not None else getattr(fixturedef, "baseid", "")
+    return "" if base == "." else str(base)
 
 
 def _phase_stream(item: pytest.Item, phase: str) -> contextlib.AbstractContextManager[Any]:

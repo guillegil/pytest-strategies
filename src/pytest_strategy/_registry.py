@@ -16,14 +16,20 @@ import os
 import sys
 from collections.abc import Callable, Iterator, MutableMapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any
+
+from ._streams import path_part
 
 # Factories are user callables that return a Parameter. They receive the inputs
 # they declare by name (nsamples, ctx, rng, options; see _factory.py)
 Factory = Callable[..., Any]
 
 Origin = tuple[str | None, str | None, int | None]
+
+# The folders installed packages live in: code in one is keyed by its module's
+# name, which does not depend on where the package is installed
+_INSTALLED_FOLDERS = frozenset({"site-packages", "dist-packages"})
 
 
 def _unwrap(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -67,6 +73,31 @@ def factory_source(fn: Callable[..., Any]) -> Origin:
         # Python 3.13+ records where a class statement starts
         getattr(cls, "__firstlineno__", None),
     )
+
+
+def source_part(
+    fn: Callable[..., Any], rootpath: str | os.PathLike[str] | None, *, folder: bool = False
+) -> str:
+    """
+    Return where a function or a factory is defined, as a part of a random stream's
+    key: the file :func:`factory_source` finds, or with ``folder`` its folder, relative
+    to the rootdir in posix form (``_streams.path_part()``).
+
+    The name of its module stands for the file when the file is in an installed
+    package (a site-packages or dist-packages folder), whose path depends on where
+    the package is installed, and when its code has no file (``"<string>"`` for
+    ``exec``'d code, which would resolve against the working directory); ``""``
+    without a module either. The fixture and export streams use it.
+    """
+    source = factory_source(fn)[0]
+    if source and os.path.isfile(source) and _INSTALLED_FOLDERS.isdisjoint(PurePath(source).parts):
+        return path_part(os.path.dirname(source) if folder else source, rootpath)
+    # The module of what factory_source() read, through wrappers and partials (a
+    # class's, for a callable object)
+    fn = _unwrap(fn)
+    while isinstance(fn, functools.partial):
+        fn = _unwrap(fn.func)
+    return getattr(fn, "__module__", None) or ""
 
 
 def _factory_origin(fn: Callable[..., Any]) -> Origin:

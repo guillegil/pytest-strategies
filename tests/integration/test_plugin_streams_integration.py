@@ -464,20 +464,23 @@ class TestBodyAndFixtureStreams:
         def body(test, phase="call"):
             return randint(StreamKey.root(SEED, "body", f"{BODY}::{test}", phase))
 
-        def fixture(scope, name, param_index, where):
+        def fixture(scope, name, param_index, where, base):
             # The scope node's ID, the name and the parameter index, then where the
-            # fixture is defined: its file and its function's qualified name
-            return randint(StreamKey.root(SEED, "fixture", scope, name, param_index, where, name))
+            # fixture is defined (its file and its function's qualified name) and the
+            # node ID pytest registered it for ("" for the rootdir's conftest.py)
+            return randint(
+                StreamKey.root(SEED, "fixture", scope, name, param_index, where, name, base)
+            )
 
         assert records == {
             "module": randint(StreamKey.root(SEED, "module", BODY)),
             "test_first": body("test_first"),
-            "sess": fixture("", "sess", 0, "conftest.py"),
-            "mod": fixture(BODY, "mod", 0, BODY),
+            "sess": fixture("", "sess", 0, "conftest.py", ""),
+            "mod": fixture(BODY, "mod", 0, BODY, BODY),
             "test_uses": body("test_uses"),
             "test_reseeds": random.Random(5).randint(0, 10**9),
-            "par p": fixture(f"{BODY}::test_par[p]", "par", 0, BODY),
-            "par q": fixture(f"{BODY}::test_par[q]", "par", 1, BODY),
+            "par p": fixture(f"{BODY}::test_par[p]", "par", 0, BODY, BODY),
+            "par q": fixture(f"{BODY}::test_par[q]", "par", 1, BODY, BODY),
             "test_last": body("test_last"),
             # test_reseeds' RNG.seed(5) ended with its call phase
             "seed": SEED,
@@ -517,7 +520,9 @@ class TestBodyAndFixtureStreams:
 
 # A conftest.py below the initial ones is imported while its folder is collected,
 # outside every stream, so its RNG.seed(5) stays for the rest of the session: the
-# fixture and test-phase streams are keyed by the run's seed, not RNG.get_seed()
+# test module, fixture and test-phase streams are keyed by the run's seed, not
+# RNG.get_seed(). A rerun of the node ID makes the conftest an initial one, which
+# pytest_configure's seeding then overrides
 
 RESEEDING_CONFTEST = """
     import pytest
@@ -538,13 +543,15 @@ RESEEDING_TESTS = """
     from pytest_strategy import RNG
     from record import record
 
+    record("module", RNG.integer(0, 10**9))
+
     def test_sub(sub):
         record("test_sub", RNG.integer(0, 10**9))
         record("seed", RNG.get_seed())
 """
 
 
-def test_a_conftest_that_reseeds_leaves_the_fixture_and_body_streams(pytester):
+def test_a_conftest_that_reseeds_leaves_the_module_fixture_and_body_streams(pytester):
     pytester.makeini("[pytest]\npythonpath = .\n")
     pytester.makepyfile(record=RECORD)
     sub = pytester.mkdir("tests") / "sub"
@@ -557,18 +564,59 @@ def test_a_conftest_that_reseeds_leaves_the_fixture_and_body_streams(pytester):
 
     test = "tests/sub/test_sub.py::test_sub"
     assert records == {
+        "module": randint(StreamKey.root(SEED, "module", "tests/sub/test_sub.py")),
         "sub": randint(
-            StreamKey.root(SEED, "fixture", test, "sub", 0, "tests/sub/conftest.py", "sub")
+            StreamKey.root(
+                SEED, "fixture", test, "sub", 0, "tests/sub/conftest.py", "sub", "tests/sub"
+            )
         ),
         "test_sub": randint(StreamKey.root(SEED, "body", test, "call")),
         # The conftest's seed is what RNG.get_seed() returns in the test
         "seed": 5,
     }
+    # Run alone, the conftest is an initial one, which the session's seed overrides
+    assert run_and_read(pytester, test, passed=1) == {**records, "seed": SEED}
+
+
+# The test IDs never change the rows, but a test's phases draw from streams of its
+# node ID, which contains the ID
+
+IDS_TESTS = """
+    from pytest_strategy import RNG, VECTOR_KEY, Parameter, RNGInteger, TestArg, strategy
+    from record import record
+
+    def ps_ids_rows():
+        return Parameter(TestArg("x", rng_type=RNGInteger(0, 10**9)), nsamples=2)
+
+    @strategy(ps_ids_rows)
+    def test_ids(x, request):
+        index = request.node.stash[VECTOR_KEY].index
+        record(f"row {index}", x)
+        record(f"nodeid {index}", request.node.nodeid)
+        record(f"body {index}", RNG.integer(0, 10**9))
+"""
+
+
+def test_the_id_format_changes_the_body_draws_not_the_rows(pytester):
+    pytester.makeini("[pytest]\npythonpath = .\n")
+    pytester.makepyfile(record=RECORD, test_ids=IDS_TESTS)
+
+    names = run_and_read(pytester, passed=2)
+    values = run_and_read(pytester, "-o", "strategies_ids=values", passed=2)
+
+    for index in (0, 1):
+        assert values[f"row {index}"] == names[f"row {index}"]
+        assert values[f"nodeid {index}"] != names[f"nodeid {index}"]
+        for records in (names, values):
+            nodeid = records[f"nodeid {index}"]
+            assert records[f"body {index}"] == randint(StreamKey.root(SEED, "body", nodeid, "call"))
+        assert values[f"body {index}"] != names[f"body {index}"]
 
 
 # Fixtures that pytest sets up for the same scope node under one name: an override
-# that requests the fixture it overrides, and session fixtures of one name in two
-# sibling folders' conftest.py files
+# that requests the fixture it overrides, session fixtures of one name in two
+# sibling folders' conftest.py files, and one session fixture function that both
+# folders' conftest.py files import
 
 SAME_NAME_CONFTEST = """
     import pytest
@@ -615,6 +663,7 @@ SAME_NAME_SIBLING = """
     import pytest
 
     from pytest_strategy import RNG
+    from ps_shared_fixtures import port
     from record import record
 
     @pytest.fixture(scope="session")
@@ -624,12 +673,23 @@ SAME_NAME_SIBLING = """
         return drawn
 """
 
+SAME_NAME_SHARED = """
+    import pytest
+
+    from pytest_strategy import RNG
+
+    @pytest.fixture(scope="session")
+    def port():
+        return RNG.integer(0, 10**9)
+"""
+
 
 @pytest.fixture
 def same_name_project(pytester):
     pytester.makeini("[pytest]\npythonpath = .\n")
     pytester.makepyfile(record=RECORD)
     pytester.makeconftest(SAME_NAME_CONFTEST)
+    pytester.makepyfile(ps_shared_fixtures=SAME_NAME_SHARED)
     tests = pytester.mkdir("tests")
     (tests / "test_override.py").write_text(dedent(SAME_NAME_OVERRIDE))
     for folder in ("a", "b"):
@@ -638,7 +698,9 @@ def same_name_project(pytester):
             dedent(SAME_NAME_SIBLING).replace("{folder}", folder)
         )
         (tests / folder / f"test_{folder}.py").write_text(
-            f"def test_{folder}(resource):\n    pass\n"
+            "from record import record\n\n"
+            f"def test_{folder}(resource, port):\n"
+            f"    record('port {folder}', port)\n"
         )
     return pytester
 
@@ -647,22 +709,28 @@ class TestFixturesOfOneName:
     def test_each_definition_draws_from_a_stream_of_its_own(self, same_name_project):
         records = run_and_read(same_name_project, passed=3)
 
-        def fixture(scope, name, where):
-            return randint(StreamKey.root(SEED, "fixture", scope, name, 0, where, name))
+        def fixture(scope, name, where, base):
+            return randint(StreamKey.root(SEED, "fixture", scope, name, 0, where, name, base))
 
         override = "tests/test_override.py"
+        test = f"{override}::test_override"
         assert records == {
-            "value": fixture(f"{override}::test_override", "value", "conftest.py"),
-            "value override": fixture(f"{override}::test_override", "value", override),
-            "modvalue": fixture(override, "modvalue", "conftest.py"),
-            "modvalue override": fixture(override, "modvalue", override),
-            "resource a": fixture("", "resource", "tests/a/conftest.py"),
-            "resource b": fixture("", "resource", "tests/b/conftest.py"),
+            "value": fixture(test, "value", "conftest.py", ""),
+            "value override": fixture(test, "value", override, override),
+            "modvalue": fixture(override, "modvalue", "conftest.py", ""),
+            "modvalue override": fixture(override, "modvalue", override, override),
+            "resource a": fixture("", "resource", "tests/a/conftest.py", "tests/a"),
+            "resource b": fixture("", "resource", "tests/b/conftest.py", "tests/b"),
+            # One function: the folder pytest registered it for tells them apart
+            "port a": fixture("", "port", "ps_shared_fixtures.py", "tests/a"),
+            "port b": fixture("", "port", "ps_shared_fixtures.py", "tests/b"),
         }
-        # 4.0's first key had no definition: these pairs drew the same values
+        # 4.0's first key had no definition, and its second no base: these pairs
+        # drew the same values
         assert records["value"] != records["value override"]
         assert records["modvalue"] != records["modvalue override"]
         assert records["resource a"] != records["resource b"]
+        assert records["port a"] != records["port b"]
 
     def test_draws_are_the_same_alone_in_the_suite_and_under_xdist(self, same_name_project):
         suite = run_and_read(same_name_project, passed=3)
@@ -737,6 +805,45 @@ def test_export_calls_draw_from_the_strategys_folder_stream(pytester):
         draw("ps_export", "tests/a"),
         draw("ps_exec", ""),
     ] * 2
+
+
+INSTALLED_STRATEGIES = """
+    from pytest_strategy import Parameter, TestArg, register
+
+    @register("ps_installed")
+    def installed(rng):
+        return Parameter(TestArg("e", value=rng.randint(0, 10**9)), nsamples=1)
+"""
+
+INSTALLED_TESTS = """
+    import pathlib
+
+    from pytest_strategy import export_strategies
+
+    def test_export():
+        (pathlib.Path(__file__).parent / "export.json").write_text(export_strategies())
+"""
+
+
+def test_an_installed_packages_factory_exports_the_same_from_any_environment(pytester):
+    """Its folder's path depends on where the package is installed; its module does not."""
+    pytester.makeconftest("import ps_installed_strategies")
+    pytester.makepyfile(test_export=INSTALLED_TESTS)
+    exported = []
+    for env, folder in (("env_a", "site-packages"), ("env_b", "dist-packages")):
+        package = pytester.path / env / "lib" / "python3" / folder / "ps_installed_strategies"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text(dedent(INSTALLED_STRATEGIES))
+        pytester.makeini(f"[pytest]\npythonpath = {package.parent}\n")
+
+        result = pytester.runpytest_subprocess("-p", "no:cacheprovider", f"--rng-seed={SEED}")
+
+        result.assert_outcomes(passed=1)
+        data = json.loads((pytester.path / "export.json").read_text())
+        exported.append(data["ps_installed"]["arguments"][0]["static_value"])
+
+    key = StreamKey.root(SEED, "export", "ps_installed", "ps_installed_strategies")
+    assert exported == [str(randint(key))] * 2
 
 
 # ---------------------------------------------------------------------------

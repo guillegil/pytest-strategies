@@ -220,7 +220,11 @@ class TestTheGuardWarns:
 
     def test_the_rows_are_generated_all_the_same(self):
         # What it warns about: the kept rng continues the ambient generator, so its
-        # values repeat from the same state, and move with whatever drew before
+        # values repeat from the same state, and move with whatever drew before.
+        # Seeded, not the run's seed: randint() rejects a word over 10**9, and when
+        # the state's first two words are both rejected, the values after the draw
+        # below are the same (seed 150, for example)
+        RNG.seed(3)
         state = RNG._ambient.getstate()
         first, _ = build(kept_rng)
         RNG._ambient.setstate(state)

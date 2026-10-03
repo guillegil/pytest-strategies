@@ -8,7 +8,6 @@ parametrization (``pytest_generate_tests``), with the session's options at hand.
 
 from __future__ import annotations
 
-import os
 import warnings
 from collections.abc import Callable
 from typing import Any, TypeVar
@@ -16,7 +15,7 @@ from typing import Any, TypeVar
 import pytest
 
 from ._introspection import PYTEST_FIXTURES as _PYTEST_FIXTURES
-from ._registry import Factory, RegistryView, _describe_factory, factory_source, registry
+from ._registry import Factory, RegistryView, _describe_factory, registry, source_part
 from ._runtime import runtime
 from ._warnings import PytestStrategiesWarning
 
@@ -111,8 +110,11 @@ def export_strategies(*, format: str = "json") -> str:
     session. The context hook runs only for a factory that declares ``ctx``.
     Each call draws from a random stream of its own, keyed by the run's seed, the
     strategy's name and the folder of its factory's file: relative to the rootdir
-    in a session, absolute outside one, and ``""`` when the factory's code has no
-    file (``exec``'d code, a notebook cell).
+    in a session, absolute outside one. The factory's module name stands for the
+    folder when the file is in an installed package (a site-packages or
+    dist-packages folder), whose path depends on where the package is installed,
+    and when the factory's code has no file (``exec``'d code, a notebook cell);
+    ``""`` without a module either.
 
     Args:
         format: Export format (currently only "json" is supported), keyword-only
@@ -124,7 +126,7 @@ def export_strategies(*, format: str = "json") -> str:
 
     from ._factory import FactoryInputs, call_factory
     from ._resolver import check_factory_result
-    from ._streams import StreamKey, path_part, seed_part
+    from ._streams import StreamKey, seed_part
     from .rng import _Stream
 
     if format != "json":
@@ -136,12 +138,10 @@ def export_strategies(*, format: str = "json") -> str:
     strategies_data = {}
     for name in registry.names():
         factory = registry.registrations(name)[-1].factory
-        # The factory's folder, as its file system spells it; "" when its code has no
-        # file ("<string>" for exec'd code), which would otherwise resolve to the cwd
-        source = factory_source(factory)[0]
-        folder = ""
-        if source is not None and os.path.isfile(source):
-            folder = path_part(os.path.dirname(source), rootpath)
+        # The factory's folder, as its file system spells it; its module's name for
+        # an installed package's factory or one whose code has no file (see
+        # source_part, as for a fixture's key)
+        folder = source_part(factory, rootpath, folder=True)
         stream = StreamKey.root(seed_part(runtime.run_seed()), "export", name, folder)
         try:
             # The session's options for this strategy, the instance collection uses,

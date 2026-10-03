@@ -141,7 +141,7 @@ class Parameter:
 | `nsamples` | this strategy's default count: `None`, an int >= 0 or `"auto"`; an integer `--nsamples` overrides it |
 | `per_sequence_samples` | count rows per combination of the `Series`/`RNGSequence` arguments (section 7) |
 | `max_exhaustive` | this strategy's limit on exhaustive combinations (section 7) |
-| `ids` | this strategy's test IDs: `None` follows the `strategies_ids` ini option, `"names"` or `"values"` overrides it, and a function receives each row's `VectorInfo` (its `id` in the ini option's format) and returns the ID or `None` to keep it; not called for the skipped row. Duplicates get pytest's suffixes (`odd0`, `odd1`); anything but a non-empty str or None, or an exception, fails collection (`Strategy 'burst': ids= returned 42 for row rand-3; return a str or None`). IDs never change values |
+| `ids` | this strategy's test IDs: `None` follows the `strategies_ids` ini option, `"names"` or `"values"` overrides it, and a function receives each row's `VectorInfo` (its `id` in the ini option's format) and returns the ID or `None` to keep it; not called for the skipped row. Duplicates get pytest's suffixes (`odd0`, `odd1`); anything but a non-empty str or None, or an exception, fails collection (`Strategy 'burst': ids= returned 42 for row rand-3; return a str or None`). IDs never change the generated rows; the `RNG` draws of test phases and function-scoped fixtures are keyed by the node ID, so they follow it |
 
 - Directed and test vectors must give one value per argument (`RNGValueError`
   otherwise, naming the vector: a wrong length, a missing or unknown dict key,

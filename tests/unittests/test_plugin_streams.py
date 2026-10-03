@@ -1,8 +1,9 @@
 """
 Tests for the plugin's random streams other than the rows (streams v1, D5): the
-stream a block runs on (``_Stream``), ``RNG.refresh_seed(key)``, a session's save and
-restore of the ambient generator, the factory's stream T/"factory", a strategy
-file's stream and the definition part of a fixture's key. Each one reseeds the
+stream a block runs on (``_Stream``), also with another thread drawing,
+``RNG.refresh_seed(key)``, a session's save and restore of the ambient generator, the
+factory's stream T/"factory", a strategy file's stream, and the parts of a fixture's
+and an export's keys that say where they are defined. Each one reseeds the
 ambient generator in place from its key, when the block first uses it, and puts
 back its state, the installed generator and the seed when it ends.
 
@@ -11,22 +12,27 @@ tests are in tests/integration/test_plugin_streams_integration.py.
 """
 
 import _random
+import contextlib
 import copy
 import dataclasses
 import functools
 import importlib.util
 import random
 import sys
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 
 from pytest_strategy import RNG, Parameter, RNGInteger, TestArg
+from pytest_strategy._registry import source_part
 from pytest_strategy._resolver import build_parametrization
 from pytest_strategy._runtime import StrategyRuntime, runtime
-from pytest_strategy._streams import StreamKey
-from pytest_strategy.plugin import PytestStrategyPlugin, _fixture_definition
+from pytest_strategy._streams import StreamKey, path_part
+from pytest_strategy.plugin import PytestStrategyPlugin, _fixture_base, _fixture_definition
 from pytest_strategy.rng import _Stream
 
 KEY = StreamKey.root(7, "body", "tests/test_x.py::test_x", "call")
@@ -271,6 +277,113 @@ class TestTheStreamIsSeededWhenUsed:
             drawn = RNG.generator().random()
 
         assert copied.random() == drawn
+
+
+class TestAnotherThreadDraws:
+    """
+    A thread that draws from the RNG (a stimulus thread started by a fixture)
+    while the main thread enters and ends streams: seeding a pending stream holds
+    the generator's lock, as entering and ending one do, so a draw never seeds the
+    generator from a stream that has ended, or saves the state on another stream
+    (an IndexError outside every stream).
+    """
+
+    WHERE = ["outside every stream", "in a stream that has drawn"]
+
+    @contextlib.contextmanager
+    def around(self, where):
+        """Run the block outside every stream, or in a stream that has drawn."""
+        if where == "outside every stream":
+            # Without the test's own call stream, as between two tests
+            with mock.patch.object(RNG._ambient, "_streams", []):
+                yield
+        else:
+            with _Stream(OTHER):
+                RNG.generator().random()
+                yield
+
+    @pytest.mark.parametrize("where", WHERE)
+    def test_a_stream_ends_while_another_thread_seeds_it(self, where):
+        settling = threading.Event()
+        ending = threading.Event()
+        drawn = []
+        errors = []
+
+        def key():
+            settling.set()
+            ending.wait(5)
+            # Time for the stream to end, unless ending it waits for the seeding
+            time.sleep(0.02)
+            return KEY
+
+        def draw():
+            try:
+                drawn.append(RNG._ambient.random())
+            except Exception as error:
+                errors.append(error)
+
+        RNG.seed(3)  # seeds the test's call stream, so that nothing is pending
+        before = RNG._ambient.getstate()
+        with self.around(where):
+            inside = RNG._ambient.getstate()
+            stream = _Stream(key)
+            stream.__enter__()
+            thread = threading.Thread(target=draw)
+            thread.start()
+            assert settling.wait(5)
+            ending.set()
+            stream.__exit__(None, None, None)
+            thread.join()
+
+            assert errors == []
+            # The draw seeded the stream before it ended, which put its state back
+            assert drawn == first_draws(KEY, 1)
+            assert RNG._ambient.getstate() == inside
+            assert RNG._ambient._pending is None
+        assert RNG._ambient.getstate() == before
+
+    @pytest.mark.parametrize("where", WHERE)
+    def test_streams_begin_and_end_while_another_thread_draws(self, where):
+        errors = []
+        stop = threading.Event()
+
+        def draw():
+            while not stop.is_set():
+                try:
+                    RNG.integer(0, 255)
+                except Exception as error:
+                    errors.append(error)
+                    return
+
+        RNG.seed(3)
+        before = RNG._ambient.getstate()
+        interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        try:
+            with self.around(where):
+                streams = list(RNG._ambient._streams)
+                thread = threading.Thread(target=draw)
+                thread.start()
+                try:
+                    for i in range(5000):
+                        # Keyed lazily from a path, as the module and fixture streams are
+                        with _Stream(
+                            lambda i=i: StreamKey.root(7, "module", path_part(__file__, None), i)
+                        ):
+                            pass
+                finally:
+                    stop.set()
+                    thread.join()
+                assert (RNG._ambient._pending, RNG._ambient._streams) == (None, streams)
+        finally:
+            sys.setswitchinterval(interval)
+
+        assert errors == []
+        if where != "outside every stream":
+            # The thread drew from the outer stream, which put back the state
+            assert RNG._ambient.getstate() == before
+        with _Stream(KEY):
+            assert RNG.generator().random() == first_draws(KEY, 1)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -617,3 +730,73 @@ class TestFixtureDefinition:
             "conftest.py",
             "conn",
         )
+
+    @pytest.mark.parametrize(
+        ("namespace", "where"), [({}, ""), ({"__name__": "made"}, "made")], ids=["bare", "named"]
+    )
+    def test_code_without_a_file_is_named_by_its_module(
+        self, tmp_path, monkeypatch, namespace, where
+    ):
+        """Its file, "<string>", would resolve against the working directory."""
+        exec("def made():\n    pass\n", namespace)
+        (tmp_path / "tests").mkdir()
+
+        found = []
+        for cwd in (tmp_path, tmp_path / "tests"):
+            monkeypatch.chdir(cwd)
+            found.append(_fixture_definition(namespace["made"], tmp_path))
+
+        assert found == [(where, "made")] * 2
+
+
+class TestFixtureBase:
+    """Where pytest registered a fixture: a part of its key."""
+
+    @pytest.mark.parametrize(
+        ("nodeid", "base"),
+        [
+            # pytest 9's node for the rootdir, as pytest 8's baseid
+            (".", ""),
+            ("", ""),
+            ("tests/a", "tests/a"),
+            ("tests/test_a.py::TestDb", "tests/test_a.py::TestDb"),
+        ],
+    )
+    def test_the_node_it_is_registered_for(self, nodeid, base):
+        fixturedef = SimpleNamespace(node=SimpleNamespace(nodeid=nodeid), baseid=nodeid)
+
+        assert _fixture_base(fixturedef) == base
+
+    def test_without_a_node_its_baseid(self):
+        """pytest 8 has no FixtureDef.node, and some fixtures have none on pytest 9."""
+        assert _fixture_base(SimpleNamespace(baseid="tests/a")) == "tests/a"
+        assert _fixture_base(SimpleNamespace(node=None, baseid="tests/a")) == "tests/a"
+        assert _fixture_base(SimpleNamespace(node=None, baseid="")) == ""
+
+
+class TestSourcePart:
+    """Where a factory is defined, as the export stream's folder."""
+
+    def test_the_folder_of_its_file(self, tmp_path):
+        path = tmp_path / "tests" / "a" / "strategies.py"
+        path.parent.mkdir(parents=True)
+        path.write_text(FIXTURES_SOURCE)
+        module = load(path, "ps_unit_source_folder")
+
+        assert source_part(module.conn, tmp_path, folder=True) == "tests/a"
+        assert source_part(module.conn, tmp_path) == "tests/a/strategies.py"
+
+    @pytest.mark.parametrize("folder", ["site-packages", "dist-packages"])
+    def test_an_installed_package_is_named_by_its_module(self, tmp_path, folder):
+        """The same package installed in two environments gives the same part."""
+        found = set()
+        for env in ("env_a", "env_b"):
+            path = tmp_path / env / "lib" / "python3" / folder / "acme" / "strategies.py"
+            path.parent.mkdir(parents=True)
+            path.write_text(FIXTURES_SOURCE)
+            module = load(path, "acme.strategies")
+            found.add(source_part(module.conn, tmp_path, folder=True))
+            found.add(source_part(functools.partial(module.conn), tmp_path, folder=True))
+            found.add(source_part(module.TestDb, tmp_path, folder=True))
+
+        assert found == {"acme.strategies"}
