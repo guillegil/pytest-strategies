@@ -39,11 +39,6 @@ from pytest_strategy.parameters import _ArgRandom
 KEY = StreamKey.root(1, "test", "rs", "test_rs.py::test_rs")
 
 
-@pytest.fixture(autouse=True)
-def _seed():
-    RNG.seed(1234)
-
-
 class Color(enum.Enum):
     RED = 1
     GREEN = 2
@@ -704,6 +699,41 @@ class TestDirectCalls:
         )
         assert param._generate_rows(1, mode="random_only", key=KEY)[0].pos == (("ch", "i:0"),)
 
+    def test_the_direct_key_is_pinned(self):
+        """
+        A direct call's key is root(seed, "direct", 128 bits of RNG.generator()), and
+        like every other stream of streams v1 its values change only in a major release.
+        """
+        param = Parameter(
+            TestArg("x", rng_type=RNGInteger(0, 10**9)),
+            TestArg("c", rng_type=RNGChoice(list("abc"))),
+        )
+        enumerated = Parameter(
+            TestArg("ch", rng_type=Series([0, 1])),
+            TestArg("x", rng_type=RNGInteger(0, 10**9)),
+        )
+
+        RNG.seed(1)
+        vectors = param.generate_vectors(3)
+        RNG.seed(1)
+        vector = param.generate_vector()
+        RNG.seed(1)
+        exhaustive = enumerated.generate_exhaustive()
+
+        key = StreamKey.root(1, "direct", random.Random(1).getrandbits(128))
+        streams = key.child("row")
+        assert vectors == [(441588885, "a"), (441182482, "c"), (515774305, "a")]
+        assert vectors == [
+            (
+                random.Random(streams.child(k, "x").seed_int()).randint(0, 10**9),
+                random.Random(streams.child(k, "c").seed_int()).choice(list("abc")),
+            )
+            for k in range(3)
+        ]
+        assert vector == (441588885, "a")
+        assert exhaustive == [(0, 336958964), (1, 650338275)]
+        assert exhaustive == enumerated.generate_exhaustive(_key=key)
+
     def test_generate_exhaustive_takes_a_key(self):
         param = sequence_param()
         rows = param._generate_rows(0, exhaustive=True, key=KEY)
@@ -732,6 +762,11 @@ class TestDirectCalls:
         param.generate_vectors(0, mode="random_only")
         Parameter(TestArg("ch", rng_type=Series([1, 2])), *three_args()).generate_vectors(0)
         sequence_param(per_sequence_samples=True).generate_vectors(0)
+        # An exhaustive call without sequence arguments fails before drawing the key
+        with pytest.raises(ValueError, match="No sequence arguments found"):
+            param.generate_exhaustive()
+        with pytest.raises(ValueError, match="No sequence arguments found"):
+            param._generate_rows(0, exhaustive=True)
 
         assert RNG.generator().getstate() == state
 

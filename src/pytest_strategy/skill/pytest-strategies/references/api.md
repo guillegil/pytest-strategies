@@ -300,7 +300,11 @@ RNG.wfloat(ranges, predicate=None)
   level, a fixture's setup and each phase of a test, that generator follows the
   seed on a stream of its own: a test body's `RNG.integer()` is the same alone, in
   the suite and under xdist, and an `RNG.seed()` call changes only the rest of its
-  stream. Draws when a `conftest.py` is imported do not follow the seed.
+  stream. Draws when a `conftest.py` is imported do not follow the seed, and a
+  helper module that test modules or strategy files import draws on the stream of
+  the first module that imports it, shifting that module's draws, so its values
+  change when one file runs alone: draw in a fixture, the context hook or a
+  strategies file instead.
 - The plugin never calls `random.seed()`. Plain `random` calls (in factories,
   strategies files, conftest or test bodies) are not reproduced by `--rng-seed`.
   To seed plain `random` from the run's seed, do it yourself, for example per test

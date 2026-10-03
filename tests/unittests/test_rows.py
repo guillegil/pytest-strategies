@@ -34,11 +34,6 @@ from pytest_strategy.parameters import (
 )
 
 
-@pytest.fixture(autouse=True)
-def _seed():
-    RNG.seed(1234)
-
-
 class Color(enum.IntEnum):
     RED = 1
     BLUE = 2

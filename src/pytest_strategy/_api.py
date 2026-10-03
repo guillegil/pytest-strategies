@@ -110,7 +110,9 @@ def export_strategies(*, format: str = "json") -> str:
     ``--nsamples`` value, ``"auto"``, or 10 without the option or outside a
     session. The context hook runs only for a factory that declares ``ctx``.
     Each call draws from a random stream of its own, keyed by the run's seed, the
-    strategy's name and its folder relative to the rootdir.
+    strategy's name and the folder of its factory's file: relative to the rootdir
+    in a session, absolute outside one, and ``""`` when the factory's code has no
+    file (``exec``'d code, a notebook cell).
 
     Args:
         format: Export format (currently only "json" is supported), keyword-only
@@ -134,9 +136,12 @@ def export_strategies(*, format: str = "json") -> str:
     strategies_data = {}
     for name in registry.names():
         factory = registry.registrations(name)[-1].factory
-        # The factory's folder, as its file system spells it ("" when unknown)
+        # The factory's folder, as its file system spells it; "" when its code has no
+        # file ("<string>" for exec'd code), which would otherwise resolve to the cwd
         source = factory_source(factory)[0]
-        folder = path_part(os.path.dirname(source), rootpath) if source else ""
+        folder = ""
+        if source is not None and os.path.isfile(source):
+            folder = path_part(os.path.dirname(source), rootpath)
         stream = StreamKey.root(seed_part(runtime.run_seed()), "export", name, folder)
         try:
             # The session's options for this strategy, the instance collection uses,

@@ -4,8 +4,8 @@ keyword-only for type checkers too, StrategyOptions is typed as frozen, a
 Vector's fields type-check by name, vectors given by name type-check next to
 tuples while the vector mappings are read-only, constraints type-check by name
 too, and can be turned off per generation call, the stash keys of the per-test
-metadata are typed with VectorInfo, and Parameter(ids=...) takes a format or a
-function of a VectorInfo.
+metadata are typed with VectorInfo, Parameter(ids=...) takes a format or a
+function of a VectorInfo, and RNG.refresh_seed() takes a str or an int key.
 
 CI also type-checks this file with ``mypy --strict``: ``assert_type`` fails the
 check if a decorator loses the type (a call on ``Callable[..., Any]`` returns
@@ -21,6 +21,7 @@ from typing import Any, Literal, assert_type
 import pytest
 
 from pytest_strategy import (
+    RNG,
     VECTOR_KEY,
     VECTORS_KEY,
     Parameter,
@@ -267,3 +268,12 @@ def test_ids_type_check() -> None:
         Parameter(TestArg("addr", value=4), ids="foo")  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         Parameter(TestArg("addr", value=4), ids=42)  # type: ignore[arg-type]
+
+
+def test_refresh_seed_keys_type_check() -> None:
+    """A key is a str or an int (each names a stream of its own), or None."""
+    RNG.refresh_seed()
+    RNG.refresh_seed("x")
+    RNG.refresh_seed(3)
+    RNG.refresh_seed(key=3)
+    RNG.refresh_seed(None)

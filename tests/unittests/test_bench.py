@@ -4,8 +4,9 @@ Tests for the benchmark script, benchmarks/bench.py.
 CI runs the script as an informational step that never fails the job, so these
 tests keep it working: its cases generate rows on this version, its rejection
 sweep rejects the share its labels say, it prints and writes every measurement,
-and its memory measurement collects a project in a fresh interpreter. The timings
-themselves are not checked here: they depend on the machine.
+and its memory measurement collects a project in a fresh interpreter and reads the
+peak RSS in KiB on every Unix system. The timings themselves are not checked here:
+they depend on the machine.
 """
 
 import functools
@@ -14,6 +15,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -123,6 +125,26 @@ def test_collect_times_a_project_in_a_new_interpreter(bench):
     assert result["rows"] == 20
     assert result["seconds"] > 0
     assert result["peak_rss_mib"] > 0
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="peak RSS is read on Linux and other Unix")
+@pytest.mark.parametrize(("platform", "kib"), [("darwin", 2048), ("freebsd14", 2097152)])
+def test_without_proc_the_peak_comes_from_ru_maxrss(bench, monkeypatch, platform, kib):
+    """ru_maxrss is in bytes on macOS and in KiB elsewhere; the script reports KiB."""
+    import resource
+
+    namespace = {}
+    exec(bench._MEASURE.split("\nstart = ")[0], namespace)
+
+    def no_proc(*args, **kwargs):
+        raise OSError("no /proc")
+
+    namespace["open"] = no_proc
+    namespace["sys"] = SimpleNamespace(platform=platform)
+    usage = SimpleNamespace(ru_maxrss=2 * 1024 * 1024)
+    monkeypatch.setattr(resource, "getrusage", lambda who: usage)
+
+    assert namespace["peak_kib"]() == kib
 
 
 class TestContinuousIntegration:

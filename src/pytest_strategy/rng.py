@@ -174,7 +174,7 @@ class RNG:
         return RNG._generator
 
     @staticmethod
-    def refresh_seed(key: str | None = None) -> None:
+    def refresh_seed(key: str | int | None = None) -> None:
         """Restart the generator from the current seed.
 
         Args:

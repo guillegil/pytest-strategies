@@ -1807,6 +1807,9 @@ class Parameter:
         if not exhaustive and n == 0:
             # No random rows: the direct key's bits are not drawn either
             return rows
+        if exhaustive:
+            # Before the direct key's bits are drawn: a call that fails draws nothing
+            self._check_exhaustive()
         if key is None:
             key = _direct_key()
         if exhaustive:
@@ -2061,6 +2064,17 @@ class Parameter:
             if a.rng_type and isinstance(a.rng_type, SequenceLike)
         ]
 
+    def _check_exhaustive(self) -> None:
+        """
+        Raise the error of an exhaustive call on a Parameter without Series or
+        RNGSequence args.
+
+        Raises:
+            ValueError: If no sequence arguments are present
+        """
+        if not self._sequence_indices():
+            raise ValueError("No sequence arguments found for exhaustive generation")
+
     def _per_sequence_rows(
         self,
         n: int,
@@ -2215,6 +2229,8 @@ class Parameter:
         # An empty skip_if_empty sequence has no combinations to enumerate
         if self.skip_reason is not None:
             return []
+        # Before the direct key's bits are drawn: a call that fails draws nothing
+        self._check_exhaustive()
         key = _key if _key is not None else _direct_key()
         return [row.values for row in self._exhaustive_rows(constraints, key, _stats)]
 
@@ -2241,7 +2257,8 @@ class Parameter:
                 combinations left out
 
         Raises:
-            ValueError: If no sequence arguments are present
+            ValueError: If no sequence arguments are present (callers that draw
+                the direct key check it first, with ``_check_exhaustive()``)
             ValueError: If a sequence value fails its argument's validator
             ValueError: If the vector constraints reject every combination
         """
@@ -2255,7 +2272,7 @@ class Parameter:
                 orders.append(_auto_order_from(key.child("order", arg.name), arg.rng_type))
 
         if not orders:
-            raise ValueError("No sequence arguments found for exhaustive generation")
+            self._check_exhaustive()
 
         random_indices = [i for i in range(len(args)) if i not in sequence_indices]
         # Redrawing only helps when there are non-sequence positions to change

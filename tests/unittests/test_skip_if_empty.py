@@ -21,11 +21,6 @@ from pytest_strategy import (
 REASON = "no Esm peripheral in this testbench config"
 
 
-@pytest.fixture(autouse=True)
-def _seed():
-    RNG.seed(1234)
-
-
 def channel_param(channels, seq_type=RNGSequence, **kwargs):
     return Parameter(
         TestArg("channel", rng_type=seq_type(channels, skip_if_empty=REASON)),

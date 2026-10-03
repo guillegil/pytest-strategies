@@ -904,7 +904,7 @@ a `StreamKey` under the run seed S (`runtime.run_seed()`, never the mutable
 | `root(S, "fixture", scope, name, param_index, where, qualname)` | a fixture's setup (a `pytest_fixture_setup` wrapper); `scope` is the node ID of the node it is set up for, `""` for the session; `where` and `qualname` are the fixture function's file and qualified name (`plugin._fixture_definition()`) |
 | `root(S, "body", nodeid, phase)` | one phase of a test, `setup`, `call` or `teardown` (wrappers around `pytest_runtest_setup`, `_call` and `_teardown`) |
 | `root(RNG.get_seed(), "user", key)` | `RNG.refresh_seed(key=...)` |
-| `root(S, "export", name, folder)` | a factory call from `export_strategies()`; `folder` is the factory file's folder (`""` when it has none) |
+| `root(S, "export", name, folder)` | a factory call from `export_strategies()`; `folder` is the factory file's folder relative to the rootdir (absolute outside a session; `""` when the factory's code has no file, such as `exec`'d code) |
 | `root(RNG.get_seed(), "direct", n)` | `generate_vectors()` and the other generators called directly |
 
 `path`, `folder` and a fixture's `where` are relative to the rootdir in posix
@@ -979,8 +979,11 @@ generator kept from the factory draws from `RNG._ambient`: its values depend on
 what was drawn before (other rows, other tests of the module), not only on the
 row. `build_parametrization` compares `RNG._ambient._position()` before and
 after `_generate_rows()`: the pending key while nothing has used the current
-stream (the test module's, usually), which costs nothing, or else the
-generator's state (about 20 µs per test). When it changed, it emits one
+stream, which costs nothing, or else the generator's state (about 20 µs per
+test). For a test function the current stream is its module's, so the check is
+free unless the module drew when it was imported; pytest collects a class in a
+collect report of its own, outside the module's stream, so a test method always
+reads the state. When it changed, it emits one
 `PytestStrategiesWarning` inside `_attributed_warnings`, so it is prefixed with
 `Strategy '<name>' (<test>): ` and points at the test. It is a warning, not an
 error, because the values still repeat for the same seed, tests and options;
@@ -1012,7 +1015,11 @@ and a module collected alone gets the values of the full run. Draws when a
 (the rootdir's and those of the folders on the command line) before
 `pytest_configure` seeds, and a node-ID rerun makes another conftest an initial
 one, so a key would give the full run and the rerun different values. The
-others are imported during collection, outside any stream. A strategy file
+others are imported during collection, outside any stream. Any other module (a
+helper that test modules or strategy files import) runs on the stream of the
+first module that imports it, and shifts that module's later draws, so both
+depend on what was collected before; the README says to move such draws into a
+fixture, the context hook or a strategy file. A strategy file
 that a `conftest.py` imports at its top is reused as it is, so its import-time
 draws do not follow the seed either; the README says to import it inside a
 fixture or hook. When a session ends (including an in-process `pytester` run),
@@ -1146,7 +1153,7 @@ the size guard allows. Use fewer sequence values, or raise the limit with
 - Pass the same `--rng-seed` value (a run's seed is shown in the report header, and after a failed run); calling `RNG.seed()` inside a test body does not change its parametrized values
 - Use the same rootdir and a pytest-strategies version that generates the same values (2.0.0 and 3.0.0 do, except values strategy files draw when they are imported; 1.x and 4.0.0 do not)
 - Draw from the RNG types or `RNG.generator()` in factories: plain `random` calls are not seeded by the plugin
-- Draws made when a `conftest.py` is imported are not covered by the seed; move them into the context hook, a fixture or a strategy file (see [Reproducibility](#reproducibility))
+- Draws made when a `conftest.py` is imported are not covered by the seed, and those of a helper module that test modules import depend on which module imports it first; move them into the context hook, a fixture or a strategy file (see [Reproducibility](#reproducibility))
 
 ## Future Enhancements
 

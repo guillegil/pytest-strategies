@@ -19,11 +19,6 @@ from pytest_strategy import (
 )
 
 
-@pytest.fixture(autouse=True)
-def _seed():
-    RNG.seed(1234)
-
-
 def device_width(seq_type, **kwargs):
     return Parameter(
         TestArg("device", rng_type=seq_type(["devA", "devB"])),

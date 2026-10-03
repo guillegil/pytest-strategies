@@ -235,7 +235,9 @@ def peak_kib():
     except OSError:
         pass
     import resource
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    # In bytes on macOS, in KiB on Linux and the BSDs
+    return peak // 1024 if sys.platform == "darwin" else peak
 
 
 start = time.perf_counter()

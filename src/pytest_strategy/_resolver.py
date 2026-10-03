@@ -569,8 +569,9 @@ def build_parametrization(
     # own, so the ambient generator changes while the rows are generated only when
     # something else draws from it: a constraint that calls RNG.*, or an RNG type
     # that draws from a generator kept from the factory, whose rng is this object.
-    # Its position is the pending key of a stream nothing has drawn from yet (the
-    # test module's, usually), which costs nothing to read, or else its state.
+    # Its position is the pending key of a stream nothing has drawn from yet, which
+    # costs nothing to read, or else its state. For a test function that stream is
+    # its module's; a class is collected outside it, so a test method reads the state.
     ambient = RNG._ambient
     position = ambient._position()
     try:

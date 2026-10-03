@@ -81,11 +81,6 @@ class _Recorder:
         return self._result(info) if callable(self._result) else self._result
 
 
-@pytest.fixture(autouse=True)
-def _seed():
-    RNG.seed(1234)
-
-
 class TestTheOption:
     def test_the_default_is_none(self):
         assert _burst().ids is None

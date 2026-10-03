@@ -515,6 +515,57 @@ class TestBodyAndFixtureStreams:
         assert distributed == suite
 
 
+# A conftest.py below the initial ones is imported while its folder is collected,
+# outside every stream, so its RNG.seed(5) stays for the rest of the session: the
+# fixture and test-phase streams are keyed by the run's seed, not RNG.get_seed()
+
+RESEEDING_CONFTEST = """
+    import pytest
+
+    from pytest_strategy import RNG
+    from record import record
+
+    RNG.seed(5)
+
+    @pytest.fixture
+    def sub():
+        value = RNG.integer(0, 10**9)
+        record("sub", value)
+        return value
+"""
+
+RESEEDING_TESTS = """
+    from pytest_strategy import RNG
+    from record import record
+
+    def test_sub(sub):
+        record("test_sub", RNG.integer(0, 10**9))
+        record("seed", RNG.get_seed())
+"""
+
+
+def test_a_conftest_that_reseeds_leaves_the_fixture_and_body_streams(pytester):
+    pytester.makeini("[pytest]\npythonpath = .\n")
+    pytester.makepyfile(record=RECORD)
+    sub = pytester.mkdir("tests") / "sub"
+    sub.mkdir()
+    (sub / "conftest.py").write_text(dedent(RESEEDING_CONFTEST))
+    (sub / "test_sub.py").write_text(dedent(RESEEDING_TESTS))
+
+    # The whole project, so that tests/sub/conftest.py is not an initial conftest
+    records = run_and_read(pytester, passed=1)
+
+    test = "tests/sub/test_sub.py::test_sub"
+    assert records == {
+        "sub": randint(
+            StreamKey.root(SEED, "fixture", test, "sub", 0, "tests/sub/conftest.py", "sub")
+        ),
+        "test_sub": randint(StreamKey.root(SEED, "body", test, "call")),
+        # The conftest's seed is what RNG.get_seed() returns in the test
+        "seed": 5,
+    }
+
+
 # Fixtures that pytest sets up for the same scope node under one name: an override
 # that requests the fixture it overrides, and session fixtures of one name in two
 # sibling folders' conftest.py files
@@ -637,19 +688,31 @@ EXPORT_STRATEGIES = """
 
     from pytest_strategy import Parameter, TestArg, register
 
+    OUT = pathlib.Path(__file__).parent / "export_draws.jsonl"
+
+    def record(name, rng):
+        with open(OUT, "a") as f:
+            f.write(json.dumps([name, rng.random()]) + "\\n")
+        return Parameter(TestArg("e", value=1), nsamples=1)
+
     @register("ps_export")
     def exported(rng):
-        out = pathlib.Path(__file__).parent / "export_draws.jsonl"
-        with open(out, "a") as f:
-            f.write(json.dumps(rng.random()) + "\\n")
-        return Parameter(TestArg("e", value=1), nsamples=1)
+        return record("ps_export", rng)
+
+    # A factory whose code has no file: its co_filename is "<string>"
+    namespace = {"record": record}
+    exec("def made(rng):\\n    return record('ps_exec', rng)\\n", namespace)
+    register("ps_exec")(namespace["made"])
 """
 
 EXPORT_TESTS = """
-    from pytest_strategy import export_strategies
+    from pytest_strategy import RNG, export_strategies
 
-    def test_export():
+    def test_export(monkeypatch):
         export_strategies()
+        # Neither the seed RNG.seed() sets nor the working directory changes the streams
+        RNG.seed(5)
+        monkeypatch.chdir("tests")
         export_strategies()
 """
 
@@ -664,8 +727,16 @@ def test_export_calls_draw_from_the_strategys_folder_stream(pytester):
 
     result.assert_outcomes(passed=1)
     lines = (pytester.path / "tests" / "a" / "export_draws.jsonl").read_text().splitlines()
-    key = StreamKey.root(SEED, "export", "ps_export", "tests/a")
-    assert [json.loads(line) for line in lines] == [random.Random(key.seed_int()).random()] * 2
+
+    def draw(name, folder):
+        key = StreamKey.root(SEED, "export", name, folder)
+        return [name, random.Random(key.seed_int()).random()]
+
+    # The folder of a factory without a file is "", not the working directory
+    assert [json.loads(line) for line in lines] == [
+        draw("ps_export", "tests/a"),
+        draw("ps_exec", ""),
+    ] * 2
 
 
 # ---------------------------------------------------------------------------

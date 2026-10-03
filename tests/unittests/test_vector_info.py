@@ -16,7 +16,6 @@ import pytest
 
 import pytest_strategy
 from pytest_strategy import (
-    RNG,
     VECTOR_KEY,
     VECTORS_KEY,
     Parameter,
@@ -124,11 +123,6 @@ def _build(param, *argnames, name="strat", **options):
 def _infos(param, *argnames, **options):
     """Return the VectorInfo the resolver gives each row of ``param``."""
     return _build(param, *argnames, **options).infos
-
-
-@pytest.fixture(autouse=True)
-def _seed():
-    RNG.seed(1234)
 
 
 class TestEncode:
