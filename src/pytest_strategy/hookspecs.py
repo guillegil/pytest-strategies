@@ -54,23 +54,28 @@ def pytest_strategies_context(config: pytest.Config) -> Any:
     runs around the others, and can change their answer.
 
     A factory registered in one folder and used by a test in another gets the
-    context of the test's folder.
+    context of the test's folder. Tests and fixtures get the same object: the
+    ``strategies_ctx`` session fixture gives the context of the tests that use
+    it (which must share one), and ``pytest_strategy.get_context(config, path)``
+    the context of a folder, for the fixtures of that folder's ``conftest.py``.
 
     Each implementation is called at most once per session, the first time a
-    folder that needs it asks, and only for a factory with a ``ctx`` parameter:
-    the folders that end at the same implementation share its result. Factories
-    without a ``ctx`` parameter never trigger it. When nothing answers, ``ctx``
-    keeps its default (or a value bound with ``functools.partial``), and is
-    ``None`` without one. Random draws in an implementation come from a stream
-    derived from the seed, started anew for each implementation, and do not
-    change any test's vectors. Under pytest-xdist every worker calls the
-    implementations it needs, and the results must be the same in all of them.
+    folder that needs it asks, and only for a factory with a ``ctx`` parameter,
+    ``strategies_ctx`` or ``get_context()``: the folders that end at the same
+    implementation share its result. Factories without a ``ctx`` parameter never
+    trigger it. When nothing answers, ``ctx`` keeps its default (or a value bound
+    with ``functools.partial``), and is ``None`` without one. Random draws in an
+    implementation come from a stream derived from the seed, started anew for
+    each implementation, and do not change any test's vectors. Under
+    pytest-xdist every worker calls the implementations it needs, and the results
+    must be the same in all of them.
 
     An exception raised by an implementation fails the collection of each module
     whose folder asks it before any other implementation answers, and that uses
     a factory with ``ctx``, with a message naming the strategy; ``pytest.fail()``
     is reported as it is, and ``pytest.skip(..., allow_module_level=True)``
-    skips those modules.
+    skips those modules. ``strategies_ctx`` and ``get_context()`` raise it again
+    as it is, so a skip there skips the tests that use them.
 
     Args:
         config: The pytest config object.

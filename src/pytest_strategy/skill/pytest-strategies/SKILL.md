@@ -248,8 +248,14 @@ def esm_rw(nsamples, ctx):
   testbench than the rootdir's gives the rest. A factory from another folder gets
   the test's folder's context.
 - Each implementation runs at most once per session, the first time a factory
-  with `ctx` needs it. Factories without `ctx` never trigger it. With no hook
-  result, `ctx` keeps its default, or is `None`.
+  with `ctx` (or `strategies_ctx` or `get_context()`, below) needs it. Factories
+  without `ctx` never trigger it. With no hook result, `ctx` keeps its default,
+  or is `None`.
+- Fixtures get the same object: `def tb(strategies_ctx)` (a session fixture of
+  the plugin) for the tests of one context, or in a folder with its own hook
+  `get_context(request.config, __file__)` (from `pytest_strategy`) in that
+  folder's `conftest.py`. `strategies_ctx` fails each test that uses it when
+  those tests are in folders with different contexts.
 - Under pytest-xdist every worker calls it, so it must return the same data in
   each.
 - `skip_if_empty="reason"` (keyword-only) turns an empty `Series`/`RNGSequence`
@@ -291,9 +297,9 @@ To reproduce a failure:
 
 - **Fixtures cannot reach factories.** Factories run at collection. Use the
   `ctx` hook for configuration, and keep runtime objects (connections, devices) as
-  fixtures of the test. The hook's result reaches factories only: a fixture that
-  needs the same configuration reads it again, for example from
-  `pytestconfig.getoption(...)` (share one loader function between the two).
+  fixtures of the test. A fixture that needs the same configuration takes the
+  hook's object from `strategies_ctx`, or from `get_context(request.config,
+  __file__)` in a folder with its own hook, instead of parsing it again.
 - **Plain `random` is not seeded by the plugin.** Since 3.0.0 the plugin never
   calls `random.seed()`. `random.randint()` in a factory, at the top of a
   strategies file or in a test body is not reproduced by `--rng-seed`. Draw

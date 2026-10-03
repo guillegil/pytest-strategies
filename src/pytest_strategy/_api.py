@@ -4,10 +4,12 @@ The public decorators, ``register`` and ``strategy``, and the ``Strategy`` facad
 ``@register("name")`` records a factory in the registry. ``@strategy(...)`` only
 marks a test: the plugin resolves the strategy when pytest generates the test's
 parametrization (``pytest_generate_tests``), with the session's options at hand.
+``export_strategies()`` and ``get_context()`` read the running session.
 """
 
 from __future__ import annotations
 
+import os
 import warnings
 from collections.abc import Callable
 from typing import Any, TypeVar
@@ -183,6 +185,48 @@ def export_strategies(*, format: str = "json") -> str:
             strategies_data[name] = {"error": f"Failed to inspect strategy: {str(e)}"}
 
     return json.dumps(strategies_data, indent=2)
+
+
+def get_context(config: pytest.Config, path: str | os.PathLike[str]) -> Any:
+    """
+    Return the testbench context of the folder of ``path`` (a file, or a folder):
+    the object a test there gets, the one its strategy factories receive as ``ctx``.
+
+    It is computed from the ``pytest_strategies_context`` implementations that folder
+    sees, as for a test there, and kept for the session: every plugin's, and those of
+    the loaded ``conftest.py`` files in the folder and above it. A folder whose
+    ``conftest.py`` pytest has not loaded (no test there was collected) gets the
+    context of the nearest loaded one above it. A relative path is taken from the
+    current directory. Typical use, in a folder's ``conftest.py``::
+
+        @pytest.fixture(scope="session")
+        def tb(request):
+            return Testbench(get_context(request.config, __file__))
+
+    Called while ``conftest.py`` files are imported, or in ``pytest_configure``, it
+    sees only the ones loaded so far: call it from fixtures or hooks.
+
+    Args:
+        config: The running session's config (``request.config`` in a fixture, or
+            a hook's ``config``)
+        path: A file or a folder, such as ``__file__``
+
+    Returns:
+        The context, or None when no implementation answers for the folder
+
+    Raises:
+        RuntimeError: When no pytest-strategies session runs with ``config``
+        Whatever the implementation that answered for the folder raised (an
+        exception, ``pytest.skip``, ``pytest.fail``), as it is, again on every call
+    """
+    state = runtime.session_of(config)
+    if state is None:
+        raise RuntimeError(
+            "get_context() was given the config of no running pytest-strategies session: "
+            "pass the config of the running session (request.config in a fixture, or a "
+            "hook's config), with the pytest-strategies plugin loaded"
+        )
+    return state.path_context(path)()
 
 
 class Strategy:

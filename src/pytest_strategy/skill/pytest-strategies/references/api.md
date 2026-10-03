@@ -31,6 +31,7 @@ from pytest_strategy import (
     StrategyOptions,                        # what a factory receives as options
     Vector,                                 # the class of every generated row
     VectorInfo, VECTOR_KEY, VECTORS_KEY,    # a test item's row: item.stash[VECTOR_KEY]
+    get_context,                            # a folder's pytest_strategies_context object
     RNG, RNGType,
     RNGInteger, RNGFloat, RNGBoolean, RNGChoice, RNGEnum, RNGString,
     RNGWeightedInteger, RNGWeightedFloat,
@@ -437,9 +438,9 @@ def pytest_strategies_context(config):
   `wrapper=True` implementation can change the answer. A factory registered in
   another folder gets the test's folder's context.
 - Each implementation is called at most once per session, the first time a
-  factory with a `ctx` parameter needs it; the result (or the exception) is reused
-  for every later factory, and folders that end at the same implementation share
-  one object.
+  factory with a `ctx` parameter (or `strategies_ctx` or `get_context()`) needs
+  it; the result (or the exception) is reused for every later factory, and
+  folders that end at the same implementation share one object.
 - When no implementation returns a value, `ctx` keeps its default (or a value bound
   with `functools.partial`), else `None`.
 - If an implementation raises, each test that uses a factory with `ctx` in a
@@ -457,7 +458,40 @@ def pytest_strategies_context(config):
 - Under pytest-xdist every worker calls it; it must return the same configuration in
   each, or xdist reports "Different tests were collected".
 - Use it for data the rows depend on; the live objects (a testbench connection) stay
-  fixtures.
+  fixtures, built on the same object:
+
+```python
+# conftest.py
+import pytest
+
+@pytest.fixture(scope="session")
+def tb(strategies_ctx):                  # the object the factories received
+    return Testbench(strategies_ctx)
+
+# tests/tb_a/conftest.py, a folder with its own pytest_strategies_context
+from pytest_strategy import get_context
+
+@pytest.fixture(scope="session")
+def tb_a(request):
+    return Testbench(get_context(request.config, __file__))
+```
+
+- `strategies_ctx` is a session-scoped fixture of the plugin: the object the
+  factories of the tests that use it received, computed if no factory needed it
+  yet. Those tests must share one context. When they are in folders whose contexts
+  come from different implementations, each fails with `strategies_ctx is a session
+  fixture, but the tests that use it have different contexts (conftest.py: ...;
+  tests/tb_a/conftest.py: ...). In a folder with its own pytest_strategies_context,
+  use pytest_strategy.get_context(request.config, __file__) in that folder's
+  conftest.py fixtures.` Deselecting one folder's tests also makes the run pass.
+  A `request.getfixturevalue("strategies_ctx")` counts every test of the run.
+- `get_context(config, path)` returns the context of the folder of `path` (a file
+  or a folder), the object a test there gets. A folder whose `conftest.py` pytest
+  did not load (no test there collected) gets the nearest loaded one's above. Call
+  it from fixtures or hooks; in `pytest_configure` it sees only the `conftest.py`
+  files loaded so far. A config of no running session raises `RuntimeError`.
+- Both raise the implementation's exception as it is: a `pytest.skip` in the hook
+  skips the tests that use them.
 
 ## 13. Dataclass mode
 
@@ -540,6 +574,7 @@ defined at module level. IDs look like `x=1,y=2`.
 | `got empty parameter set` skip | `--vector-name`/`--vector-index` selected a vector this strategy lacks, or `--vector-mode=directed_only`/`test` ran a strategy with no directed/test vectors. |
 | `RNGValueError` when building a type | Bad RNG arguments (section 6). |
 | `Strategy factory 'x' (...) has a parameter 'n', which the plugin does not provide` | Factories receive `nsamples`, `ctx`, `rng` and `options` by name. Rename the parameter, or give it a default. |
+| `strategies_ctx is a session fixture, but the tests that use it have different contexts (...)` | The tests that use `strategies_ctx` (directly or through a fixture such as `tb`) are in folders whose `pytest_strategies_context` answers come from different implementations, named in the message. In a folder with its own implementation, build its fixtures on `get_context(request.config, __file__)`, or run the folders separately. |
 | `has a parameter 'config', a name the plugin reserves` | `base`, `config` and `request` are reserved. Rename the parameter; pass settings through `ctx`. |
 
 ## 16. Deprecations and upgrading from 2.x

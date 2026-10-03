@@ -82,8 +82,10 @@ pytest test_example.py --rng-seed 42
 src/pytest_strategy/
 ├── __init__.py          # Package initialization and public names
 ├── __main__.py          # python -m pytest_strategy (the pytest-strategies command)
-├── plugin.py            # Pytest plugin hooks, CLI options, strategy file loading
-├── _api.py              # register(), strategy(), export_strategies() and the Strategy facade
+├── plugin.py            # Pytest plugin hooks, CLI options, strategy file loading,
+│                        # the strategies_ctx fixture
+├── _api.py              # register(), strategy(), export_strategies(), get_context() and
+│                        # the Strategy facade
 ├── _registry.py         # The folder-scoped strategy registry
 ├── _resolver.py         # Turns a strategy and a test into a parametrization
 ├── _cli.py              # pytest-strategies skill install
@@ -739,6 +741,23 @@ implements the hook, `FolderContext.why_none()` adds where. Each (nested)
 session and each pytest-xdist worker calls each implementation at most once.
 `export_strategies()` passes the rootdir's context. See the README for an
 example.
+
+Tests and fixtures read the same objects (D8). `strategies_ctx`, a
+session-scoped fixture defined in `plugin.py`, takes its consumers from
+`session.items`: the items whose `fixturenames` contain it, or every item when
+the requesting item (`request._pyfuncitem`, private) does not, because it asked
+through `request.getfixturevalue()`. It computes each consumer file's
+`SessionState.test_context(item).answer()`; when their labels differ it fails
+with `pytest.fail(..., pytrace=False)`, which pytest caches for the session, so
+each consumer fails with the message (`plugin._ctx_scopes_message()`, labels
+sorted, each with its first node ID). Otherwise it returns the requesting
+item's `Answer.get()`, the cached object or the implementation's own exception.
+`pytest_strategy.get_context(config, path)` (`_api.py`) finds the session of
+`config` with `runtime.session_of()` (the innermost one, so an outer session's
+config still works while an in-process `pytester` session runs; `RuntimeError`
+when none) and returns `SessionState.path_context(path)()`, the path caller
+above. Both call only the implementations of the folders they ask for, as
+factories do.
 
 ---
 

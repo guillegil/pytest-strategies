@@ -474,7 +474,7 @@ def esm_rw(nsamples, ctx):
 Tests use the strategy as usual, with `@strategy("esm_rw")`. With two Esm channels in the configuration they run 10 writes per channel; with none they are skipped with the reason.
 
 - Each test gets the context of its own folder. The plugin calls the implementations it can see from there in this order: `tryfirst` ones, then the `conftest.py` files from the test's folder upward, then the other plugins (last registered first), then `trylast` ones. The first that returns something other than `None` answers: the nearest `conftest.py` wins, one that returns `None` defers to the folder above, and a plugin answers only where no `conftest.py` does. A `wrapper=True` implementation can change the answer. A factory registered in another folder gets the context of the test's folder.
-- Each implementation is called at most once per session, the first time a factory with a `ctx` parameter needs it, and its result is reused: tests in folders that end at the same implementation share one object. Factories without `ctx` are called as before and never trigger it.
+- Each implementation is called at most once per session, the first time a factory with a `ctx` parameter (or `strategies_ctx` or `get_context()`, below) needs it, and its result is reused: tests in folders that end at the same implementation share one object. Factories without `ctx` are called as before and never trigger it.
 - When no implementation returns a value, a `ctx` parameter keeps its default (or a value bound with `functools.partial`), and is `None` without one.
 - If an implementation raises, each test module that uses a factory with `ctx` in a folder that consults it fails collection with `Strategy factory '<name>' has a 'ctx' parameter, but the pytest_strategies_context hook raised <error>`. `pytest.fail()` in the hook is reported as it is. The hook can also call `pytest.skip(..., allow_module_level=True)` to skip those modules.
 - When a factory fails with `ctx` set to `None` while a `conftest.py` in another folder implements the hook, the error adds which folders implement it, so that the hook can be moved to a common parent `conftest.py`.
@@ -482,7 +482,35 @@ Tests use the strategy as usual, with `@strategy("esm_rw")`. With two Esm channe
 - Under pytest-xdist every worker calls the hook, so it must return the same configuration in each, or the workers collect different tests.
 - `export_strategies()` passes the context of the rootdir.
 
-Your testbench fixture does not change: the hook only has to describe the configuration the vectors depend on.
+The hook only has to describe the configuration the vectors depend on. Your testbench fixture can build on the same object instead of parsing the configuration a second time:
+
+```python
+# conftest.py
+import pytest
+
+from testbench import Testbench  # your project's code
+
+@pytest.fixture(scope="session")
+def tb(strategies_ctx):
+    return Testbench(strategies_ctx)
+```
+
+```python
+# tests/tb_a/conftest.py: a folder with its own pytest_strategies_context
+import pytest
+
+from pytest_strategy import get_context
+from testbench import Testbench  # your project's code
+
+@pytest.fixture(scope="session")
+def tb_a(request):
+    return Testbench(get_context(request.config, __file__))
+```
+
+- `strategies_ctx` is a session fixture of the plugin. It returns the object the factories of the tests that use it received, and computes it when no factory needed it yet.
+- A session fixture has one value, so the tests that use it must share one context. When they are in folders whose contexts come from different implementations, each of them fails with `strategies_ctx is a session fixture, but the tests that use it have different contexts (conftest.py: ...; tests/tb_a/conftest.py: ...)`, which names each context's first test. Deselecting one folder's tests makes the run pass; a folder with its own implementation uses `get_context()` in its `conftest.py` instead. A test that asks for it through `request.getfixturevalue()` counts every test of the run.
+- `pytest_strategy.get_context(config, path)` returns the context of the folder of `path` (a file or a folder): the object a test there gets. A folder whose `conftest.py` pytest has not loaded, because no test there was collected, gets the context of the nearest loaded `conftest.py` above it. Call it from fixtures or hooks: in `pytest_configure`, or while `conftest.py` files are imported, it sees only those loaded so far. It raises `RuntimeError` for a config that no running session uses.
+- Both raise what the implementation raised, as it is: a `pytest.skip` in the hook skips the tests that use them.
 
 ## 🔌 Fixture Integration
 

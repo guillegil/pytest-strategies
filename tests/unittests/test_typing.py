@@ -5,7 +5,8 @@ Vector's fields type-check by name, vectors given by name type-check next to
 tuples while the vector mappings are read-only, constraints type-check by name
 too, and can be turned off per generation call, the stash keys of the per-test
 metadata are typed with VectorInfo, Parameter(ids=...) takes a format or a
-function of a VectorInfo, and RNG.refresh_seed() takes a str or an int key.
+function of a VectorInfo, RNG.refresh_seed() takes a str or an int key, and
+get_context() takes a config and a path.
 
 CI also type-checks this file with ``mypy --strict``: ``assert_type`` fails the
 check if a decorator loses the type (a call on ``Callable[..., Any]`` returns
@@ -16,6 +17,7 @@ fails it too. At runtime it only runs the code.
 
 import dataclasses
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any, Literal, assert_type
 
 import pytest
@@ -32,6 +34,7 @@ from pytest_strategy import (
     Vector,
     VectorInfo,
     export_strategies,
+    get_context,
     register,
     strategy,
 )
@@ -277,3 +280,11 @@ def test_refresh_seed_keys_type_check() -> None:
     RNG.refresh_seed(3)
     RNG.refresh_seed(key=3)
     RNG.refresh_seed(None)
+
+
+def test_get_context_takes_a_config_and_a_path(pytestconfig: pytest.Config) -> None:
+    """The ignore below is needed: mypy reports the line as an error, as Python does."""
+    assert_type(get_context(pytestconfig, __file__), Any)
+    assert_type(get_context(pytestconfig, Path(__file__)), Any)
+    with pytest.raises(TypeError):
+        get_context(pytestconfig)  # type: ignore[call-arg]

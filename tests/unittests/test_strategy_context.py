@@ -1,7 +1,8 @@
 """
 Unit tests for the ``ctx`` that factories get from the pytest_strategies_context
-hook: which implementations a folder sees, the order they are asked in, and the
-store that calls each one at most once per session.
+hook: which implementations a folder sees, the order they are asked in, the store
+that calls each one at most once per session, and ``get_context()``, which gives a
+folder's context to fixtures.
 
 The sessions here have a real plugin manager with the plugin's hook, and no pytest
 session: a plugin registered under a name that ends with ``conftest.py`` is that
@@ -14,7 +15,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from pytest_strategy import RNG, Parameter, RNGInteger, StrategyOptions, TestArg, hookspecs
+from pytest_strategy import (
+    RNG,
+    Parameter,
+    RNGInteger,
+    StrategyOptions,
+    TestArg,
+    get_context,
+    hookspecs,
+)
 from pytest_strategy._context import (
     NO_ANSWER,
     ContextStore,
@@ -25,6 +34,7 @@ from pytest_strategy._context import (
 from pytest_strategy._factory import FactoryInputs, call_factory
 from pytest_strategy._runtime import StrategyRuntime, runtime
 from pytest_strategy._streams import StreamKey
+from pytest_strategy.plugin import _ctx_scopes_message
 
 # The run seed of the sessions below
 SEED = 77
@@ -732,3 +742,119 @@ class TestSessions:
             runtime.pop()
 
         assert plugin.calls == 2
+
+
+class TestGetContext:
+    """get_context(config, path): a folder's context, for its conftest.py fixtures."""
+
+    def test_returns_the_object_a_factory_there_receives(self, session):
+        session.conftest(".", Plugin({"name": "root"}))
+        session.conftest("tests/a", Plugin({"name": "A"}))
+        context = runtime.path_context(session.rootpath / "tests/a/test_a.py")
+
+        received = _call(lambda ctx: ctx, context=context)
+
+        # The folder's conftest.py (__file__), the folder, and a file in it
+        assert get_context(session.config, session.rootpath / "tests/a/conftest.py") is received
+        assert get_context(session.config, str(session.rootpath / "tests/a")) is received
+        assert get_context(session.config, session.rootpath / "tests/a/test_x.py") is received
+        assert get_context(session.config, session.rootpath / "tests/b") == {"name": "root"}
+
+    def test_a_folder_gets_the_nearest_answer_above_it(self, session):
+        tests = session.conftest("tests", Plugin("tests"))
+        session.conftest("tests/a/deep", Plugin(None))
+
+        assert get_context(session.config, session.rootpath / "tests/a/deep") == "tests"
+        assert get_context(session.config, session.rootpath / "tests/a") == "tests"
+        assert get_context(session.config, session.rootpath) is None
+        assert tests.calls == 1
+
+    def test_the_implementation_s_exception_is_raised_as_it_is(self, session):
+        def broken(config):
+            raise LookupError("tb.yaml")
+
+        plugin = session.conftest(".", Plugin(fn=broken))
+
+        errors = []
+        for _ in range(2):
+            with pytest.raises(LookupError, match="tb.yaml") as excinfo:
+                get_context(session.config, session.rootpath)
+            errors.append(excinfo.value)
+            # The implementation's own frame, where it raised, ends the traceback
+            assert excinfo.traceback[-1].name == "broken"
+        assert errors[0] is errors[1]
+        assert plugin.calls == 1
+
+    def test_a_skip_is_raised_as_it_is(self, session):
+        def skip(config):
+            pytest.skip("no testbench")
+
+        session.conftest(".", Plugin(fn=skip))
+
+        with pytest.raises(pytest.skip.Exception, match="no testbench"):
+            get_context(session.config, session.rootpath)
+
+    def test_an_unknown_config_raises_runtime_error(self, session):
+        session.conftest(".", Plugin("bench"))
+        other = SimpleNamespace(pluginmanager=session.pluginmanager, rootpath=session.rootpath)
+
+        with pytest.raises(RuntimeError, match="config of no running pytest-strategies session"):
+            get_context(other, session.rootpath)
+        with pytest.raises(RuntimeError):
+            get_context(None, session.rootpath)
+
+    def test_the_config_of_a_session_that_ended_raises_runtime_error(self, tmp_path):
+        bench = Session(tmp_path)
+        bench.conftest(".", Plugin("bench"))
+        runtime.push(bench.config)
+        try:
+            assert get_context(bench.config, tmp_path) == "bench"
+        finally:
+            runtime.pop()
+
+        with pytest.raises(RuntimeError):
+            get_context(bench.config, tmp_path)
+
+    def test_an_outer_session_s_config_gets_the_outer_context_and_seed(self, tmp_path):
+        outer, inner = Session(tmp_path / "outer"), Session(tmp_path / "inner")
+        outer.conftest(".", Plugin(fn=lambda config: RNG.integer(0, 10**9)))
+        inner.conftest(".", Plugin("inner"))
+        runtime.push(outer.config).run_seed = SEED
+        try:
+            runtime.push(inner.config).run_seed = SEED + 1
+            try:
+                assert get_context(outer.config, outer.rootpath) == _ctx_draw()
+                assert get_context(inner.config, inner.rootpath) == "inner"
+            finally:
+                runtime.pop()
+        finally:
+            runtime.pop()
+
+    def test_it_is_public(self):
+        import pytest_strategy
+
+        assert "get_context" in pytest_strategy.__all__
+        assert pytest_strategy.get_context is get_context
+
+
+class TestStrategiesCtxMessage:
+    """The message of the strategies_ctx fixture whose tests span two contexts."""
+
+    def test_labels_sorted_with_each_one_s_first_test(self):
+        message = _ctx_scopes_message(
+            {
+                "none": dict.fromkeys(["tests/b/test_b.py::test_b"]),
+                "tests/tb_a/conftest.py": dict.fromkeys(
+                    ["tests/tb_a/test_a.py::test_1", "tests/tb_a/test_a.py::test_2", "t::t3"]
+                ),
+                "conftest.py": dict.fromkeys(["tests/test_x.py::test_x"]),
+            }
+        )
+
+        assert message == (
+            "strategies_ctx is a session fixture, but the tests that use it have different "
+            "contexts (conftest.py: tests/test_x.py::test_x; none: tests/b/test_b.py::test_b; "
+            "tests/tb_a/conftest.py: tests/tb_a/test_a.py::test_1 and 2 more). In a folder with "
+            "its own pytest_strategies_context, use pytest_strategy.get_context(request.config, "
+            "__file__) in that folder's conftest.py fixtures."
+        )

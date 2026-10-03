@@ -34,6 +34,7 @@ import pytest
 from _pytest.pathlib import ImportPathMismatchError, import_path
 from pytest import Config, Session
 
+from ._context import Answer
 from ._options import VectorMode, constraint_off_item, parse_constraint_off
 from ._registry import (
     STRATEGY_FILE_PATTERNS,
@@ -1745,6 +1746,73 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     for param, message in unfilled:
         if param not in provided:
             pytest.fail(f"In {metafunc.function.__name__}: {message}", pytrace=False)
+
+
+# The name of the plugin's fixture of the testbench context
+_CTX_FIXTURE = "strategies_ctx"
+
+
+@pytest.fixture(scope="session")
+def strategies_ctx(request: pytest.FixtureRequest) -> Any:
+    """
+    The testbench context of the tests that use this fixture: the object their
+    strategy factories receive as ``ctx`` from ``pytest_strategies_context``,
+    computed if no factory needed it yet, or None when nothing answers.
+
+    It is a session fixture, so a session-scoped ``tb`` fixture can build on it. A
+    session fixture has one value, so the tests that use it must share one context:
+    when they are in folders whose contexts come from different implementations,
+    each of them fails, and a folder with its own pytest_strategies_context uses
+    ``pytest_strategy.get_context(request.config, __file__)`` in its conftest.py
+    fixtures instead. The tests that use it are those that request it, directly or
+    through other fixtures, or every test when one asks for it through
+    ``request.getfixturevalue()``. What the implementation raised is raised again
+    as it is, so a ``pytest.skip`` there skips the tests that use it.
+    """
+    state = runtime.session_of(request.config)
+    if state is None:
+        return None
+    # The test that asked first (private API, as the session-scoped request's node
+    # is the session)
+    item = getattr(request, "_pyfuncitem", None)
+    items = list(request.session.items)
+    if item is not None and _CTX_FIXTURE in getattr(item, "fixturenames", ()):
+        consumers = [i for i in items if _CTX_FIXTURE in getattr(i, "fixturenames", ())]
+    else:
+        # Asked for through request.getfixturevalue(): any test may use it
+        consumers = items
+    if item is not None:
+        consumers.append(item)
+    if not consumers:
+        return state.path_context()()
+    # The tests in one file share their folder's context
+    answers: dict[Path, Answer] = {}
+    scopes: dict[str, dict[str, None]] = {}
+    for consumer in consumers:
+        answer = answers.get(consumer.path)
+        if answer is None:
+            answer = answers[consumer.path] = state.test_context(consumer).answer()
+        scopes.setdefault(answer.label, {})[consumer.nodeid] = None
+    if len(scopes) > 1:
+        pytest.fail(_ctx_scopes_message(scopes), pytrace=False)
+    return answers[consumers[-1].path].get()
+
+
+def _ctx_scopes_message(scopes: Mapping[str, Mapping[str, None]]) -> str:
+    """
+    Describe the contexts of the tests that use ``strategies_ctx``: their tests by
+    context label, in collection order.
+    """
+    parts = []
+    for label in sorted(scopes):
+        first, *others = scopes[label]
+        parts.append(f"{label}: {first}" + (f" and {len(others)} more" if others else ""))
+    return (
+        f"{_CTX_FIXTURE} is a session fixture, but the tests that use it have different "
+        f"contexts ({'; '.join(parts)}). In a folder with its own pytest_strategies_context, "
+        "use pytest_strategy.get_context(request.config, __file__) in that folder's "
+        "conftest.py fixtures."
+    )
 
 
 def pytest_addhooks(pluginmanager: pytest.PytestPluginManager) -> None:

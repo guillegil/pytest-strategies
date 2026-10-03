@@ -1,5 +1,6 @@
 """Unit tests for the per-session StrategyRuntime stack."""
 
+from pytest_strategy import RNG
 from pytest_strategy._runtime import StrategyRuntime
 
 
@@ -59,3 +60,28 @@ class TestStrategyRuntimeStack:
         assert rt.current.contexts is outer
         rt.pop()
         assert rt.current is None
+
+    def test_session_of_finds_the_innermost_session_of_a_config(self):
+        rt = StrategyRuntime()
+        outer = rt.push("outer")
+        middle = rt.push("same")
+        inner = rt.push("same")
+        assert rt.session_of("outer") is outer
+        assert rt.session_of("same") is inner
+        assert rt.session_of("other") is None
+        assert rt.session_of(None) is None
+        rt.pop()
+        assert rt.session_of("same") is middle
+        rt.pop()
+        rt.pop()
+        assert rt.session_of("outer") is None
+
+    def test_a_session_s_seed_is_its_run_seed_once_set(self):
+        rt = StrategyRuntime()
+        state = rt.push("cfg")
+        try:
+            assert state.seed() == RNG.get_seed()
+            state.run_seed = 1234
+            assert state.seed() == rt.run_seed() == 1234
+        finally:
+            rt.pop()

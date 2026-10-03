@@ -140,10 +140,63 @@ class SessionState:
         self.prev_generator: random.Random | None = None
         self.prev_registry: dict[str, list[Registration]] | None = None
 
+    def seed(self) -> int:
+        """The seed this session started from, or the RNG's seed before it started."""
+        return self.run_seed if self.run_seed is not None else RNG.get_seed()
+
+    def test_context(self, node: Any) -> FolderContext:
+        """
+        Return the context of a test's folder in this session, computed when it is
+        first asked for.
+
+        The implementations it consults are those the test's folder-scoped hook
+        relay (``node.ihook``) sees, as for ``pytest_generate_tests``: every plugin's,
+        and those of the conftest.py files in the test's folder and above it.
+
+        Args:
+            node: The test's node (``metafunc.definition``, or an item)
+        """
+        if self.config is None:
+            return _no_context()
+        return FolderContext(
+            self.contexts,
+            lambda: getattr(node.ihook, HOOK).get_hookimpls(),
+            lambda: node.path.parent,
+            self.seed,
+        )
+
+    def path_context(self, path: str | os.PathLike[str] | None = None) -> FolderContext:
+        """
+        Return the context of the folder of ``path`` (a file, or a folder) in this
+        session, computed when it is first asked for: the context a test in that
+        folder gets.
+
+        The implementations it consults are every plugin's, and those of the loaded
+        conftest.py files in that folder and above it (``_context.visible_from``).
+        Without ``path``, the folder is the rootdir.
+        """
+        config = self.config
+        if config is None:
+            return _no_context()
+        target = path if path is not None else getattr(config, "rootpath", None)
+        if target is None:
+            return _no_context()
+        return FolderContext(
+            self.contexts,
+            lambda: visible_from(config, target),
+            lambda: folder_of(target),
+            self.seed,
+        )
+
 
 def _no_folder() -> None:
     """The folder of a context without a session: none."""
     return None
+
+
+def _no_context() -> FolderContext:
+    """The context without a session or a config: None, and no hook to call."""
+    return FolderContext(None, tuple, _no_folder, RNG.get_seed)
 
 
 class StrategyRuntime:
@@ -189,9 +242,7 @@ class StrategyRuntime:
     def run_seed(self) -> int:
         """The seed the active session started from, even if a test reseeded the RNG."""
         state = self.current
-        if state is not None and state.run_seed is not None:
-            return state.run_seed
-        return RNG.get_seed()
+        return state.seed() if state is not None else RNG.get_seed()
 
     @property
     def strategies_loaded(self) -> bool:
@@ -258,51 +309,38 @@ class StrategyRuntime:
 
         _plugin_instance.load_all_strategy_files(state.config)
 
+    def session_of(self, config: object) -> SessionState | None:
+        """
+        Return the session that runs with ``config``, the innermost one if several
+        do, or None when none does (a config of a session that ended, or of a run
+        without the plugin).
+        """
+        if config is None:
+            return None
+        for state in reversed(self._stack):
+            if state.config is config:
+                return state
+        return None
+
     def test_context(self, node: Any) -> FolderContext:
         """
-        Return the context of a test's folder, computed when a factory asks for it.
-
-        The implementations it consults are those the test's folder-scoped hook
-        relay (``node.ihook``) sees, as for ``pytest_generate_tests``: every plugin's,
-        and those of the conftest.py files in the test's folder and above it.
+        Return the context of a test's folder in the active session, computed when a
+        factory asks for it (see :meth:`SessionState.test_context`).
 
         Args:
-            node: The test's node (``metafunc.definition``)
+            node: The test's node (``metafunc.definition``, or an item)
         """
         state = self.current
-        if state is None or state.config is None:
-            return FolderContext(None, tuple, _no_folder, self.run_seed)
-        return FolderContext(
-            state.contexts,
-            lambda: getattr(node.ihook, HOOK).get_hookimpls(),
-            lambda: node.path.parent,
-            self.run_seed,
-        )
+        return state.test_context(node) if state is not None else _no_context()
 
     def path_context(self, path: str | os.PathLike[str] | None = None) -> FolderContext:
         """
-        Return the context of the folder of ``path`` (a file, or a folder), computed
-        when it is first asked for: the context a test in that folder gets.
-
-        The implementations it consults are every plugin's, and those of the loaded
-        conftest.py files in that folder and above it (``_context.visible_from``).
-        Without ``path``, the folder is the rootdir.
+        Return the context of the folder of ``path`` (a file, or a folder; the rootdir
+        without one) in the active session, computed when it is first asked for: the
+        context a test in that folder gets (see :meth:`SessionState.path_context`).
         """
         state = self.current
-        config = state.config if state is not None else None
-        if state is None or config is None:
-            return FolderContext(None, tuple, _no_folder, self.run_seed)
-        if path is None:
-            path = getattr(config, "rootpath", None)
-            if path is None:
-                return FolderContext(None, tuple, _no_folder, self.run_seed)
-        target = path
-        return FolderContext(
-            state.contexts,
-            lambda: visible_from(config, target),
-            lambda: folder_of(target),
-            self.run_seed,
-        )
+        return state.path_context(path) if state is not None else _no_context()
 
     def strategy_context(self, path: str | os.PathLike[str] | None = None) -> Any:
         """

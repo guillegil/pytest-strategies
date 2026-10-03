@@ -13,6 +13,7 @@ Main Components:
 - TestArg: Single test argument definition with type and generation rules
 - Vector: One generated row, a tuple whose fields are the argument names (v.a)
 - VectorInfo: The row a test item runs, item.stash[VECTOR_KEY]
+- get_context: A folder's testbench context (pytest_strategies_context), for fixtures
 - RNG: Random number generation with seed management
 - RNGType classes: Type-safe random generators (RNGInteger, RNGFloat, etc.)
 
@@ -72,7 +73,7 @@ __email__ = "guillegil@proton.me"
 # attribute that importing it sets, while `from pytest_strategy.strategy import ...`
 # keeps finding the module
 from . import strategy as _strategy_module  # noqa: F401
-from ._api import Strategy, export_strategies, register, strategy
+from ._api import Strategy, export_strategies, get_context, register, strategy
 from ._options import StrategyOptions
 from ._vector import VECTOR_KEY, VECTORS_KEY, Vector, VectorInfo
 from ._warnings import PytestStrategiesWarning
@@ -109,6 +110,8 @@ __all__ = [
     "register",
     "strategy",
     "export_strategies",
+    # The testbench context
+    "get_context",
     # Core classes
     "Strategy",
     "Parameter",
