@@ -365,6 +365,20 @@ Reporting:
   also under `-q`, followed by `(context 976bcfdf)` when the failed tests'
   factories received a context (section 12).
   A passing run does not print it.
+- Then `pytest-strategies: failed rows:` lists, for each strategy row whose setup
+  or call failed, the command that reruns it with the same values, run from the
+  same folder, and what the row is (`  pytest 'tests/t.py::test_w[rand-3]'
+  --rng-seed=S  # burst random 3`): at most 10 below `-v` (`... and N more`),
+  none under `-qq`. The command adds the run's `--nsamples`, `--vector-mode`,
+  `--vector-name`, `--vector-index`, `-o strategies_*`, `-c`, `--rootdir`, and
+  the constraints turned off in the row's strategies (`STRATEGY:NAME`).
+- Each failed row also gets a `pytest-strategies` section under its traceback:
+  `strategy` (name and factory origin), `vector` (`rand-3 (random row 3)`,
+  `directed-zeros (directed vector 'zeros', #0)`), `values` (one per line, cut at
+  4,000 characters below `-vv`), `seed`, `context` (only when the factory received
+  `ctx`) and `rerun`. A test file outside the rootdir (`-c ci/pytest.ini` with
+  `tests/`) gets a `note` line: its node ID depends on the command line, so pass a
+  `--rootdir` that contains it to get a command that reproduces it.
 - `-v` adds, per strategy, the counts of directed and random rows (and of test,
   exhaustive and skipped rows when there are some) and where `nsamples` came from,
   then a "Contexts" block with each context's fingerprint.

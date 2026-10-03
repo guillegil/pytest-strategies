@@ -99,9 +99,9 @@ src/pytest_strategy/
 ├── skill/               # The agent skill that pytest-strategies skill install copies
 ├── py.typed             # PEP 561 marker: type checkers use the package's annotations
 └── _*.py                # Other internal helpers (introspection, test IDs, record mode,
-                         # StrategyOptions, factory calls, the context of each folder
-                         # and its fingerprint, runtime state, warning categories, the
-                         # value encoding of schema 1 documents, the random stream keys)
+                         # StrategyOptions, factory calls, each folder's context and its
+                         # fingerprint, runtime state, warning categories, the encoding of
+                         # schema 1 documents, the stream keys, a failed row's repro section)
 ```
 
 ## Core Components
@@ -679,14 +679,14 @@ strategies of its tests may not have been resolved). It is not checked under
   items when given
 - `pytest_report_collectionfinish` - Prints the fingerprints of the contexts the
   collection computed (`pytest-strategies: context <fp>`)
-- `pytest_runtest_logreport` - Records the tests whose setup or call failed
-- `pytest_terminal_summary` - After a failed run, prints
-  `pytest-strategies: reproduce with --rng-seed=S`, followed by the contexts the
-  failed tests' factories received; with `-v`, a Strategy Summary (tests and the
-  rows of each kind per strategy, and where `nsamples` came from) and the
-  Contexts block (label, fingerprint and tests per context). On the
-  pytest-xdist controller it first prints the context line the workers printed
-  after their collection, and in red what they generated differently
+- `pytest_runtest_logreport` - Records the tests whose setup or call failed, and
+  the failed strategy rows' commands (`report.pytest_strategies`, see `_repro`)
+- `pytest_terminal_summary` - After a failed run, prints `pytest-strategies:
+  reproduce with --rng-seed=S` with the contexts the failed tests' factories
+  received, and the failed rows; with `-v`, a Strategy Summary (tests and rows
+  of each kind per strategy, where `nsamples` came from) and the Contexts block
+  (label, fingerprint, tests per context). The pytest-xdist controller first
+  prints the workers' context line, and in red what they generated differently
 - `pytest_sessionfinish` - Maps the failed tests to the contexts their
   factories received. A pytest-xdist worker sends its `-v` summary and its part
   of the check that the workers generated the same vectors; the controller
@@ -1127,6 +1127,42 @@ The seed of every run is shown in the pytest report header
 also under `-q`. A run
 without `--rng-seed` picks a seed from the clock, and passing that printed seed
 reproduces the run.
+
+**Failed rows (`_repro.py`, D18):** the plugin's `pytest_runtest_makereport`
+wrapper (`tryfirst`, so it wraps skipping's wrapper and sees an XPASS(strict)
+as the failure it becomes) reads `item.stash[VECTORS_KEY]` for a failed setup or
+call report. `_repro.failure()` returns the text of the row's section (a block
+per `VectorInfo`: strategy and origin, the vector line by kind, each value's
+`_value_repr` cut at `VALUE_LIMIT` characters below `-vv`, seed, context when
+set; then the `rerun` line) and the report's `pytest_strategies` attribute: a
+dict of strings, `command`, `row` (`describe()`: `burst random 3`), `seed`, and
+`options`, the command's arguments after `--rng-seed` as a JSON list. pytest's
+`TestReport` keeps such an extra attribute when it is serialized, so
+pytest-xdist carries it to the controller. The section is added with
+`report.longrepr.addsection("pytest-strategies", ...)`, together with the
+`strategies_ctx` guard's message when there is one; a plain-string longrepr
+(XPASS(strict)) has no `addsection` and gets no section. `pytest_runtest_logreport`
+keeps each attribute in `SessionState.failed_rows` by node ID, and
+`pytest_terminal_summary` prints them after the reproduce line
+(`_failed_rows_lines()`: at most `_FAILED_ROWS_SHOWN` below `-v`, nothing under
+`-qq`). The command is `pytest <node id> --rng-seed=S` with the node ID from
+`config.cwd_relative_nodeid`, then `generation_options()`: `--nsamples` when
+`StrategyOptions.nsamples_source` says it was given, `--vector-mode` when not
+`all`, `--vector-name`, `--vector-index`, the last `-o` override of each
+`strategies_*` ini option, `config.option.inifilename` (`-c`),
+`config.option.rootdir`, and `--strategy-constraint-off` built from the rows'
+`constraints_off` with `constraint_off_item()`, so the items name the row's
+strategies. `quote()` uses `shlex.quote` on POSIX, and on Windows double quotes
+with the C runtime's backslash rules, leaving arguments of
+`[A-Za-z0-9_+=:./\-]` bare. pytest gives a file outside the rootdir a node ID
+relative to the command-line path that contains it (`-c ci/pytest.ini` with
+`tests/`), and `cwd_relative_nodeid()` then joins it to the rootdir, a path that
+does not exist; `rerun_nodeid()` uses the file's path from the invocation folder
+instead, and the section's `note` line and the row's `(outside the rootdir)` say
+that the rerun gets another node ID, and so other values. The integration tests
+(test_repro_section_integration.py) run each printed command through the
+platform's shell from the folder of the run, so the Windows CI cells check the
+quoting.
 
 **One generator of the plugin's own:** every draw (the RNG types and the `RNG.*`
 helpers) comes from `RNG.generator()`, a `random.Random` instance. The plugin

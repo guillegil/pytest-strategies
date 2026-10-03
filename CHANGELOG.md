@@ -45,6 +45,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A context or a strategy that only one worker computed is not compared (a test that runs on one worker can compute its folder's context through `strategies_ctx`), and a worker that crashed is left out.
   - When the values change the test IDs (a `Series` built from the context), pytest-xdist stops with its own "Different tests were collected" error, and this message follows it.
   - The digests cost each worker about 60 ms per 10,000 strategy rows of numbers and strings when its collection finishes (about 200 ms when the values are written by their reprs), and nothing is computed without pytest-xdist.
+- A failed strategy row says what it is and how to run it again.
+  - Under its traceback, by default and under `-q`, the row gets a `pytest-strategies` section, one block per strategy of the test, then one `rerun` line:
+    ```
+    ------------------------------ pytest-strategies -------------------------------
+    strategy  burst (tests/dma/strategies.py:12)
+    vector    rand-3 (random row 3)
+    values    addr=4096
+              len=17
+    seed      1763926297314361000
+    context   3f2a9c1e
+    rerun     pytest 'tests/dma/test_write.py::test_write[rand-3]' --rng-seed=1763926297314361000
+    ```
+    The `vector` line reads `directed-zeros (directed vector 'zeros', #0)`, `test-max (test vector 'max', #1)` or `ch=2 (exhaustive row 5)` for the other kinds. Each value is its stable repr, cut at 4,000 characters below `-vv`, and the `context` line appears only when the factory received `ctx`. A failure without a traceback, such as an XPASS of a `strict` xfail, gets no section; a teardown error gets nothing.
+  - The rerun command is `pytest <node id> --rng-seed=S`, with the node ID relative to the folder pytest was started in, followed by `--nsamples`, `--vector-mode`, `--vector-name` and `--vector-index` when the run had them (also from `addopts` or a conftest), the `-o strategies_*` overrides, `-c` and `--rootdir` as given, and the constraints turned off in the row's own strategies as `--strategy-constraint-off=STRATEGY:NAME` items, so that a rerun of one module never names a constraint only another module has. Arguments are quoted with `shlex.quote` on POSIX and with double quotes on Windows.
+  - After the reproduce line, which is unchanged, `pytest-strategies: failed rows:` lists the command of each strategy row whose setup or call failed, with what the row is: `  pytest 'tests/dma/test_write.py::test_write[rand-3]' --rng-seed=S  # burst random 3`. Below `-v` it shows at most 10, then `... and N more`, and `-qq` prints only the reproduce line. Under pytest-xdist the workers' reports carry the rows to the controller.
+  - pytest names a test file outside the rootdir (`-c ci/pytest.ini` with the tests in `tests/`) by the path on the command line, so a rerun of its node ID gives the row another node ID and other values. The command then names the file by its path, its section ends with a `note` line that says so, and its row in the list with `(outside the rootdir)`; a run with a `--rootdir` that contains the tests prints commands that reproduce them.
 
 ### Changed
 - Test IDs name the row instead of showing its values, so a row keeps its node ID for every seed: `directed-zeros` and `test-max` for directed and test vectors (`-k zeros` selects one), `rand-3` for the fourth random row, `ch=2-rand-1` and `ch=0-dev=b-rand-0` for a random row of a `Series` value, `ch=2` and `ch=0-dev=b` for a row of `--nsamples=auto`, `device=devA-rand-0` with `per_sequence_samples=True`, and `skipped` for a `skip_if_empty` row. A label shows the value of an enumerated argument: `str()` of None and bools, an Enum member's name, `repr()` of ints and floats, a class or function's `__name__`, and a string without quotes when it has at most 40 printable characters and no whitespace, `=`, `~`, `[` or `]`. A value listed again gets `~1` (`ch=2~1`), and a value without such text, or with the text of another value (`1` and `"1"`), is shown by its position (`ch3`). The IDs of a strategy's rows are unique by construction, so a `Series`-only strategy with more rows than values gives `ch=0-rand-0` and `ch=0-rand-1` instead of `ch=0_0` and `ch=0_1`. Under `--nsamples=auto` the IDs are the same set for every seed; only the order of `RNGSequence` rows changes. `-o strategies_ids=values` gives the 3.0 IDs back.

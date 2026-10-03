@@ -43,6 +43,7 @@ import pytest
 from _pytest.pathlib import ImportPathMismatchError, import_path
 from pytest import Config, Session
 
+from . import _repro
 from ._context import Answer
 from ._fingerprint import UNAVAILABLE, canonical
 from ._options import VectorMode, constraint_off_item, parse_constraint_off
@@ -654,24 +655,42 @@ class PytestStrategyPlugin:
             _check_ctx(item, "call", None)
             return result
 
-    @pytest.hookimpl(wrapper=True)
+    @pytest.hookimpl(wrapper=True, tryfirst=True)
     def pytest_runtest_makereport(
         self, item: pytest.Item, call: pytest.CallInfo[None]
     ) -> Generator[None, pytest.TestReport, pytest.TestReport]:
         """
-        Add the guard's message that ``_check_ctx`` kept for a test's setup or call
-        that raised an error to that phase's report, below the traceback: as a
-        section of the error's representation, or of the report when the error has
-        no such representation.
+        Add a ``pytest-strategies`` section below the traceback of a strategy row's
+        failed setup or call: what the row is, its values, the seed and the command
+        that runs it again (``_repro``). The report gets the command too, in its
+        ``pytest_strategies`` attribute (strings only, which pytest-xdist carries to
+        the controller), for the list of failed rows in the terminal summary. A
+        failure without a traceback (an XPASS(strict)) gets no section, and a
+        teardown error gets nothing.
+
+        The guard's message that ``_check_ctx`` kept for a test's setup or call that
+        raised an error goes into the same section, before the row. A report whose
+        error has no sections gets it as a section of its own.
+
+        It wraps the other plugins' wrappers (tryfirst), so it sees the outcome they
+        set, such as an XPASS(strict) turned into a failure.
         """
         report = yield
         message = item.stash.get(_CTX_MESSAGES, {}).pop(call.when, None)
-        if message is not None:
-            add = getattr(report.longrepr, "addsection", None)
-            if callable(add):
-                add(_CTX_SECTION, message)
-            else:
-                report.sections.append((_CTX_SECTION, message))
+        repro: str | None = None
+        if report.failed and call.when in ("setup", "call"):
+            infos = item.stash.get(VECTORS_KEY, ())
+            if infos:
+                repro, attribute = _repro.failure(item, infos)
+                # TestReport keeps extra attributes when pytest-xdist serializes it
+                report.pytest_strategies = attribute  # type: ignore[attr-defined]
+        add = getattr(report.longrepr, "addsection", None)
+        if callable(add):
+            text = "\n\n".join(part for part in (message, repro) if part is not None)
+            if text:
+                add(_SECTION, text)
+        elif message is not None:
+            report.sections.append((_SECTION, message))
         return report
 
     @pytest.hookimpl(wrapper=True)
@@ -896,11 +915,18 @@ class PytestStrategyPlugin:
 
     @pytest.hookimpl
     def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
-        """Note a test whose setup or call failed, for the line that reproduces the run."""
+        """
+        Note a test whose setup or call failed, for the line that reproduces the run,
+        and the rerun command of a failed strategy row, for the list of failed rows
+        (on the pytest-xdist controller too, which gets the workers' reports).
+        """
         if report.failed and report.when != "teardown":
             state = runtime.current
             if state is not None:
                 state.failed_tests.add(report.nodeid)
+                row = getattr(report, "pytest_strategies", None)
+                if isinstance(row, dict) and report.nodeid not in state.failed_rows:
+                    state.failed_rows[report.nodeid] = row
 
     @pytest.hookimpl
     def pytest_terminal_summary(
@@ -908,7 +934,9 @@ class PytestStrategyPlugin:
     ) -> None:
         """
         Say how to reproduce a failed run, with the contexts the failed tests'
-        factories received, and summarize the strategies and the contexts with -v.
+        factories received, list the failed strategy rows' rerun commands
+        (``_failed_rows_lines``), and summarize the strategies and the contexts with
+        -v.
 
         On the pytest-xdist controller, which collects nothing, first print what the
         workers printed after their collection (the contexts, the unmatched
@@ -940,6 +968,8 @@ class PytestStrategyPlugin:
             terminalreporter.write_line(
                 f"pytest-strategies: reproduce with --rng-seed={_run_seed()}{suffix}"
             )
+            for line in _failed_rows_lines(state.failed_rows, self._verbosity(config)):
+                terminalreporter.write_line(line)
 
         if self._verbosity(config) < 1:
             return
@@ -1820,6 +1850,33 @@ def _contexts_text(fingerprints: Mapping[str, str]) -> str | None:
     return "contexts " + ", ".join(f"{label} {fp}" for label, fp in sorted(fingerprints.items()))
 
 
+# The failed rows listed below -v; the others are counted
+_FAILED_ROWS_SHOWN = 10
+
+
+def _failed_rows_lines(rows: Mapping[str, Mapping[str, str]], verbosity: int) -> list[str]:
+    """
+    Return the lines that list the failed strategy rows after the line that says how
+    to reproduce the run: ``pytest-strategies: failed rows:``, then each row's
+    rerun command followed by a comment naming the row (``# burst random 3``), at
+    most ``_FAILED_ROWS_SHOWN`` of them below -v and then ``... and N more``.
+    Nothing under -qq, or when no strategy row failed.
+
+    Args:
+        rows: The failed rows' ``pytest_strategies`` report attributes, by node ID
+        verbosity: The -v count (negative for -q)
+    """
+    if not rows or verbosity <= -2:
+        return []
+    entries = list(rows.values())
+    shown = entries if verbosity >= 1 else entries[:_FAILED_ROWS_SHOWN]
+    lines = ["pytest-strategies: failed rows:"]
+    lines.extend(f"  {row.get('command', '')}  # {row.get('row', '')}" for row in shown)
+    if len(entries) > len(shown):
+        lines.append(f"  ... and {len(entries) - len(shown)} more")
+    return lines
+
+
 def _context_entries(state: Any) -> dict[str, str]:
     """
     Describe each context the session computed for the -v summary, by label,
@@ -2136,9 +2193,9 @@ _CTX_FIXTURE = "strategies_ctx"
 
 # The guard's message for a test's setup or call that raised an error after using
 # strategies_ctx with another folder's context, by phase (_check_ctx), and the title
-# of the report section that shows it
+# of the report section that shows it, with a failed strategy row's repro section
 _CTX_MESSAGES = pytest.StashKey[dict[str, str]]()
-_CTX_SECTION = "pytest-strategies"
+_SECTION = _repro.SECTION
 
 
 @pytest.fixture(scope="session")

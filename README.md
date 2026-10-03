@@ -522,7 +522,7 @@ pytest-strategies: contexts conftest.py 976bcfdf, tests/tb_a/conftest.py b1e1b23
 - The fingerprint is the first 8 hex characters of the SHA-256 of a canonical encoding of the object. It is computed when the hook returns the object, before any factory or fixture receives it, so a factory or a test that changes the object later changes no fingerprint. Nothing is printed when no factory with `ctx` ran, or when every context is `None`; the line appears with `-q` and `--collect-only` too. Under pytest-xdist the controller collects no tests, so it prints the line the workers printed after their collection at the end of the run, in its terminal summary.
 - The encoding depends only on what the object holds. Sets are sorted, so the hash order of `PYTHONHASHSEED` does not matter. Paths inside the rootdir are written relative to it, so two checkouts agree. A pydantic v2 model is written as its `model_dump()`, which leaves out `Field(exclude=True)` fields and keeps a `SecretStr` masked. Dataclasses, attrs classes and NamedTuples are written field by field, `SimpleNamespace` and `argparse.Namespace` objects by their attributes, mappings as their pairs in order, floats, dates, `Decimal` and `UUID` as text, and classes and Enum members by their qualified names, never their modules. Anything else is written as its repr, without memory addresses (` at 0x7f...` inside a `<...>` repr, and a mock's `id='140...'`; an address a repr of its own shows, such as `Periph('uart0' at 0x40001000)`, is kept), and with the items of the sets it shows as Python does (`{'b', 'a'}`) sorted. An object that keeps the default repr (`<Plain object at 0x...>`) is in the fingerprint by its type alone, and the line says so: `context 976bcfdf (partial: Plain)`. A repr that shows a set in another form (`",".join(tags)`) should sort it. An object that cannot be encoded (its repr raises) gives `unavailable`, and never fails the run.
 - Leave volatile values out of the context (temporary paths, process IDs, times), or mark them `Field(exclude=True)` in a pydantic model, so that the fingerprint stays the same from one run to the next.
-- When tests fail, the line that says how to reproduce the run ends with the contexts their factories received: `pytest-strategies: reproduce with --rng-seed=S (context 976bcfdf)`, or `(contexts conftest.py 976bcfdf, tests/tb_a/conftest.py b1e1b237)`. Under pytest-xdist the workers send them to the controller. Tests whose setup or call failed count; an error in a test's teardown alone adds no context.
+- When tests fail, the line that says how to reproduce the run ends with the contexts their factories received: `pytest-strategies: reproduce with --rng-seed=S (context 976bcfdf)`, or `(contexts conftest.py 976bcfdf, tests/tb_a/conftest.py b1e1b237)`. Under pytest-xdist the workers send them to the controller. Tests whose setup or call failed count; an error in a test's teardown alone adds no context. The `pytest-strategies` section of each failed row shows the fingerprint of its factory's context in its `context` line (see [Reproducibility](#-reproducibility)).
 - `-v` adds a "Contexts" block to the Strategy Summary, with each context's label, fingerprint and number of tests whose factories received it. `item.stash[VECTOR_KEY].context` holds the fingerprint for the rows of a factory that received `ctx`, and `None` for the others.
 
 ## 🔌 Fixture Integration
@@ -586,8 +586,27 @@ pytest-strategies: RNG seed = 1763926297314361000
 When tests fail, the plugin also prints how to rerun them with the same vectors, after the failure tracebacks and before the short test summary, even with `-q`:
 ```text
 pytest-strategies: reproduce with --rng-seed=1763926297314361000
+pytest-strategies: failed rows:
+  pytest 'tests/dma/test_write.py::test_write[rand-3]' --rng-seed=1763926297314361000  # burst random 3
+  pytest 'tests/dma/test_write.py::test_write[directed-zeros]' --rng-seed=1763926297314361000  # burst directed zeros
 ```
-When the factories of the failed tests received a context, the line ends with its fingerprint, such as `(context 976bcfdf)` (see [Configuration-Dependent Strategies](#11-configuration-dependent-strategies-new-in-v200)).
+When the factories of the failed tests received a context, the first line ends with its fingerprint, such as `(context 976bcfdf)` (see [Configuration-Dependent Strategies](#11-configuration-dependent-strategies-new-in-v200)). Then comes, for each strategy row whose setup or call failed, the command that runs that row alone with the same values, from the folder pytest was started in, and what the row is. Below `-v` at most 10 rows are listed, followed by `... and 4 more`; `-qq` prints only the first line. An error in a test's teardown alone lists nothing.
+
+Under its traceback, each failed strategy row also gets a `pytest-strategies` section that says what the row is and how to run it again:
+```text
+------------------------------ pytest-strategies -------------------------------
+strategy  burst (tests/dma/strategies.py:12)
+vector    rand-3 (random row 3)
+values    addr=4096
+          len=17
+seed      1763926297314361000
+context   3f2a9c1e
+rerun     pytest 'tests/dma/test_write.py::test_write[rand-3]' --rng-seed=1763926297314361000
+```
+- `strategy` names the strategy and where its factory is defined, and `vector` the row: `directed-zeros (directed vector 'zeros', #0)`, `test-max (test vector 'max', #1)`, `ch=2 (exhaustive row 5)`. `values` shows each argument's value by its repr (by its type's name when the repr shows a memory address), cut at 4,000 characters below `-vv`. The `context` line appears only when the factory received `ctx`. A test with several `@strategy` decorators gets one block per strategy and one `rerun` line.
+- The command adds every option that decides which rows exist and what they hold: `--nsamples`, `--vector-mode`, `--vector-name` and `--vector-index` when the run had them (from the command line, `addopts` or a conftest), the `-o strategies_*` overrides, `-c` and `--rootdir` as given, and the constraints the run turned off in the row's own strategies, as `--strategy-constraint-off=STRATEGY:NAME` items, so that rerunning one module never names a constraint only another module has. Arguments are quoted for the platform's shell. What shapes the context (an environment variable, an option of your own) is not added: compare the `context` lines.
+- pytest names a test file outside the rootdir (`pytest -c ci/pytest.ini` with the tests in `tests/`) by the path given on the command line, so a rerun of its node ID gives the row another node ID and other values. Its section then ends with a `note` line, and its row in the list with `(outside the rootdir)`: run with a `--rootdir` that contains the tests, such as `--rootdir=.`, to get a command that reproduces them.
+- A failure that pytest reports without a traceback, such as an XPASS of a `strict` xfail, is listed but gets no section. Under pytest-xdist the workers send the rows to the controller.
 
 With `-v`, a "Strategy Summary" section lists each strategy with the number of tests that use it, their directed and random rows (and their test rows, the exhaustive rows of `--nsamples=auto` and the skipped row of an empty `skip_if_empty` sequence, when there are some), and where the sample count came from (`--nsamples`, `Parameter(nsamples=)` or the default), followed by the contexts' fingerprints.
 

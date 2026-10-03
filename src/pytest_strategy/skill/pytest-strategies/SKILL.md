@@ -286,12 +286,16 @@ def esm_rw(nsamples, ctx):
 
 To reproduce a failure:
 
-1. Take the seed from the failing run: the line `reproduce with --rng-seed=S` after
-   the tracebacks (also printed under `-q`), or the header
-   (`pytest-strategies: RNG seed = S`).
-2. Rerun with it: `pytest tests/payments/test_charge.py --rng-seed=S`. A node ID
-   names the row and the seed gives its values, so pass both:
-   `pytest "tests/payments/test_charge.py::test_charge[rand-3]" --rng-seed=S`.
+1. Take the command from the failing run: each failed row's `pytest-strategies`
+   section, under its traceback, shows the row, its values, the seed and a
+   `rerun` line, and `pytest-strategies: failed rows:` after
+   `reproduce with --rng-seed=S` lists the same commands (also under `-q`). The
+   seed alone is in that line and in the header (`pytest-strategies: RNG seed = S`).
+2. Run the command from the folder the failing run started in. It is
+   `pytest "tests/payments/test_charge.py::test_charge[rand-3]" --rng-seed=S`, plus
+   the run's `--nsamples`, `--vector-mode`, `-c`, `--rootdir` and
+   `--strategy-constraint-off` when it had them: the node ID names the row, and
+   the seed and options give its values.
 3. The same seed, rootdir and plugin version give the same rows whether you run the
    suite, one file or one test, in any order, with or without xdist. The test's path
    relative to the rootdir is part of its random stream: compare the `rootdir:` line

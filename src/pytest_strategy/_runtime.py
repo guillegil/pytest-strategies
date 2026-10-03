@@ -178,6 +178,12 @@ class SessionState:
         # the session finishes, for the line that says how to reproduce the failures
         self.failed_tests: set[str] = set()
         self.failed_contexts: dict[str, str] = {}
+        # The strategy rows whose setup or call failed, in the order they failed: the
+        # pytest_strategies attribute of their reports (the rerun command, and what
+        # the row is; see _repro.failure) by node ID, for the list of failed rows
+        # after that line. Under pytest-xdist the controller gets them from the
+        # workers' reports.
+        self.failed_rows: dict[str, dict[str, str]] = {}
         # Where each fixture that drew is defined and registered
         # (plugin._fixture_definition and _fixture_base), the last parts of its
         # random stream's key, by FixtureDef
