@@ -828,19 +828,7 @@ class PytestStrategyPlugin:
         Returns:
             List of directories to search
         """
-        rootdir = Path(config.rootpath)
-        testpaths = config.getini("testpaths")
-
-        search_paths: list[Path] = []
-        for entry in testpaths:
-            if any(char in entry for char in "*?["):
-                # pytest expands wildcards in testpaths (e.g. "pkgs/*/tests")
-                matches = sorted(glob.glob(entry, root_dir=rootdir, recursive=True))
-                search_paths.extend(rootdir / match for match in matches)
-            else:
-                search_paths.append(rootdir / entry)
-        if not testpaths:
-            search_paths.append(rootdir)
+        search_paths = self._test_roots(config)
 
         # Paths named on the command line (or the testpaths pytest collects) may
         # lie outside the search paths, or inside a directory the search skips.
@@ -855,6 +843,28 @@ class PytestStrategyPlugin:
                 search_paths.append(directory)
 
         return search_paths
+
+    @staticmethod
+    def _test_roots(config: Config) -> list[Path]:
+        """
+        Return the folders a session searches whatever the command line names: the
+        testpaths ini entries, with glob patterns expanded as pytest does, or the
+        rootdir without testpaths.
+        """
+        rootdir = Path(config.rootpath)
+        testpaths = config.getini("testpaths")
+
+        roots: list[Path] = []
+        for entry in testpaths:
+            if any(char in entry for char in "*?["):
+                # pytest expands wildcards in testpaths (e.g. "pkgs/*/tests")
+                matches = sorted(glob.glob(entry, root_dir=rootdir, recursive=True))
+                roots.extend(rootdir / match for match in matches)
+            else:
+                roots.append(rootdir / entry)
+        if not testpaths:
+            roots.append(rootdir)
+        return roots
 
     def _covers(self, search_path: Path, directory: Path, norecursedirs: Sequence[str]) -> bool:
         """
@@ -1435,10 +1445,64 @@ def _fixture_definition(func: Callable[..., Any], config: Config | None) -> tupl
     (``exec``'d code) is named by its module too: its file would resolve against
     the working directory.
     """
-    return (
-        source_part(func, getattr(config, "rootpath", None), test_files=test_file_patterns(config)),
-        factory_source(func)[1] or "",
+    return (definition_part(func, config), factory_source(func)[1] or "")
+
+
+def definition_part(fn: Callable[..., Any], config: Config | None, *, folder: bool = False) -> str:
+    """
+    Return ``source_part()`` of a fixture or a factory for the session of ``config``,
+    with its ``python_files`` patterns and the folders it searches for test
+    modules and strategy files (``_searched``).
+    """
+    return source_part(
+        fn,
+        getattr(config, "rootpath", None),
+        folder=folder,
+        test_files=test_file_patterns(config),
+        searched=_searched(config),
     )
+
+
+def _searched(config: Config | None) -> Callable[[str], bool] | None:
+    """
+    Return whether the session of ``config`` searches the folder of a file for test
+    modules and strategy files: a folder below one of its test roots (its testpaths,
+    or its rootdir without them, ``_test_roots``) that pytest's collection enters
+    (not a norecursedirs, hidden or virtual environment folder). A file named like
+    a test module or a strategy file elsewhere (``src/acme/test_utils.py`` with
+    ``testpaths = tests``) is a package module that pytest and the plugin never
+    import by its path.
+
+    The folders named on the command line do not count, unlike in
+    ``_search_paths``, so that a rerun of one node ID keys a file as the run it
+    repeats did. None when ``config`` is not a pytest config (a unit test's
+    stand-in, or no session).
+    """
+    if config is None:
+        return None
+    try:
+        norecursedirs = config.getini("norecursedirs")
+        roots = _plugin_instance._test_roots(config)
+    except (AttributeError, TypeError, ValueError):
+        # Not a full pytest config
+        return None
+    if not isinstance(norecursedirs, list):
+        return None
+    # Each root as it is spelled and as its real path, so that a file reached either
+    # way is found under it
+    bases = {Path(os.path.abspath(root)) for root in roots}
+    bases.update(Path(os.path.realpath(root)) for root in roots)
+
+    def searched(source: str) -> bool:
+        parent = os.path.dirname(source)
+        directories = {Path(os.path.abspath(parent)), Path(os.path.realpath(parent))}
+        return any(
+            _plugin_instance._covers(base, directory, norecursedirs)
+            for base in bases
+            for directory in directories
+        )
+
+    return searched
 
 
 def _fixture_base(fixturedef: pytest.FixtureDef[Any]) -> str:

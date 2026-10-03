@@ -37,7 +37,12 @@ from pytest_strategy._registry import registry, source_part
 from pytest_strategy._resolver import build_parametrization
 from pytest_strategy._runtime import StrategyRuntime, runtime
 from pytest_strategy._streams import StreamKey, path_part
-from pytest_strategy.plugin import PytestStrategyPlugin, _fixture_base, _fixture_definition
+from pytest_strategy.plugin import (
+    PytestStrategyPlugin,
+    _fixture_base,
+    _fixture_definition,
+    definition_part,
+)
 from pytest_strategy.rng import _Stream
 
 KEY = StreamKey.root(7, "body", "tests/test_x.py::test_x", "call")
@@ -391,50 +396,58 @@ class TestAnotherThreadDraws:
             assert RNG.generator().random() == first_draws(KEY, 1)[0]
 
     @pytest.mark.parametrize("call", ["draw", "seed"])
-    def test_a_draw_while_another_thread_seeds_the_stream_waits_for_it(self, call):
+    @pytest.mark.parametrize("step", ["_mt_getstate", "_mt_seed"])
+    def test_a_draw_while_another_thread_seeds_the_stream_waits_for_it(self, step, call):
         """
         The stream stays pending until it is seeded: the main thread's draw, or its
         RNG.seed(), while a thread seeds the stream waits for the seeding, and
         neither comes from the state the seeding replaces nor is overwritten by it.
+
+        The thread pauses in each step of _settle that runs while the stream is
+        pending: where it saves the state of the stream around (_mt_getstate), and
+        where it seeds the stream (_mt_seed), the last step before the stream stops
+        being pending.
         """
         paused = threading.Event()
         resume = threading.Event()
-        getstate = rng_module._mt_getstate
+        original = getattr(rng_module, step)
 
-        def pausing_getstate(generator):
-            # The thread pauses where _settle saves the state of the stream around
+        def pausing(generator, *args):
             if threading.current_thread() is thread:
                 paused.set()
                 resume.wait(5)
-            return getstate(generator)
+            return original(generator, *args)
 
         drawn = []
         thread = threading.Thread(target=lambda: drawn.append(RNG._ambient.random()))
         with _Stream(KEY):
             outer = [RNG.generator().random()]
-            with _Stream(OTHER), mock.patch.object(rng_module, "_mt_getstate", pausing_getstate):
+            with _Stream(OTHER), mock.patch.object(rng_module, step, pausing):
                 thread.start()
                 assert paused.wait(5)
-                assert RNG._ambient._pending is OTHER
+                # Checked once the thread has finished, so that it is never left paused
+                pending = RNG._ambient._pending
                 # Let the thread go on once this thread waits for it
                 timer = threading.Timer(0.05, resume.set)
                 timer.start()
-                if call == "draw":
-                    inner = RNG.generator().random()
-                else:
+                if call == "seed":
                     RNG.seed(42)
-                    inner = RNG.generator().random()
+                inner = [RNG.generator().random()]
                 thread.join()
                 timer.join()
+                # The seeding did not replace what this thread drew from, or seeded
+                inner.append(RNG.generator().random())
             # The thread never drew from the outer stream
             outer.append(RNG.generator().random())
 
         assert drawn == first_draws(OTHER, 1)
         if call == "draw":
-            assert inner == first_draws(OTHER, 2)[1]
+            assert inner == first_draws(OTHER, 3)[1:]
         else:
-            assert inner == random.Random(42).random()
+            seeded = random.Random(42)
+            assert inner == [seeded.random(), seeded.random()]
         assert outer == first_draws(KEY, 2)
+        assert pending is OTHER
 
     @pytest.mark.parametrize(
         "first_draws_before", [False, True], ids=["first_pending", "first_drawn"]
@@ -969,6 +982,20 @@ class TestDb:
 """
 
 
+def _ini_config(rootpath, **ini):
+    """
+    A config with the ini values that tell where pytest collects test modules
+    (pytest's defaults, with ``ini``'s values instead).
+    """
+    values = {
+        "python_files": ["test_*.py", "*_test.py"],
+        "testpaths": [],
+        "norecursedirs": ["*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules", "venv"],
+        **ini,
+    }
+    return SimpleNamespace(rootpath=rootpath, getini=values.__getitem__)
+
+
 def load(path, name):
     """
     Import the file at ``path`` as the module ``name``, and leave it out of
@@ -1103,6 +1130,98 @@ class TestFixtureDefinition:
             assert _fixture_definition(loaded.conn, _config(path.parent.parent))[0] == (
                 "tests.helpers" if module == "tests.helpers" else "tests/helpers.py"
             )
+
+    def test_a_package_next_to_a_rootdir_in_a_subfolder_is_named_by_its_module(self, tmp_path):
+        """
+        A flat layout run with its rootdir in tests/ (tests/pytest.ini, or
+        --rootdir=tests): the names begin next to the rootdir, not with its folder
+        or one above it, so the checkout draws as the installed package does.
+        """
+        found = []
+        for folder in (
+            tmp_path / "proj",
+            tmp_path / "proj" / ".venv" / "lib" / "python3.11" / "site-packages",
+        ):
+            (folder / "acme").mkdir(parents=True)
+            for module in ("acme.testing", "helpers"):
+                path = folder.joinpath(*module.split(".")).with_suffix(".py")
+                path.write_text(FIXTURES_SOURCE)
+                with imported(path, module) as loaded:
+                    config = _ini_config(tmp_path / "proj" / "tests")
+                    found.append(_fixture_definition(loaded.conn, config)[0])
+                    found.append(definition_part(loaded.conn, config, folder=True))
+
+        assert found == ["acme.testing", "acme.testing", "helpers", "helpers"] * 2
+
+    def test_a_name_whose_first_folder_holds_the_rootdir_is_not_used(self, tmp_path):
+        """
+        Also for a file outside the rootdir: proj.util, which the tests of a
+        checkout that is a package import (rootdir proj/tests), has the checkout
+        folder's name in its name.
+        """
+        path = tmp_path / "proj" / "util.py"
+        (tmp_path / "proj" / "tests").mkdir(parents=True)
+        path.write_text(FIXTURES_SOURCE)
+
+        with imported(path, "proj.util") as loaded:
+            config = _ini_config(tmp_path / "proj" / "tests")
+            assert _fixture_definition(loaded.conn, config)[0] == "../util.py"
+            assert definition_part(loaded.conn, config, folder=True) == ".."
+
+    @pytest.mark.parametrize("name", ["test_utils.py", "utils_test.py", "strategies.py"])
+    def test_a_package_module_named_like_a_test_module_elsewhere_is_named_by_it(
+        self, tmp_path, name
+    ):
+        """
+        pytest never collects src/acme/test_utils.py with testpaths = tests, nor does
+        the plugin load src/acme/strategies.py: they are package modules, imported
+        by their names, and draw as the installed package's do.
+        """
+        module = "acme." + name.removesuffix(".py")
+        found = set()
+        for folder in (
+            tmp_path / "proj" / "src",
+            tmp_path / "proj" / ".venv" / "lib" / "python3.11" / "site-packages",
+        ):
+            path = folder / "acme" / name
+            path.parent.mkdir(parents=True)
+            path.write_text(FIXTURES_SOURCE)
+            with imported(path, module) as loaded:
+                config = _ini_config(tmp_path / "proj", testpaths=["tests"])
+                found.add(_fixture_definition(loaded.conn, config)[0])
+                found.add(definition_part(loaded.conn, config, folder=True))
+
+        assert found == {module}
+
+    @pytest.mark.parametrize(
+        ("testpaths", "folder", "where"),
+        [
+            (["tests"], "tests/acme", "tests/acme/test_utils.py"),
+            (["t*s"], "tests/acme", "tests/acme/test_utils.py"),
+            (["../shared"], "../shared/acme", "../shared/acme/test_utils.py"),
+            # Without testpaths a bare run collects it from the rootdir
+            ([], "src/acme", "src/acme/test_utils.py"),
+            # pytest does not enter build/ (norecursedirs) or a hidden folder
+            ([], "build/acme", "acme.test_utils"),
+            ([], ".cache/acme", "acme.test_utils"),
+            (["tests"], "src/acme", "acme.test_utils"),
+        ],
+    )
+    def test_the_test_modules_are_those_in_the_folders_pytest_searches(
+        self, tmp_path, testpaths, folder, where
+    ):
+        """
+        A file named like a test module in the testpaths, or below the rootdir
+        without them, is keyed by its path in every run, whatever the command line
+        names, so a run of one node ID keys it as the run it repeats did.
+        """
+        path = tmp_path / "proj" / folder / "test_utils.py"
+        path.parent.mkdir(parents=True)
+        path.write_text(FIXTURES_SOURCE)
+
+        with imported(path, "acme.test_utils") as loaded:
+            config = _ini_config(tmp_path / "proj", testpaths=testpaths)
+            assert _fixture_definition(loaded.conn, config)[0] == where
 
     def test_a_partial_counts_as_the_function_it_wraps(self, tmp_path):
         path = tmp_path / "conftest.py"

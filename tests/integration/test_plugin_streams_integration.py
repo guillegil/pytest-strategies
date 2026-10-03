@@ -16,6 +16,7 @@ import importlib.util
 import json
 import os
 import random
+import shutil
 from textwrap import dedent
 
 import pytest
@@ -966,6 +967,49 @@ def test_a_packages_fixture_draws_the_same_installed_or_from_its_source(pytester
 
     device = StreamKey.root(SEED, "fixture", "", "device", 0, "acme_ps.testing", "device", "")
     export = StreamKey.root(SEED, "export", "ps_device", "acme_ps.testing")
+    assert draws == [{"device": randint(device), "export": str(randint(export))}] * 2
+
+
+@pytest.mark.parametrize(
+    ("layout", "name"),
+    [("flat", "testing"), ("src", "test_utils"), ("src", "strategies")],
+    ids=["flat-rootdir-in-tests", "src-test_utils", "src-strategies"],
+)
+def test_a_packages_fixture_draws_the_same_installed_or_next_to_the_rootdir(pytester, layout, name):
+    """
+    The same for a flat layout whose rootdir is its tests/ folder (tests/pytest.ini),
+    so that the package is next to the rootdir, and for a package module named like
+    a test module or a strategy file outside the testpaths, which pytest and the
+    plugin never import by its path.
+    """
+    pytester.makepyfile(ps_draws=DRAWS)
+    tests = pytester.mkdir("tests")
+    (tests / "conftest.py").write_text(f"from acme_ps.{name} import device\n")
+    (tests / "test_device.py").write_text(dedent(PACKAGE_TESTS))
+    rootdir, args = (tests, ["tests"]) if layout == "flat" else (pytester.path, [])
+    draws = []
+    for folder in ("." if layout == "flat" else "src", ".tox/py/lib/python3/site-packages"):
+        package = pytester.path / folder / "acme_ps"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("")
+        (package / f"{name}.py").write_text(dedent(PACKAGE_FIXTURES))
+        pythonpath = f"{package.parent.as_posix()} {pytester.path.as_posix()}"
+        testpaths = "" if layout == "flat" else "testpaths = tests\n"
+        (rootdir / "pytest.ini").write_text(f"[pytest]\n{testpaths}pythonpath = {pythonpath}\n")
+
+        result = pytester.runpytest_subprocess(
+            "-p", "no:cacheprovider", f"--rng-seed={SEED}", *args
+        )
+
+        result.assert_outcomes(passed=1)
+        draws.append(read_draws(pytester.path))
+        # The working directory is on sys.path: the next run must not find it there
+        shutil.rmtree(package)
+
+    module = f"acme_ps.{name}"
+    base = "" if layout == "flat" else "tests"
+    device = StreamKey.root(SEED, "fixture", "", "device", 0, module, "device", base)
+    export = StreamKey.root(SEED, "export", "ps_device", module)
     assert draws == [{"device": randint(device), "export": str(randint(export))}] * 2
 
 

@@ -95,6 +95,7 @@ def source_part(
     *,
     folder: bool = False,
     test_files: Sequence[str] = TEST_FILE_PATTERNS,
+    searched: Callable[[str], bool] | None = None,
 ) -> str:
     """
     Return where a function or a factory is defined, as a part of a random stream's
@@ -103,18 +104,32 @@ def source_part(
 
     - The name of its module, for a module imported by that name: an installed
       package's (in a site-packages or dist-packages folder), an editable install's
-      (whose file is in a source tree), a plugin's or a helper module's.
+      (whose file is in a source tree, also next to a rootdir that is a subfolder
+      of the checkout), a plugin's or a helper module's.
     - Otherwise the file :func:`factory_source` finds, or with ``folder`` its
       folder, relative to the rootdir in posix form (``_streams.path_part()``): for
       a file that pytest or the plugin imports by its path, whose module name
       depends on ``--import-mode`` and on the folders' ``__init__.py`` files (a
-      ``conftest.py``, a test module, matched by ``test_files``, pytest's
-      ``python_files``, or a strategy file); for a module that ``sys.modules`` does
-      not have under its name; and for one whose name begins with the rootdir's own
-      folder or a folder above it (a rootdir with an ``__init__.py``).
+      ``conftest.py``, and a test module, matched by ``test_files``, pytest's
+      ``python_files``, or a strategy file in a folder the session searches for
+      them, ``searched``); for a module that ``sys.modules`` does not have under
+      its name; and for one whose name begins with the rootdir's own folder or a
+      folder above it (a rootdir with an ``__init__.py``), which another checkout
+      may not have.
     - The name of its module when its code has no file (``"<string>"`` for
       ``exec``'d code, which would resolve against the working directory); ``""``
       without a module either.
+
+    Args:
+        fn: The function, factory, partial or callable object
+        rootpath: The session's rootdir, or None outside a session
+        folder: Return the folder of the file instead of the file
+        test_files: The ``python_files`` patterns of test modules
+        searched: Whether the session searches the folder of a file for test
+            modules and strategy files (``plugin._searched``): a package module
+            named like one in another folder (``src/acme/test_utils.py`` with
+            ``testpaths = tests``) is imported by its name only. None outside a
+            session: every file named like one counts as one.
     """
     source = factory_source(fn)[0]
     # The module of what factory_source() read, through wrappers and partials (a
@@ -127,7 +142,7 @@ def source_part(
         source
         and os.path.isfile(source)
         and INSTALLED_FOLDERS.isdisjoint(PurePath(source).parts)
-        and not _imported_by_name(source, module, rootpath, test_files)
+        and not _imported_by_name(source, module, rootpath, test_files, searched)
     ):
         return path_part(os.path.dirname(source) if folder else source, rootpath)
     return module
@@ -138,15 +153,18 @@ def _imported_by_name(
     module: str,
     rootpath: str | os.PathLike[str] | None,
     test_files: Sequence[str],
+    searched: Callable[[str], bool] | None,
 ) -> bool:
     """
     Whether the module ``module`` of the file ``source`` is keyed by its name (see
     :func:`source_part`).
     """
     name = os.path.basename(source)
-    if name == "conftest.py" or any(
+    if name == "conftest.py":
+        return False
+    if any(
         matches_pattern(pattern, source) for pattern in (*STRATEGY_FILE_PATTERNS, *test_files)
-    ):
+    ) and (searched is None or searched(source)):
         return False
     loaded = sys.modules.get(module) if module else None
     file = getattr(loaded, "__file__", None)
@@ -154,14 +172,19 @@ def _imported_by_name(
         return False
     if rootpath is None:
         return True
-    # The folder the name is relative to: the file's, up one folder per part
+    # The folder of the name's first part: the file's, up one folder per further
+    # part. A top-level module's name has none, and a name with more parts than the
+    # path has folders does not come from them.
     parents = PurePath(os.path.realpath(source)).parents
     depth = module.count(".") + (name == "__init__.py")
-    if depth >= len(parents):
+    if depth == 0 or depth >= len(parents):
         return True
-    top = os.path.normcase(str(parents[depth]))
+    first = os.path.normcase(str(parents[depth - 1]))
     root = os.path.normcase(os.path.realpath(rootpath))
-    return top == root or not _contains(top, root)
+    # The name holds the rootdir folder's name, or the name of a folder above it,
+    # when its first part is one of them; a package next to the rootdir (a flat
+    # layout with the rootdir in tests/) is not
+    return not _contains(first, root)
 
 
 def matches_pattern(pattern: str, path: str) -> bool:

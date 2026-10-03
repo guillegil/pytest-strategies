@@ -917,17 +917,27 @@ test module or strategy file of an installed package (a file in a
 `site-packages` or `dist-packages` folder, a test `--pyargs` runs) has its path
 below that folder instead (`_streams.installed_part()`), which does not depend
 on where the environment is. A fixture's `where` and an exported factory's
-`folder` come from `_registry.source_part()`. They are the module's name for a
-module imported by its name (an installed package's, an editable install's, a
-plugin's or a helper module's), so a package's fixture draws the same installed,
-installed in editable mode or checked out next to the tests, and for code with
-no file (`exec`'d code, whose `"<string>"` would resolve against the working
-directory). They are the file, or its folder for an export, for a file that
-pytest or the plugin imports by its path (a `conftest.py`, a test module that
-`python_files` matches, a strategy file), whose module name depends on
-`--import-mode` and on the `__init__.py` files, and for a module whose name
-begins at the rootdir's folder or above it (a rootdir with an `__init__.py`),
-whose name depends on the folders the checkout is in. The
+`folder` come from `_registry.source_part()` (through `plugin.definition_part()`).
+They are the module's name for a module imported by its name (an installed
+package's, an editable install's, a plugin's or a helper module's), so a
+package's fixture draws the same installed, installed in editable mode or
+checked out next to the tests (also next to a rootdir in the checkout's
+`tests/` folder), and for code with no file (`exec`'d code, whose `"<string>"`
+would resolve against the working directory). They are the file, or its folder
+for an export, for a file that pytest or the plugin imports by its path, whose
+module name depends on `--import-mode` and on the `__init__.py` files: a
+`conftest.py`, and a test module that `python_files` matches or a strategy file
+in a folder the session searches for them (`plugin._searched()`: below the
+testpaths, or below the rootdir without them, outside `norecursedirs`, hidden
+folders and virtual environments). The folders named on the command line do not
+count there, so a run of one node ID keys a file as the run it repeats did. A
+package module named like a test module elsewhere (`src/acme/test_utils.py`
+with `testpaths = tests`) is imported by its name only; without testpaths a
+bare `pytest` collects it as a test module, so it keeps its path, and draws
+other values than the installed package's. They are also the file for a module
+whose name begins with the rootdir's folder or a folder above it (a rootdir with
+an `__init__.py`, or `proj.util` for the tests of a package checkout in
+`proj/tests`), whose name depends on the folders the checkout is in. The
 fixture's definition and base are in its key because pytest sets up several
 fixtures of one name for the same scope node: an override that requests the
 fixture it overrides (`def x(x)`), the session fixtures of one name in two

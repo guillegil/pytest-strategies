@@ -15,14 +15,7 @@ from typing import Any, TypeVar
 import pytest
 
 from ._introspection import PYTEST_FIXTURES as _PYTEST_FIXTURES
-from ._registry import (
-    Factory,
-    RegistryView,
-    _describe_factory,
-    registry,
-    source_part,
-    test_file_patterns,
-)
+from ._registry import Factory, RegistryView, _describe_factory, registry
 from ._runtime import runtime
 from ._warnings import PytestStrategiesWarning
 
@@ -134,6 +127,7 @@ def export_strategies(*, format: str = "json") -> str:
     from ._factory import FactoryInputs, call_factory
     from ._resolver import check_factory_result
     from ._streams import StreamKey, seed_part
+    from .plugin import definition_part
     from .rng import _Stream
 
     if format != "json":
@@ -148,7 +142,7 @@ def export_strategies(*, format: str = "json") -> str:
         # The factory's module's name, or for a strategy file, a test module or a
         # conftest.py its folder, as its file system spells it (see source_part, as
         # for a fixture's key)
-        folder = source_part(factory, rootpath, folder=True, test_files=test_file_patterns(config))
+        folder = definition_part(factory, config, folder=True)
         stream = StreamKey.root(seed_part(runtime.run_seed()), "export", name, folder)
         try:
             # The session's options for this strategy, the instance collection uses,
