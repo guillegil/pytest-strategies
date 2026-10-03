@@ -176,11 +176,12 @@ def shell(command, cwd):
     return done.returncode, done.stdout.splitlines()
 
 
-def assert_reruns(command, cwd, rootdir, nodeid, section, output=None):
+def assert_reruns(command, cwd, rootdir, nodeid, section, output=None, name=None):
     """
     Run ``command`` from ``cwd`` and check that it runs only ``nodeid`` (rootdir-
     relative), which fails with the same section, and the same error lines when
-    ``output`` (the first run's lines) is given.
+    ``output`` (the first run's lines) is given: those of the failure headed
+    ``name``, by default the test's name.
     """
     ran = rootdir / "ran.txt"
     ran.unlink(missing_ok=True)
@@ -191,7 +192,7 @@ def assert_reruns(command, cwd, rootdir, nodeid, section, output=None):
     assert ran.read_text(encoding="utf-8").splitlines() == [nodeid], "\n".join(lines)
     assert sections(lines) == [section], "\n".join(lines)
     if output is not None:
-        name = nodeid.rpartition("::")[2]
+        name = name or nodeid.rpartition("::")[2]
         assert errors(lines, name) == errors(output, name) != []
 
 
@@ -547,6 +548,71 @@ def test_name(request, a):
         command = rerun_command(section)
         expression = "test_dma.py and test_write[rand-1]"
         assert command == f"pytest . --rng-seed={SEED} -c ci/pytest.ini -k {quote(expression)}"
+        assert_reruns(
+            command,
+            pytester.path,
+            pytester.path / "ci",
+            "tests/test_dma.py::test_write[rand-1]",
+            section,
+            result.stdout.lines,
+        )
+
+    def test_outside_the_rootdir_k_names_the_class_when_needed(self, pytester):
+        # Two classes of the module have a test of the same name
+        write(pytester.path, {"ci/pytest.ini": "[pytest]\n"})
+        test = """
+from pytest_strategy import strategy
+
+class TestA:
+    @strategy("burst")
+    def test_write(self, request, addr, len):
+        assert "rand-1" not in request.node.name, (addr, len)
+
+class TestB:
+    @strategy("burst")
+    def test_write(self, addr, len):
+        pass
+"""
+        project(pytester.path, test, folder="tests")
+
+        result = run(pytester, "-c", "ci/pytest.ini")
+
+        result.assert_outcomes(failed=1, passed=9)
+        (section,) = sections(result.stdout.lines)
+        command = rerun_command(section)
+        expression = "test_dma.py and TestA and test_write[rand-1]"
+        assert command == f"pytest . --rng-seed={SEED} -c ci/pytest.ini -k {quote(expression)}"
+        assert_reruns(
+            command,
+            pytester.path,
+            pytester.path / "ci",
+            "tests/test_dma.py::TestA::test_write[rand-1]",
+            section,
+            result.stdout.lines,
+            name="TestA.test_write[rand-1]",
+        )
+
+    @pytest.mark.parametrize(
+        ("option", "value"),
+        [("--ignore", str(Path("tests", "b"))), ("--ignore-glob", str(Path("*", "b", "*")))],
+        ids=["ignore", "ignore_glob"],
+    )
+    def test_outside_the_rootdir_the_run_s_ignored_files_stay_out(self, pytester, option, value):
+        # tests/b/test_other.py has a test of the same name, which the run never
+        # collected: the rerun command, which starts from the same path, leaves it out too
+        write(pytester.path, {"ci/pytest.ini": "[pytest]\n"})
+        project(pytester.path, module('"rand-1" in request.node.name'), folder="tests")
+        write(pytester.path, {"tests/b/test_other.py": module('"rand-1" in request.node.name')})
+
+        result = run(pytester, "-c", "ci/pytest.ini", f"{option}={value}")
+
+        result.assert_outcomes(failed=1, passed=4)
+        (section,) = sections(result.stdout.lines)
+        command = rerun_command(section)
+        assert command == (
+            f"pytest . {option} {quote(value)} --rng-seed={SEED} -c ci/pytest.ini"
+            f" -k {quote('test_write[rand-1]')}"
+        )
         assert_reruns(
             command,
             pytester.path,

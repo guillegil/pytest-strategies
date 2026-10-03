@@ -745,8 +745,9 @@ class PytestStrategyPlugin:
         reported as plain text gets it as a section of the report's own.
 
         A passing call of a row the failed-seeds map holds under this run's seed
-        (``SessionState.recorded``) notes the options of its rerun command, so the
-        entry leaves the map when they are the ones it was recorded with.
+        (``SessionState.recorded``) notes the options of its rerun command run from
+        the rootdir, as the map holds them, so the entry leaves the map when they
+        are the ones it was recorded with.
 
         It wraps the other wrappers, so it sees the outcome they set: skipping's,
         which turns an XPASS(strict) into a failure, registered before the plugin,
@@ -761,7 +762,10 @@ class PytestStrategyPlugin:
             if state is not None and item.nodeid in state.recorded:
                 infos = item.stash.get(VECTORS_KEY, ())
                 if infos:
-                    options = _repro.generation_options(item.config, infos)
+                    # As the map holds them: run from the rootdir
+                    options = _repro.generation_options(
+                        item.config, infos, start=item.config.rootpath
+                    )
                     state.passed_rows[item.nodeid] = tuple(options)
         elif report.failed and call.when in ("setup", "call"):
             infos = item.stash.get(VECTORS_KEY, ())
@@ -2072,8 +2076,10 @@ def _record_failed_seeds(config: Config, state: Any) -> None:
     Update the failed-seeds map in pytest's cache when the session finishes, on the
     process that reports the run (not on a pytest-xdist worker): record each strategy
     row whose setup or call failed, as the newest entry, and remove the entries of
-    the rows that passed under their seed and their options (``_reuse.updated``). The
-    map is read again first, and written only when it changed.
+    the rows that passed under their seed and their options (``_reuse.updated``; a
+    ``-c`` or ``--rootdir`` an entry holds counts as the run's when it names the ini
+    file or the rootdir the run uses). The map is read again first, and written only
+    when it changed.
     """
     cache = getattr(config, "cache", None)
     if cache is None:
@@ -2090,7 +2096,7 @@ def _record_failed_seeds(config: Config, state: Any) -> None:
     if not passed and not state.failed_rows:
         return
     entries = _reuse.read(cache)
-    new = _reuse.updated(entries, state.seed(), passed, state.failed_rows)
+    new = _reuse.updated(entries, state.seed(), passed, state.failed_rows, _reuse.own_units(config))
     if list(new.items()) != list(entries.items()):
         _reuse.write(cache, new)
 
@@ -2100,6 +2106,9 @@ def _reuse_line(config: Config, reuse: _reuse.Reuse) -> str:
     Return the header line that says a --lf or --sw run reused the failed run's
     seed, naming the options the newest reused row was recorded with when they
     differ from the run's (``recorded with --nsamples=13``); they are not applied.
+    Both are compared as the commands run from the rootdir, a recorded ``-c`` or
+    ``--rootdir`` agrees when it names the ini file or the rootdir the run uses,
+    and the paths are written relative to the folder pytest was started in.
     """
     text = (
         f"pytest-strategies: seed reused from the failed run for {reuse.flag} "
@@ -2107,8 +2116,10 @@ def _reuse_line(config: Config, reuse: _reuse.Reuse) -> str:
     )
     differences = _reuse.differences(
         list(reuse.rows.values()),
-        _repro.generation_options(config, ()),
+        _repro.generation_options(config, (), start=config.rootpath),
         runtime.session_options(config).constraints_off,
+        _reuse.own_units(config),
+        config.cwd_relative_nodeid,
     )
     return text if differences is None else f"{text}; recorded {differences}"
 

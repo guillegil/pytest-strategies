@@ -11,6 +11,7 @@ plugin adds none. The runs set ``filterwarnings = error``, so a ``PytestWarning`
 (``record_property`` warns under ``xunit2``) would fail them.
 """
 
+import json
 import os
 import re
 import subprocess
@@ -415,6 +416,53 @@ def test_write(request, device, addr, len):
         assert failure.find("failure") is not None and error.find("error") is not None
         assert properties(failure) == properties(error) != []
         assert dict(properties(failure))["pytest_strategies.id"] == "rand-1"
+
+    def test_a_failed_test_run_again_gets_its_properties_once(self, pytester):
+        # As pytest-rerunfailures does: the protocol runs again, with the item's
+        # user_properties of the first run, and the last run is reported
+        project(pytester.path)
+        rerun = """
+import json
+
+import pytest
+from _pytest.runner import runtestprotocol
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_protocol(item, nextitem):
+    item.ihook.pytest_runtest_logstart(nodeid=item.nodeid, location=item.location)
+    reports = runtestprotocol(item, nextitem=nextitem, log=False)
+    if any(report.failed for report in reports):
+        reports = runtestprotocol(item, nextitem=nextitem, log=False)
+    for report in reports:
+        item.ihook.pytest_runtest_logreport(report=report)
+        if report.failed:
+            with open(item.config.rootpath / "failed.jsonl", "a", encoding="utf-8") as out:
+                out.write(json.dumps(report.user_properties) + "\\n")
+    item.ihook.pytest_runtest_logfinish(nodeid=item.nodeid, location=item.location)
+    return True
+"""
+        write(pytester.path, {"conftest.py": CONFTEST + rerun})
+
+        result = run(pytester, "-o", "junit_family=xunit1")
+
+        result.assert_outcomes(failed=3, errors=1, passed=13)
+        # Each test ran twice
+        ran = (pytester.path / "ran.txt").read_text(encoding="utf-8").splitlines()
+        assert ran.count(FAILED[0]) == 2
+        suite = report(pytester)
+        written = []
+        for nodeid in FAILED:
+            (case,) = cases(suite, nodeid.partition("::")[2])
+            found = properties(case)
+            assert found == list(dict.fromkeys(found)) != [], nodeid
+            written.append(found)
+        # The 9 of test_write[rand-1], as after one run
+        assert len(written[0]) == 9
+        # And in the failed reports, which junitxml reads when the teardown fails too
+        # (test_plain's has none)
+        lines = (pytester.path / "failed.jsonl").read_text(encoding="utf-8").splitlines()
+        reported = [[tuple(prop) for prop in json.loads(line)] for line in lines]
+        assert sorted(reported, key=len) == [[], *written]
 
     def test_a_strict_xpass_has_properties_but_no_section(self, pytester):
         project(

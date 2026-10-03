@@ -9,7 +9,10 @@ whose setup or call failed, by node ID, newest last::
     {"tests/test_dma.py::test_write[rand-3]": {"seed": 21, "options": ["--nsamples=13"]}}
 
 The options are those of the row's rerun command after ``--rng-seed``
-(``_repro.generation_options``), unquoted. The process that reports the run (the
+(``_repro.generation_options``), unquoted, as the command runs from the rootdir:
+``-c`` and ``--rootdir`` are relative to it, so that they name the same files
+whatever folder a later run starts in, and the commands a run prints give them
+relative to the folder it was started in. The process that reports the run (the
 pytest-xdist controller, not a worker) writes the map when the session finishes:
 it records the rows that failed, as the newest, and removes an entry only when its
 row passed under its seed and its options.
@@ -40,6 +43,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _pytest.pathlib import bestrelpath
 
 from ._options import constraint_off_item, parse_constraint_off
 from ._repro import quote, start_args
@@ -53,6 +57,9 @@ STEPWISE = "cache/stepwise"
 
 # The options of a rerun command that take their value as the next argument
 _PAIRED = ("-o", "-c")
+
+# The --rootdir option of a rerun command, as one argument
+_ROOTDIR = "--rootdir="
 
 # The --strategy-constraint-off option of a rerun command, as one argument
 _OFF = "--strategy-constraint-off="
@@ -161,11 +168,42 @@ def from_row(row: Mapping[str, str]) -> Entry | None:
     return _entry({"seed": seed, "options": options})
 
 
+def own_units(config: pytest.Config) -> list[tuple[str, ...]]:
+    """
+    Return the ``-c`` and ``--rootdir`` units of the ini file and the rootdir the run
+    uses, relative to the rootdir as the map holds them, whether the run gave them
+    or pytest found them (``_matched``).
+    """
+    units: list[tuple[str, ...]] = []
+    inipath = getattr(config, "inipath", None)
+    if inipath is not None:
+        units.append(("-c", bestrelpath(config.rootpath, inipath)))
+    units.append((_ROOTDIR + os.curdir,))
+    return units
+
+
+def _matched(
+    recorded: Sequence[tuple[str, ...]],
+    current: Sequence[tuple[str, ...]],
+    own: Collection[tuple[str, ...]],
+) -> list[tuple[str, ...]]:
+    """
+    Return the run's units ``current``, with each unit of ``own`` (the ini file and
+    the rootdir it uses, ``own_units``) that the recorded units have and it does
+    not: a row recorded with ``-c ci/pytest.ini`` and rerun from ``ci``, where
+    pytest finds that file, was recorded with the run's own ini file. A ``-c`` the
+    run gives and the rows were recorded without still differs, as the ini file
+    the recording run found is not known.
+    """
+    return [*current, *(unit for unit in own if unit in recorded and unit not in current)]
+
+
 def updated(
     entries: Mapping[str, Entry],
     seed: int,
     passed: Mapping[str, Sequence[str]],
     failed: Mapping[str, Mapping[str, str]],
+    own: Collection[tuple[str, ...]] = (),
 ) -> dict[str, Entry]:
     """
     Return the map after a run: without the entries whose rows passed under their
@@ -178,11 +216,17 @@ def updated(
         passed: The options of the rows whose call passed in the run, by node ID
         failed: The ``pytest_strategies`` attributes of the rows whose setup or
             call failed, by node ID, in the order they failed
+        own: The ``-c`` and ``--rootdir`` units of the ini file and the rootdir
+            the run uses (``own_units``): an entry recorded with them passed
+            under its options in a run that did not give them
     """
     result = dict(entries)
     for nodeid, options in passed.items():
         entry = result.get(nodeid)
-        if entry is not None and entry.seed == seed and entry.options == tuple(options):
+        if entry is None or entry.seed != seed:
+            continue
+        recorded = _units(entry.options)
+        if sorted(recorded) == sorted(_matched(recorded, _units(options), own)):
             del result[nodeid]
     for nodeid, row in failed.items():
         new = from_row(row)
@@ -430,13 +474,30 @@ def _text(units: Iterable[tuple[str, ...]]) -> str:
     return " ".join(quote(arg) for unit in units for arg in unit)
 
 
+def _placed(unit: tuple[str, ...], where: Callable[[str], str]) -> tuple[str, ...]:
+    """
+    Write the path of a ``-c`` or ``--rootdir`` unit, which the map holds relative
+    to the rootdir, as ``where`` gives it (relative to the folder pytest was
+    started in); other units are left as they are.
+    """
+    if len(unit) == 2 and unit[0] == "-c":
+        return ("-c", where(unit[1]))
+    if len(unit) == 1 and unit[0].startswith(_ROOTDIR):
+        return (_ROOTDIR + where(unit[0][len(_ROOTDIR) :]),)
+    return unit
+
+
 def _off_unit(items: Iterable[tuple[str | None, str]]) -> tuple[str, ...]:
     """Write ``(strategy, name)`` items as one ``--strategy-constraint-off`` unit."""
     return (_OFF + ",".join(constraint_off_item(*item) for item in items),)
 
 
 def differences(
-    rows: Sequence[Entry], current: Sequence[str], current_off: Sequence[tuple[str | None, str]]
+    rows: Sequence[Entry],
+    current: Sequence[str],
+    current_off: Sequence[tuple[str | None, str]],
+    own: Collection[tuple[str, ...]] = (),
+    where: Callable[[str], str] = str,
 ) -> str | None:
     """
     Name the recorded options that differ from the run's: ``with --nsamples=13``
@@ -444,20 +505,25 @@ def differences(
     --vector-mode=test`` for those the run has and it was not recorded with, or None
     when they agree.
 
-    A constraint the rows had turned off counts as off in the run when the run
-    turns it off in their strategy or everywhere. The run's own items are not
-    compared: which strategies a bare name reaches is known only once the tests
-    are collected.
+    A ``-c`` or ``--rootdir`` the rows were recorded with agrees with the run when it
+    names the ini file or the rootdir the run uses, given or found (``_matched``). A
+    constraint the rows had turned off counts as off in the run when the run turns
+    it off in their strategy or everywhere. The run's own items are not compared:
+    which strategies a bare name reaches is known only once the tests are collected.
 
     Args:
         rows: The reused rows' entries, newest last
         current: The run's options, as ``_repro.generation_options`` writes them
-            without the constraints
+            from the rootdir, without the constraints
         current_off: The run's ``--strategy-constraint-off`` items
+        own: The ``-c`` and ``--rootdir`` units of the ini file and the rootdir
+            the run uses (``own_units``)
+        where: Write a path relative to the rootdir as the folder pytest was
+            started in gives it, for the ``-c`` and ``--rootdir`` named
     """
     recorded, _ = _split(rows[-1].options)
     off = dict.fromkeys(item for row in rows for item in _split(row.options)[1])
-    units, _ = _split(current)
+    units = _matched(recorded, _split(current)[0], own)
     missing = [
         (strategy, name)
         for strategy, name in off
@@ -469,9 +535,9 @@ def differences(
     absent = [unit for unit in units if unit not in recorded]
     parts = []
     if extra:
-        parts.append(f"with {_text(extra)}")
+        parts.append(f"with {_text(_placed(unit, where) for unit in extra)}")
     if absent:
-        parts.append(f"without {_text(absent)}")
+        parts.append(f"without {_text(_placed(unit, where) for unit in absent)}")
     return ", ".join(parts) or None
 
 
@@ -556,7 +622,8 @@ def commands(
             order of the map
         failed: The node IDs of the failed tests the run reruns (``Reuse.failed``)
         where: Write a node ID or a file relative to the rootdir as the command
-            gives it (relative to the folder pytest was started in)
+            gives it (relative to the folder pytest was started in), also the
+            paths of the rows' ``-c`` and ``--rootdir``
         outside: Where the rows in files outside the rootdir are collected from
             (``Reuse.outside``)
     """
@@ -571,7 +638,7 @@ def commands(
     found = []
     for key, off in groups.items():
         seed, units, beyond = key
-        options = list(units) + ([_off_unit(off)] if off else [])
+        options = [_placed(unit, where) for unit in units] + ([_off_unit(off)] if off else [])
         group = nodeids[key]
         if beyond:
             targets = _outside_targets(group, outside, where)

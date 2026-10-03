@@ -1166,11 +1166,14 @@ relative to the path the run started from that contains it (`config.args`: `-c
 ci/pytest.ini` with `tests/` and no paths gives the invocation folder), and the
 random streams follow that node ID. So the command of such a row
 (`_outside_command()`) starts from the same paths (`start_args()`, relative to the
-folder the command runs from) and selects the row with `-k` (`keyword()`): the
-row's name, else with its module's name, else with its classes' too, the first
-expression that pytest's own `KeywordMatcher` and `Expression` match to that item
-alone among the session's items and those the run deselected (kept by the
-plugin's `pytest_deselected`; the rerun runs without the run's own selection).
+folder the command runs from), adds the run's `--ignore` and `--ignore-glob`
+(`ignore_args()`, relative to that folder too: the files they left out were never
+collected, so `keyword()` cannot see them), and selects the row with `-k`
+(`keyword()`): the row's name, else with its module's name, else with its
+classes' too, the first expression that pytest's own `KeywordMatcher` and
+`Expression` match to that item alone among the session's items and those the
+run deselected (kept by the plugin's `pytest_deselected`; the rerun runs without
+the run's own selection).
 The matchers are built once per session, for the first such failure. Without such
 an expression (a name outside `-k`'s grammar, such as one with `=`, or two modules
 of one name), or when a start path does not exist (`--pyargs`), `rerun_nodeid()`
@@ -1211,9 +1214,18 @@ test_junitxml_integration.py checks each family, under `-n 2` too.
 (`_record_failed_seeds()`, `_reuse.updated()`): it removes an entry whose row
 passed in this run under the entry's seed and options, then adds each row of
 `SessionState.failed_rows` again as the newest, with the seed and options of its
-report's `pytest_strategies` attribute. The makereport wrapper takes a passing
-row's options (`generation_options()`) from a passing call report, only for the
-items in `SessionState.recorded`, the node IDs of the map's entries under the
+report's `pytest_strategies` attribute. Those options are the ones of the
+command run from the rootdir (`generation_options(..., start=rootpath)`), so the
+map holds `-c` and `--rootdir` relative to the rootdir and they name the same
+files from any folder: `_reuse.commands()` and `_reuse.differences()` write them
+relative to the invocation folder (`_placed()`, through
+`config.cwd_relative_nodeid`), and a recorded unit that names the ini file or the
+rootdir the run uses (`own_units()`, given or found) agrees with the run
+(`_matched()`, also in the removal check of `updated()`; a `-c` the run gives and
+the rows were recorded without still differs, as the ini file the recording run
+found is not known). The makereport wrapper takes a passing row's options
+(`generation_options(..., start=rootpath)`) from a passing call report, only for
+the items in `SessionState.recorded`, the node IDs of the map's entries under the
 run's seed. A pytest-xdist worker gets `recorded`, `deselect` and `reused`
 through `workerinput` and sends its passed rows' options and the reused rows it
 collected through `workeroutput`, which
@@ -1255,9 +1267,9 @@ unless a conftest.py's `pytest_configure` set `config.option.rng_seed`, which
 drops the reuse as `--rng-seed` would; an `RNG.seed()` call there does not
 change the reused seed, as it does not change `--rng-seed`. `_reuse_line()` adds
 to the header the options of the newest reused row that the run lacks (`with`)
-and those the run adds (`without`), from `generation_options(config, ())`; a
-constraint the rows turned off counts as off when the run turns it off in their
-strategy or everywhere. After the failed rows, at every verbosity,
+and those the run adds (`without`), from `generation_options(config, (),
+start=rootpath)`; a constraint the rows turned off counts as off when the run
+turns it off in their strategy or everywhere. After the failed rows, at every verbosity,
 `_deselected_lines()` prints one `pytest --lf --rng-seed=S ...` per seed and set
 of options for every row of `Reuse.others` (`_reuse.commands()`, the constraint
 items of a group merged into one option): the deselected ones, and those the run

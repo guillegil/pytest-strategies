@@ -25,6 +25,7 @@ from pytest_strategy._reuse import (
     differences,
     flag,
     from_row,
+    own_units,
     plan,
     read,
     updated,
@@ -226,6 +227,25 @@ class TestUpdated:
 
         assert updated(before, seed, {NODE_A: options}, {}) == before
 
+    def test_a_row_recorded_with_the_ini_file_and_rootdir_the_run_found_is_removed(self):
+        # Recorded with -c ci/pytest.ini --rootdir=ci, passed in a run from ci,
+        # where pytest finds both
+        before = {NODE_A: Entry(1, ("--nsamples=13", "-c", "pytest.ini", "--rootdir=."))}
+        own = [("-c", "pytest.ini"), ("--rootdir=.",)]
+
+        assert updated(before, 1, {NODE_A: ["--nsamples=13"]}, {}, own) == {}
+
+    @pytest.mark.parametrize(
+        ("recorded", "options"),
+        [(("-c", "other.ini"), []), ((), ["-c", "pytest.ini"])],
+        ids=["another_ini_file", "given_by_the_run_only"],
+    )
+    def test_a_row_recorded_with_another_ini_file_stays(self, recorded, options):
+        before = {NODE_A: Entry(1, recorded)}
+        own = [("-c", "pytest.ini"), ("--rootdir=.",)]
+
+        assert updated(before, 1, {NODE_A: options}, {}, own) == before
+
     def test_a_row_that_passed_and_then_failed_stays_as_the_newest(self):
         before = {NODE_A: Entry(1, ()), NODE_B: Entry(1, ())}
 
@@ -294,6 +314,20 @@ class TestCacheOf:
 
     def test_none_under_cache_clear(self, tmp_path):
         assert cache_of(config(tmp_path, cacheclear=True)) is None
+
+
+class TestOwnUnits:
+    def test_the_ini_file_and_the_rootdir_relative_to_the_rootdir(self, tmp_path):
+        stand_in = config(tmp_path / "ci")
+        stand_in.inipath = tmp_path / "ci" / "pytest.ini"
+
+        assert own_units(stand_in) == [("-c", "pytest.ini"), ("--rootdir=.",)]
+
+    def test_without_an_ini_file_the_rootdir(self, tmp_path):
+        stand_in = config(tmp_path)
+        stand_in.inipath = None
+
+        assert own_units(stand_in) == [("--rootdir=.",)]
 
 
 class TestPlan:
@@ -644,6 +678,31 @@ class TestDifferences:
             "with " + quote("--strategy-constraint-off=burst:aligned,chan:fast")
         )
 
+    OWN = (("-c", "pytest.ini"), ("--rootdir=.",))
+
+    def test_the_ini_file_and_rootdir_the_run_found_agree(self):
+        # Recorded with -c ci/pytest.ini --rootdir=ci, rerun from ci without them
+        rows = self.rows(["--nsamples=13", "-c", "pytest.ini", "--rootdir=."])
+
+        assert differences(rows, ["--nsamples=13"], (), self.OWN) is None
+
+    def test_another_ini_file_is_named_from_the_folder_pytest_runs_in(self):
+        text = differences(
+            self.rows(["-c", "other.ini", "--rootdir=."]),
+            ["-c", "pytest.ini"],
+            (),
+            self.OWN,
+            lambda path: f"ci/{path}",
+        )
+
+        assert text == "with -c ci/other.ini, without -c ci/pytest.ini"
+
+    def test_a_c_the_rows_were_recorded_without_differs(self):
+        # The ini file the recording run found is not known
+        text = differences(self.rows([]), ["-c", "pytest.ini"], (), self.OWN)
+
+        assert text == "without -c pytest.ini"
+
     def test_the_run_s_own_constraints_are_not_compared(self):
         assert differences(self.rows([]), [], [(None, "aligned")]) is None
 
@@ -716,6 +775,22 @@ class TestCommands:
             ("pytest --lf --rng-seed=1 tests/b/test_w.py tests/a/test_w.py", 3)
         ]
 
+    def test_c_and_rootdir_are_written_from_the_folder_pytest_runs_in(self):
+        # The map holds them relative to the rootdir, /project; pytest runs in tests
+        root = Path("/project")
+        stand_in = Namespace(rootpath=root, invocation_params=Namespace(dir=root / "tests"))
+        where = partial(pytest.Config.cwd_relative_nodeid, stand_in)
+        rows = [(NODE_A, Entry(1, ("-c", "pytest.ini", "--rootdir=.")))]
+
+        (found,) = commands("--lf", rows, {NODE_A}, where)
+
+        # The paths are the platform's, as pytest's own bestrelpath writes them
+        assert found == (
+            f"pytest --lf --rng-seed=1 -c {quote(str(Path('..', 'pytest.ini')))} --rootdir=.. "
+            + quote(str(Path("a", "test_w.py"))),
+            1,
+        )
+
     def test_paths_are_written_as_given(self):
         rows = [(NODE_A, Entry(1, ())), (NODE_B, Entry(1, ()))]
 
@@ -737,7 +812,8 @@ class TestCommandsOutsideTheRootdir:
 
         (command,) = commands(
             "--lf",
-            [(self.OUT_A, Entry(1, ("-c", "ci/pytest.ini")))],
+            # The map holds -c relative to the rootdir
+            [(self.OUT_A, Entry(1, ("-c", "pytest.ini")))],
             {self.OUT_A, self.OUT_B, self.IN},
             lambda path: f"ci/{path}",
             {self.OUT_A: found},
@@ -963,6 +1039,18 @@ class TestPluginState:
         assert json.loads(cache.values[KEY]) == entries(
             (NODE_B, 7, ["--nsamples=13"]), (NODE_C, 7, [])
         )
+
+    def test_an_entry_recorded_with_the_run_s_ini_file_is_removed(self, tmp_path):
+        cache = Cache({KEY: entries((NODE_A, 7, ["-c", "pytest.ini"]), (NODE_B, 7, []))})
+        state = SessionState()
+        state.run_seed = 7
+        state.passed_rows = {NODE_A: ()}
+        stand_in = config(tmp_path, cache)
+        stand_in.inipath = tmp_path / "pytest.ini"
+
+        _record_failed_seeds(stand_in, state)
+
+        assert json.loads(cache.values[KEY]) == entries((NODE_B, 7, []))
 
     def test_the_map_is_written_only_when_it_changed(self, tmp_path):
         cache = Cache({KEY: entries((NODE_A, 7, []))})

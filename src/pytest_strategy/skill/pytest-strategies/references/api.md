@@ -391,8 +391,9 @@ Reporting:
   `directed-zeros (directed vector 'zeros', #0)`), `values` (one per line, cut at
   4,000 characters below `-vv`), `seed`, `context` (only when the factory received
   `ctx`) and `rerun`. A test file outside the rootdir (`-c ci/pytest.ini` with
-  `tests/`) gets a command that starts from the run's paths and selects the row
-  with `-k` (`pytest . --rng-seed=S -c ci/pytest.ini -k 'test_write[rand-3]'`),
+  `tests/`) gets a command that starts from the run's paths (with its `--ignore`
+  and `--ignore-glob`) and selects the row with `-k`
+  (`pytest . --rng-seed=S -c ci/pytest.ini -k 'test_write[rand-3]'`),
   since its node ID depends on them; when no `-k` expression selects only that
   row, a `note` line says to pass a `--rootdir` that contains the tests.
 - With `--junitxml`, each failed row's failure text ends with that section, and

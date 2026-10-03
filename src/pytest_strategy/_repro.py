@@ -27,10 +27,11 @@ context cannot be known; its fingerprint shows when the rerun got another one.
 A test file outside the rootdir (``-c ci/pytest.ini`` makes ``ci`` the rootdir) is
 named by pytest relative to the path the run started from that contains it, so a
 run of its node ID would give the row another node ID, and with it other random
-values. Its command starts from the run's own paths instead, and selects the row
-with ``-k``: ``pytest . --rng-seed=S -c ci/pytest.ini -k 'test_write[rand-3]'``.
-When no ``-k`` expression selects only that row, the node ID command is given, and
-the section says that it does not reproduce the row (``note``).
+values. Its command starts from the run's own paths instead, leaves out what the
+run's ``--ignore`` and ``--ignore-glob`` left out, and selects the row with ``-k``:
+``pytest . --rng-seed=S -c ci/pytest.ini -k 'test_write[rand-3]'``. When no ``-k``
+expression selects only that row, the node ID command is given, and the section
+says that it does not reproduce the row (``note``).
 
 A ``--junitxml`` report gets the section in the failure text, the seed and each
 failed row's command as properties of the test suite (``suite_properties``), and,
@@ -262,10 +263,28 @@ def start_args(config: pytest.Config, start: Path) -> list[str] | None:
     return found
 
 
+def ignore_args(config: pytest.Config, start: Path) -> list[str]:
+    """
+    Return the run's ``--ignore`` and ``--ignore-glob`` options (from the command
+    line or the ini file's addopts), unquoted, each value relative to the folder
+    ``start``: the files they left out were not collected, so a command that starts
+    from the run's paths must leave them out too.
+    """
+    args: dict[tuple[str, str], None] = {}
+    for name, dest in (("--ignore", "ignore"), ("--ignore-glob", "ignore_glob")):
+        for value in getattr(config.option, dest, None) or ():
+            # pytest makes them absolute from the folder it was started in
+            path = Path(os.path.abspath(config.invocation_params.dir / str(value)))
+            args[name, bestrelpath(start, path)] = None
+    return [arg for pair in args for arg in pair]
+
+
 def keyword(item: pytest.Item) -> str | None:
     """
     Return a ``-k`` expression that selects only ``item`` among the tests the run
-    collected, those it deselected included: the item's name
+    collected, those it deselected included (those its ``--ignore`` and
+    ``--ignore-glob`` left out, which it never saw, stay out of the command through
+    ``ignore_args``): the item's name
     (``test_write[rand-3]``), else with its module's (``test_dma.py and
     test_write[rand-3]``), else with its classes' too. None when there is no such
     expression, or a name does not fit ``-k``'s grammar (``test_esm[ch=2-rand-1]``).
@@ -322,7 +341,8 @@ def _outside_command(
     """
     Return the command that runs a row outside the rootdir again from the folder
     ``start``: from the paths the run started from, so that pytest gives it the same
-    node ID, selected with ``-k``. None when there is no such command.
+    node ID, without the files the run's ``--ignore`` and ``--ignore-glob`` left out
+    (``ignore_args``), selected with ``-k``. None when there is no such command.
     """
     args = start_args(item.config, start)
     if args is None:
@@ -330,7 +350,7 @@ def _outside_command(
     expression = keyword(item)
     if expression is None:
         return None
-    return keyword_command(args, seed, options, expression)
+    return keyword_command([*args, *ignore_args(item.config, start)], seed, options, expression)
 
 
 def describe(infos: Sequence[VectorInfo]) -> str:
@@ -432,12 +452,14 @@ def failure(item: pytest.Item, infos: Sequence[VectorInfo]) -> tuple[str, dict[s
       ``(outside the rootdir)`` for a file outside the rootdir that the command
       does not reproduce;
     - ``seed``: the run's seed;
-    - ``options``: the command's arguments after ``--rng-seed``, unquoted, as a
-      JSON list (``["--nsamples=13", "-c", "ci/pytest.ini"]``).
+    - ``options``: the arguments after ``--rng-seed`` of the command run from the
+      rootdir, unquoted, as a JSON list (``["--nsamples=13", "-c", "pytest.ini"]``
+      for ``-c ci/pytest.ini``): what the failed-seeds map records (``_reuse``).
     """
     config = item.config
     seed = infos[0].seed
     options = generation_options(config, infos)
+    recorded = generation_options(config, infos, start=config.rootpath)
     verbosity = int(getattr(config.option, "verbose", 0))
     row = describe(infos)
     note = None
@@ -456,7 +478,7 @@ def failure(item: pytest.Item, infos: Sequence[VectorInfo]) -> tuple[str, dict[s
                 "and other values. A run with a --rootdir that contains the test prints a "
                 "command that reproduces it."
             )
-    attribute = {"command": command, "row": row, "seed": str(seed), "options": json.dumps(options)}
+    attribute = {"command": command, "row": row, "seed": str(seed), "options": json.dumps(recorded)}
     return section(infos, command, verbosity, note), attribute
 
 

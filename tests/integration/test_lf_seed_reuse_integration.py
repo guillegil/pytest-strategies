@@ -494,6 +494,20 @@ def test_w(request, addr, len):
 
         result.stdout.no_fnmatch_line("*under the reused seed*")
 
+    def test_no_word_on_the_reused_rows_when_collection_failed(self, pytester):
+        # The session stops before it runs a test: the rows were not left out
+        self.record(pytester)
+        (pytester.path / "tests" / "b" / "test_lfr_b.py").write_text(
+            "import not_a_module\n", encoding="utf-8"
+        )
+
+        result = run(pytester, "--lf")
+
+        assert header(result) == [f"pytest-strategies: RNG seed = {S2}", REUSED.format("--lf")]
+        assert result.ret == pytest.ExitCode.INTERRUPTED
+        result.stdout.fnmatch_lines(["*ERROR collecting tests/b/test_lfr_b.py*"])
+        result.stdout.no_fnmatch_line("*under the reused seed*")
+
     def test_an_entry_whose_file_was_deleted_is_ignored(self, pytester):
         a, _ = self.record(pytester)
         (pytester.path / "tests" / "b" / "test_lfr_b.py").unlink()
@@ -523,6 +537,8 @@ def test_w(request, addr, len):
                 f"  pytest --lf --rng-seed={S1} tests/a/test_lfr_a.py  # 2 rows",
             ]
         )
+        # The workers collected the reused rows, and said so to the controller
+        result.stdout.no_fnmatch_line("*under the reused seed*")
         assert set(failed_seeds(pytester)) == set(nodeids("tests/a") + nodeids("tests/b"))
 
 
@@ -579,11 +595,14 @@ class TestOutsideTheRootdir:
         result.assert_outcomes(failed=2, deselected=10)
         assert values(result) == values(b)
         deselect = [f"--deselect {quote(nodeid)}" for nodeid in nodeids("tests/b")]
+        # The map holds -c relative to the rootdir; the command gives it from the
+        # folder pytest runs in, in the platform's form
+        ini = quote(str(Path("ci", "pytest.ini")))
         result.stdout.fnmatch_lines(
             [
                 "pytest-strategies: deselected 2 failed rows recorded under another seed; "
                 "run them with:",
-                f"  pytest --lf --rng-seed={S1} -c ci/pytest.ini . {' '.join(deselect)}  # 2 rows",
+                f"  pytest --lf --rng-seed={S1} -c {ini} . {' '.join(deselect)}  # 2 rows",
             ]
         )
 
@@ -609,7 +628,8 @@ class TestOutsideTheRootdir:
         assert command == [
             "--lf",
             f"--rng-seed={S1}",
-            *self.CI,
+            "-c",
+            str(Path("ci", "pytest.ini")),
             ".",
             "--ignore",
             str(Path("ci", "test_lfr_ci.py")),
@@ -617,6 +637,76 @@ class TestOutsideTheRootdir:
         again = run(pytester, *command, rootdir="ci")
         assert ran(pytester, "ci") == nodeids("tests/a")
         assert values(again) == values(a)
+
+
+class TestFromAnotherFolder:
+    """
+    The rows are recorded from the top folder with ``-c ci/pytest.ini``, which makes
+    ``ci`` the rootdir, and rerun from ``ci``, where pytest finds that file itself:
+    the map holds ``-c`` relative to the rootdir.
+    """
+
+    def record(self, pytester):
+        """Fail two rows of ci/tests/a under S1, then two rows of ci/tests/b under S2."""
+        files = {
+            "ci/pytest.ini": "[pytest]\n",
+            "ci/conftest.py": CONFTEST,
+            "ci/tests/strategies.py": STRATEGIES,
+            "ci/tests/a/test_lfr_a.py": module(),
+            "ci/tests/b/test_lfr_b.py": module(),
+        }
+        for name, text in files.items():
+            (pytester.path / name).parent.mkdir(parents=True, exist_ok=True)
+            (pytester.path / name).write_text(text, encoding="utf-8")
+        found = []
+        for folder, seed in (("a", S1), ("b", S2)):
+            path = str(Path("ci", "tests", folder))
+            result = run(pytester, "-c", "ci/pytest.ini", path, f"--rng-seed={seed}", rootdir="ci")
+            result.assert_outcomes(failed=2, passed=4)
+            found.append(result)
+        assert {entry["options"][1] for entry in failed_seeds(pytester, "ci").values()} == {
+            "pytest.ini"
+        }
+        return found
+
+    @staticmethod
+    def errors(result):
+        """The failed rows' assertion messages, without the short summary's paths."""
+        return [line for line in values(result) if line.startswith("E ")]
+
+    def test_the_command_for_rows_of_another_seed_runs_from_there(self, pytester, monkeypatch):
+        a, b = self.record(pytester)
+        monkeypatch.chdir(pytester.path / "ci")
+
+        result = run(pytester, "--lf", rootdir="ci")
+
+        # The run uses the ini file the rows were recorded with: no difference
+        assert header(result) == [f"pytest-strategies: RNG seed = {S2}", REUSED.format("--lf")]
+        assert self.errors(result) == self.errors(b) != []
+        (command,) = printed(result)
+        assert command == [
+            "--lf",
+            f"--rng-seed={S1}",
+            "-c",
+            "pytest.ini",
+            "tests/a/test_lfr_a.py",
+        ]
+        again = run(pytester, *command, rootdir="ci")
+        again.assert_outcomes(failed=2)
+        assert ran(pytester, "ci") == nodeids("tests/a")
+        assert self.errors(again) == self.errors(a)
+
+    def test_a_row_that_passes_there_under_its_seed_is_removed(self, pytester, monkeypatch):
+        self.record(pytester)
+        monkeypatch.chdir(pytester.path / "ci")
+        (pytester.path / "ci" / "tests" / "a" / "test_lfr_a.py").write_text(
+            module(()), encoding="utf-8"
+        )
+
+        result = run(pytester, "--lf", f"--rng-seed={S1}", str(Path("tests", "a")), rootdir="ci")
+
+        result.assert_outcomes(passed=2)
+        assert list(failed_seeds(pytester, "ci")) == nodeids("tests/b")
 
 
 class TestTheMap:

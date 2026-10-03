@@ -20,6 +20,7 @@ from pytest_strategy._repro import (
     SectionedRepr,
     describe,
     generation_options,
+    ignore_args,
     keyword_command,
     outside_rootdir,
     quote,
@@ -543,6 +544,34 @@ class TestRerunNodeid:
         config = Namespace(args=["tests", "acme.tests"], invocation_params=Namespace(dir=tmp_path))
 
         assert start_args(config, tmp_path) is None
+
+    @pytest.mark.parametrize(
+        ("ignore", "ignore_glob", "start", "expected"),
+        [
+            (None, None, ".", []),
+            (["tests/b/", "./tests/b"], None, ".", ["--ignore", "tests/b"]),
+            (["tests/b"], ["*/zz/*"], ".", ["--ignore", "tests/b", "--ignore-glob", "*/zz/*"]),
+            (
+                ["tests/b"],
+                ["*/zz/*"],
+                "ci",
+                ["--ignore", "../tests/b", "--ignore-glob", "../*/zz/*"],
+            ),
+        ],
+        ids=["none", "once_normalized", "both", "from_ci"],
+    )
+    def test_the_run_s_ignored_paths(self, tmp_path, ignore, ignore_glob, start, expected):
+        config = Namespace(
+            option=Namespace(ignore=ignore, ignore_glob=ignore_glob),
+            invocation_params=Namespace(dir=tmp_path),
+        )
+
+        found = ignore_args(config, tmp_path / start)
+
+        # In the platform's form
+        assert found == [
+            arg if arg.startswith("--") else str(Path(*arg.split("/"))) for arg in expected
+        ]
 
     def test_the_k_command(self):
         command = keyword_command([".", "a b"], 5, ["-c", "ci/pytest.ini"], "m.py and t[x]")
