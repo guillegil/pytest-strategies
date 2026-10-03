@@ -707,10 +707,10 @@ def sim(request):
         for test in ("test_b", "test_c"):
             assert "E       RuntimeError: no simulator for root" in errors[test]
             assert not any(line.startswith("E") and guard in line for line in errors[test])
-        assert errors["test_b"][-2:] == [
-            "------------------------------ pytest-strategies -------------------------------",
-            guard,
-        ]
+        # The section rule's width follows the terminal (79 columns on Windows)
+        header, message = errors["test_b"][-2:]
+        assert re.fullmatch(r"-+ pytest-strategies -+", header)
+        assert message == guard
         assert not any(" pytest-strategies " in line for line in errors["test_c"])
         assert result.stdout.lines.count(guard) == 1
 
