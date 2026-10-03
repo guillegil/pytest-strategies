@@ -312,3 +312,17 @@ class TestIdsFormat:
             check_ids_format(_make_config(ids=raw))
 
         assert str(excinfo.value) == f"strategies_ids must be 'names' or 'values', got {raw!r}"
+
+    def test_check_a_value_pytest_cannot_read_as_a_string(self):
+        """pytest 9 raises TypeError for a TOML value that is not a string."""
+        error = TypeError(
+            "pytest.toml: config option 'strategies_ids' expects a string, got int: 1"
+        )
+        config = MagicMock()
+        config.getini.side_effect = error
+
+        with pytest.raises(pytest.UsageError) as excinfo:
+            check_ids_format(config)
+
+        assert str(excinfo.value) == f"strategies_ids must be 'names' or 'values'; {error}"
+        assert excinfo.value.__suppress_context__

@@ -1696,6 +1696,26 @@ they are keyword-only and no existing positional call changes meaning. Since 4.0
 `export_strategies()`'s `format` and `Parameter.generate_vectors()`'s options
 after `n` are keyword-only.
 
+Command-line options that a 4.x release adds are named `--strategy-<x>` and read
+as `config.option.strategy_<x>`, and ini options are named `strategies_<x>`; the
+3.0 options `--rng-seed`, `--nsamples`, `--vector-mode`, `--vector-name`,
+`--vector-index` and `--list-strategies` keep their names. A run sets an ini
+option with pytest's `-o`, and no command-line option mirrors one: a switch for
+the test IDs would make the `--lf` cache disagree from one run to the next. A new
+ini option is registered with `type="string"` and without `aliases=` (pytest 9
+only), and checked in the `tryfirst` `pytest_configure`, so a bad value is a
+`UsageError` (exit code 4) before the session starts; a value that pytest 9
+cannot read as a string (`strategies_ids = 1` in `pytest.toml`) gets the same
+message, and `--help` skips the check, as pytest does for its own ini options.
+`strategies_max_exhaustive` keeps its 3.0 check, made only when a run enumerates.
+pytest turns argparse's abbreviations off, so no name can clash with a prefix of
+another. Reserved for later releases: `--strategy-coverage` (4.2),
+`--strategy-export` and `--strategy-import` (vector export and import),
+`--strategy-lf` (a regression bank), `--strategy-profile` with the ini option
+`strategies_profiles` (run profiles), and the ini option `strategies_subtests`.
+`tests/integration/test_option_names_integration.py` checks the names against
+`pytest --help` with and without the plugin.
+
 `export_strategies()` and the `to_dict()` methods write schema 1 (`_export.py`,
 whose values go through `_encode.encode()`, as `VectorInfo.to_dict()`'s do).
 `_export.document()` calls each registration's factory as collection does and

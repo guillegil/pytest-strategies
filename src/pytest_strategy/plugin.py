@@ -2829,10 +2829,12 @@ def pytest_configure_session(config: Config) -> None:
     computed there follows it.
     """
     # A bad ini value stops the run with a usage error (exit code 4), before the
-    # session starts
+    # session starts. --help still shows the help, as it does for pytest's own
+    # ini options.
     from ._resolver import check_ids_format
 
-    check_ids_format(config)
+    if not config.option.help:
+        check_ids_format(config)
 
     # --list-strategies prints from pytest_collection_finish and exits. Under
     # pytest-xdist only the workers collect, and a worker's exit crashes the

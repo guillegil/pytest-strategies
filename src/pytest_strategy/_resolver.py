@@ -205,13 +205,18 @@ def check_ids_format(config: pytest.Config) -> None:
     Check the strategies_ids ini option.
 
     Raises:
-        pytest.UsageError: For a value other than "names" or "values"
+        pytest.UsageError: For a value other than "names" or "values", or one that
+            pytest cannot read as a string
     """
-    raw = config.getini("strategies_ids")
+    formats = " or ".join(repr(f) for f in ID_FORMATS)
+    try:
+        raw = config.getini("strategies_ids")
+    except TypeError as error:
+        # A value that is not a string in a native TOML configuration file
+        # (pytest 9's pytest.toml or [tool.pytest]), which pytest refuses to read
+        raise pytest.UsageError(f"strategies_ids must be {formats}; {error}") from None
     if not isinstance(raw, str) or raw.strip() not in ID_FORMATS:
-        raise pytest.UsageError(
-            f"strategies_ids must be {' or '.join(repr(f) for f in ID_FORMATS)}, got {raw!r}"
-        )
+        raise pytest.UsageError(f"strategies_ids must be {formats}, got {raw!r}")
 
 
 def _row_ids(rows: list[_Row]) -> list[str]:
