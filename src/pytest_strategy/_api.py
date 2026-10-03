@@ -15,7 +15,14 @@ from typing import Any, TypeVar
 import pytest
 
 from ._introspection import PYTEST_FIXTURES as _PYTEST_FIXTURES
-from ._registry import Factory, RegistryView, _describe_factory, registry, source_part
+from ._registry import (
+    Factory,
+    RegistryView,
+    _describe_factory,
+    registry,
+    source_part,
+    test_file_patterns,
+)
 from ._runtime import runtime
 from ._warnings import PytestStrategiesWarning
 
@@ -109,12 +116,12 @@ def export_strategies(*, format: str = "json") -> str:
     ``--nsamples`` value, ``"auto"``, or 10 without the option or outside a
     session. The context hook runs only for a factory that declares ``ctx``.
     Each call draws from a random stream of its own, keyed by the run's seed, the
-    strategy's name and the folder of its factory's file: relative to the rootdir
-    in a session, absolute outside one. The factory's module name stands for the
-    folder when the file is in an installed package (a site-packages or
-    dist-packages folder), whose path depends on where the package is installed,
-    and when the factory's code has no file (``exec``'d code, a notebook cell);
-    ``""`` without a module either.
+    strategy's name and where its factory is defined: the name of the factory's
+    module, the same wherever a package is installed or checked out, or for a
+    factory in a strategy file, a test module or a ``conftest.py``, which pytest
+    imports by their paths, the file's folder, relative to the rootdir in a
+    session and absolute outside one. ``""`` when the factory's code has neither
+    a file nor a module.
 
     Args:
         format: Export format (currently only "json" is supported), keyword-only
@@ -138,10 +145,10 @@ def export_strategies(*, format: str = "json") -> str:
     strategies_data = {}
     for name in registry.names():
         factory = registry.registrations(name)[-1].factory
-        # The factory's folder, as its file system spells it; its module's name for
-        # an installed package's factory or one whose code has no file (see
-        # source_part, as for a fixture's key)
-        folder = source_part(factory, rootpath, folder=True)
+        # The factory's module's name, or for a strategy file, a test module or a
+        # conftest.py its folder, as its file system spells it (see source_part, as
+        # for a fixture's key)
+        folder = source_part(factory, rootpath, folder=True, test_files=test_file_patterns(config))
         stream = StreamKey.root(seed_part(runtime.run_seed()), "export", name, folder)
         try:
             # The session's options for this strategy, the instance collection uses,

@@ -656,12 +656,14 @@ def _auto_order_from(key: StreamKey, rng_type: SequenceLike[Any]) -> list[tuple[
     ``key`` (``T/"order"/argname``), so an RNGSequence's permutation under
     ``--nsamples=auto`` depends on nothing but its argument.
     """
-    ambient = RNG._generator
-    RNG._generator = random.Random(key.seed_int())
-    try:
-        return _auto_order(rng_type)
-    finally:
-        RNG._generator = ambient
+    # Under the lock, as a row's generators are (Parameter._build_row)
+    with RNG._ambient._lock:
+        ambient = RNG._generator
+        RNG._generator = random.Random(key.seed_int())
+        try:
+            return _auto_order(rng_type)
+        finally:
+            RNG._generator = ambient
 
 
 # The constraints a generation call evaluates, as (name, function) pairs in order
@@ -1505,20 +1507,25 @@ class Parameter:
             all attempts were rejected
         """
         args = self.test_args
-        ambient = RNG._generator
-        generators = streams.start(pos, j, drawn, ambient)
-        try:
-            for _ in range(attempts):
-                for i, generator in generators:
-                    RNG._generator = generator
-                    values[i] = args[i].generate()
+        # RNG._generator is the process's: under the ambient generator's lock, which
+        # entering and ending a stream hold too, another thread that draws a row or
+        # enters a stream meanwhile cannot take an argument's generator for the one
+        # to put back (see _Ambient)
+        with RNG._ambient._lock:
+            ambient = RNG._generator
+            generators = streams.start(pos, j, drawn, ambient)
+            try:
+                for _ in range(attempts):
+                    for i, generator in generators:
+                        RNG._generator = generator
+                        values[i] = args[i].generate()
+                    RNG._generator = ambient
+                    # The whole row goes to the constraints, as a Vector
+                    row = tuple.__new__(row_type, values)
+                    if self._validate_vector(row, constraints, rejections, kind, index, labels):
+                        return row
+            finally:
                 RNG._generator = ambient
-                # The whole row goes to the constraints, as a Vector
-                row = tuple.__new__(row_type, values)
-                if self._validate_vector(row, constraints, rejections, kind, index, labels):
-                    return row
-        finally:
-            RNG._generator = ambient
         return None
 
     def generate_vector(self, *, _key: StreamKey | None = None) -> Vector:

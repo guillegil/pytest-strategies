@@ -17,18 +17,23 @@ import copy
 import dataclasses
 import functools
 import importlib.util
+import json
+import os
 import random
+import signal
 import sys
 import threading
 import time
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 import pytest
 
-from pytest_strategy import RNG, Parameter, RNGInteger, TestArg
-from pytest_strategy._registry import source_part
+from pytest_strategy import RNG, Parameter, RNGInteger, TestArg, export_strategies, register
+from pytest_strategy import rng as rng_module
+from pytest_strategy._registry import registry, source_part
 from pytest_strategy._resolver import build_parametrization
 from pytest_strategy._runtime import StrategyRuntime, runtime
 from pytest_strategy._streams import StreamKey, path_part
@@ -385,6 +390,266 @@ class TestAnotherThreadDraws:
         with _Stream(KEY):
             assert RNG.generator().random() == first_draws(KEY, 1)[0]
 
+    @pytest.mark.parametrize("call", ["draw", "seed"])
+    def test_a_draw_while_another_thread_seeds_the_stream_waits_for_it(self, call):
+        """
+        The stream stays pending until it is seeded: the main thread's draw, or its
+        RNG.seed(), while a thread seeds the stream waits for the seeding, and
+        neither comes from the state the seeding replaces nor is overwritten by it.
+        """
+        paused = threading.Event()
+        resume = threading.Event()
+        getstate = rng_module._mt_getstate
+
+        def pausing_getstate(generator):
+            # The thread pauses where _settle saves the state of the stream around
+            if threading.current_thread() is thread:
+                paused.set()
+                resume.wait(5)
+            return getstate(generator)
+
+        drawn = []
+        thread = threading.Thread(target=lambda: drawn.append(RNG._ambient.random()))
+        with _Stream(KEY):
+            outer = [RNG.generator().random()]
+            with _Stream(OTHER), mock.patch.object(rng_module, "_mt_getstate", pausing_getstate):
+                thread.start()
+                assert paused.wait(5)
+                assert RNG._ambient._pending is OTHER
+                # Let the thread go on once this thread waits for it
+                timer = threading.Timer(0.05, resume.set)
+                timer.start()
+                if call == "draw":
+                    inner = RNG.generator().random()
+                else:
+                    RNG.seed(42)
+                    inner = RNG.generator().random()
+                thread.join()
+                timer.join()
+            # The thread never drew from the outer stream
+            outer.append(RNG.generator().random())
+
+        assert drawn == first_draws(OTHER, 1)
+        if call == "draw":
+            assert inner == first_draws(OTHER, 2)[1]
+        else:
+            assert inner == random.Random(42).random()
+        assert outer == first_draws(KEY, 2)
+
+    @pytest.mark.parametrize(
+        "first_draws_before", [False, True], ids=["first_pending", "first_drawn"]
+    )
+    @pytest.mark.parametrize(
+        "second_draws_before", [False, True], ids=["second_pending", "second_drawn"]
+    )
+    def test_streams_that_end_in_the_order_they_began(
+        self, first_draws_before, second_draws_before
+    ):
+        """
+        Streams that two threads enter end in any order: one that ends before a
+        stream entered after it hands what it would put back to that stream, which
+        puts it back when it ends, and stays in use until then.
+        """
+        RNG.seed(3)
+        RNG.generator().random()
+        ambient = RNG._ambient
+        before = (ambient.getstate(), ambient._pending, list(ambient._streams))
+        first, second = _Stream(KEY), _Stream(OTHER)
+
+        first.__enter__()
+        if first_draws_before:
+            RNG.generator().random()
+        second.__enter__()
+        drawn = [RNG.generator().random()] if second_draws_before else []
+        first.__exit__(None, None, None)
+
+        assert ambient._streams == [*before[2], second]
+        # The second stream is still in use
+        drawn.append(RNG.generator().random())
+        assert drawn == first_draws(OTHER, len(drawn))
+        RNG.seed(7)
+        second.__exit__(None, None, None)
+
+        assert (ambient.getstate(), ambient._pending, ambient._streams) == before
+        assert (RNG.get_seed(), RNG.generator()) == (3, ambient)
+        generator = random.Random(3)
+        assert RNG.generator().random() == [generator.random() for _ in range(2)][1]
+
+    def test_export_in_a_thread_ends_its_stream_while_a_test_phase_runs(self, monkeypatch):
+        """
+        export_strategies() in a thread enters its export stream before a test
+        phase's stream begins in the main thread, and ends it first: the phase still
+        draws from its stream, and when it ends nothing is left pending.
+        """
+        monkeypatch.setattr(runtime, "_stack", [])
+        runtime.push(SimpleNamespace(getoption=lambda name, default=None: default))
+        runtime.current.all_loaded = True
+        runtime.current.run_seed = 7
+        registry.restore({})
+        exporting = threading.Event()
+        go = threading.Event()
+
+        @register("ps_unit_threaded_export")
+        def factory(rng):
+            rng.random()
+            exporting.set()
+            go.wait(5)
+            return Parameter(TestArg("x", rng_type=RNGInteger(0, 9)))
+
+        ambient = RNG._ambient
+        before = (ambient.getstate(), ambient._pending, list(ambient._streams), ambient)
+        exported = []
+        thread = threading.Thread(target=lambda: exported.append(export_strategies()))
+        try:
+            thread.start()
+            assert exporting.wait(5)
+            with _Stream(KEY):
+                drawn = [RNG.generator().random()]
+                go.set()
+                thread.join()
+                drawn.append(RNG.generator().random())
+            after = (ambient.getstate(), ambient._pending, list(ambient._streams), RNG.generator())
+        finally:
+            go.set()
+            thread.join()
+            runtime.pop()
+
+        assert "ps_unit_threaded_export" in json.loads(exported[0])
+        assert drawn == first_draws(KEY, 2)
+        assert after == before
+
+    def test_rows_drawn_by_two_threads_put_back_the_generator(self):
+        """
+        Each row installs its arguments' generators as RNG.generator() (a class
+        attribute) under the ambient generator's lock: a row that another thread
+        draws meanwhile waits for it, so neither takes the other's generator for
+        the one to put back.
+        """
+        first_entered = threading.Event()
+        first_go = threading.Event()
+        second_go = threading.Event()
+
+        class Waiting(RNGInteger):
+            def generate(self):
+                if threading.current_thread() is first:
+                    first_entered.set()
+                    first_go.wait(5)
+                elif threading.current_thread() is second:
+                    second_go.wait(5)
+                return super().generate()
+
+        param = Parameter(TestArg("x", rng_type=Waiting(0, 9)))
+        first = threading.Thread(target=lambda: param.generate_vectors(1))
+        second = threading.Thread(target=lambda: param.generate_vectors(1))
+        try:
+            first.start()
+            assert first_entered.wait(5)
+            second.start()
+            # Without the lock, the second row would now hold the first's generator
+            # as the one to put back, and end after the first
+            first_go.set()
+            first.join()
+            second_go.set()
+            second.join()
+        finally:
+            first_go.set()
+            second_go.set()
+            first.join()
+            second.join()
+
+        assert RNG.generator() is RNG._ambient
+
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork() is POSIX only")
+    def test_a_child_forked_while_another_thread_seeds_a_stream_can_draw(self):
+        """
+        A fork waits for the seeding, and the child gets a lock of its own: the
+        parent's lock, held by a thread the child does not have, would block the
+        child's first draw forever.
+        """
+        building = threading.Event()
+        built = threading.Event()
+
+        def key():
+            building.set()
+            built.wait(5)
+            return KEY
+
+        thread = threading.Thread(target=lambda: RNG._ambient.random())
+        with _Stream(key):
+            thread.start()
+            assert building.wait(5)
+            timer = threading.Timer(0.05, built.set)
+            timer.start()
+            with warnings.catch_warnings():
+                # Python 3.12+ warns that the process has other threads
+                warnings.simplefilter("ignore", DeprecationWarning)
+                pid = os.fork()
+            if pid == 0:
+                # The child: draws with a time limit, and leaves without pytest
+                code = 1
+                try:
+                    signal.alarm(5)
+                    with _Stream(OTHER):
+                        code = 0 if RNG._ambient.random() == first_draws(OTHER, 1)[0] else 1
+                finally:
+                    os._exit(code)
+            thread.join()
+            timer.join()
+        _, status = os.waitpid(pid, 0)
+
+        assert os.waitstatus_to_exitcode(status) == 0
+
+
+class TestTheSeedingThreadDraws:
+    """
+    A draw from the thread that seeds a stream, while it does (a signal handler,
+    or a finalizer the garbage collector runs), comes from the state in use, and
+    leaves the state the stream puts back alone.
+    """
+
+    def test_while_the_key_is_built(self):
+        reentered = []
+
+        calls = []
+
+        def key():
+            calls.append(1)
+            if len(calls) == 1:
+                reentered.append(RNG.generator().random())
+            return OTHER
+
+        with _Stream(KEY):
+            outer = [RNG.generator().random()]
+            with _Stream(key):
+                inner = [RNG.generator().random() for _ in range(2)]
+            outer.append(RNG.generator().random())
+
+        assert inner == first_draws(OTHER, 2)
+        assert outer == first_draws(KEY, 2)
+        # From the stream around, whose state was saved before
+        assert reentered == first_draws(KEY, 2)[1:]
+
+    def test_while_the_state_is_saved(self):
+        """Before the stream is marked as being seeded: the draw seeds it itself."""
+        reentered = []
+        getstate = rng_module._mt_getstate
+        calls = []
+
+        def drawing_getstate(generator):
+            calls.append(generator)
+            if len(calls) == 1:
+                reentered.append(RNG.generator().random())
+            return getstate(generator)
+
+        with _Stream(KEY):
+            outer = [RNG.generator().random()]
+            with _Stream(OTHER), mock.patch.object(rng_module, "_mt_getstate", drawing_getstate):
+                inner = [RNG.generator().random() for _ in range(2)]
+            outer.append(RNG.generator().random())
+
+        assert reentered + inner == first_draws(OTHER, 3)
+        assert outer == first_draws(KEY, 2)
+
 
 # ---------------------------------------------------------------------------
 # RNG.refresh_seed(key)
@@ -623,6 +888,42 @@ class TestFileStream:
         key = StreamKey.root(99, "file", "../shared/strategies.py")
         assert random.Random(key.seed_int()).randint(0, 10**9) == module.DRAW
 
+    def test_a_folder_linked_from_outside_is_keyed_as_pytest_spells_it(self, tmp_path, session):
+        """
+        Collection loads a test folder's strategy files by their real paths; a folder
+        linked into the rootdir from a place that does not move with the checkout
+        keys them by its link, as pytest spells it, in every checkout.
+        """
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        (shared / "strategies.py").write_text(DRAWING_SOURCE)
+        proj = tmp_path / "deep" / "proj"
+        proj.mkdir(parents=True)
+        try:
+            os.symlink(shared, proj / "tests_shared", target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks are not available")
+
+        PytestStrategyPlugin()._load_strategy_files(
+            [shared / "strategies.py"], _config(proj), spelled=proj / "tests_shared"
+        )
+
+        module = session.strategy_modules[next(iter(session.strategy_modules))]
+        key = StreamKey.root(99, "file", "tests_shared/strategies.py")
+        assert random.Random(key.seed_int()).randint(0, 10**9) == module.DRAW
+
+    @pytest.mark.parametrize("folder", ["site-packages", "dist-packages"])
+    def test_an_installed_packages_file_is_keyed_below_its_folder(self, tmp_path, session, folder):
+        path = tmp_path / "venv" / "lib" / folder / "acme" / "strategies.py"
+        path.parent.mkdir(parents=True)
+        path.write_text(DRAWING_SOURCE)
+
+        PytestStrategyPlugin()._load_strategy_files([path], _config(tmp_path))
+
+        module = session.strategy_modules[next(iter(session.strategy_modules))]
+        key = StreamKey.root(99, "file", "acme/strategies.py")
+        assert random.Random(key.seed_int()).randint(0, 10**9) == module.DRAW
+
     def test_a_reseed_in_a_file_stays_in_the_file(self, tmp_path, session):
         path = tmp_path / "strategies.py"
         path.write_text(FILE_SOURCE)
@@ -669,15 +970,25 @@ class TestDb:
 
 
 def load(path, name):
-    """Import the file at ``path`` as the module ``name``."""
+    """
+    Import the file at ``path`` as the module ``name``, and leave it out of
+    ``sys.modules``, as a module loaded by its path.
+    """
+    with imported(path, name) as module:
+        return module
+
+
+@contextlib.contextmanager
+def imported(path, name):
+    """Import the file at ``path`` as the module ``name``, in ``sys.modules`` in the block."""
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     try:
         spec.loader.exec_module(module)
+        yield module
     finally:
         del sys.modules[name]
-    return module
 
 
 class TestFixtureDefinition:
@@ -687,22 +998,26 @@ class TestFixtureDefinition:
         path.write_text(FIXTURES_SOURCE)
         module = load(path, "ps_unit_fixtures")
 
-        assert _fixture_definition(module.conn, tmp_path) == ("tests/conftest.py", "conn")
-        assert _fixture_definition(module.TestDb().conn, tmp_path) == (
+        assert _fixture_definition(module.conn, _config(tmp_path)) == ("tests/conftest.py", "conn")
+        assert _fixture_definition(module.TestDb().conn, _config(tmp_path)) == (
             "tests/conftest.py",
             "TestDb.conn",
         )
         # A functools.wraps decorator is looked through
-        assert _fixture_definition(module.wrapped, tmp_path) == ("tests/conftest.py", "wrapped")
+        assert _fixture_definition(module.wrapped, _config(tmp_path)) == (
+            "tests/conftest.py",
+            "wrapped",
+        )
 
     def test_a_file_outside_the_rootdir_is_relative_to_it(self, tmp_path):
+        """A module that sys.modules does not have under its name: loaded by its path."""
         path = tmp_path / "shared" / "fixtures.py"
         path.parent.mkdir()
         path.write_text(FIXTURES_SOURCE)
         (tmp_path / "proj").mkdir()
         module = load(path, "ps_unit_shared_fixtures")
 
-        assert _fixture_definition(module.conn, tmp_path / "proj") == (
+        assert _fixture_definition(module.conn, _config(tmp_path / "proj")) == (
             "../shared/fixtures.py",
             "conn",
         )
@@ -715,18 +1030,86 @@ class TestFixtureDefinition:
         path.write_text(FIXTURES_SOURCE)
         module = load(path, "acme.fixtures")
 
-        assert _fixture_definition(module.conn, tmp_path) == ("acme.fixtures", "conn")
-        assert _fixture_definition(module.TestDb().conn, tmp_path) == (
+        assert _fixture_definition(module.conn, _config(tmp_path)) == ("acme.fixtures", "conn")
+        assert _fixture_definition(module.TestDb().conn, _config(tmp_path)) == (
             "acme.fixtures",
             "TestDb.conn",
         )
+
+    def test_a_package_is_named_by_its_module_wherever_it_is(self, tmp_path):
+        """
+        Installed, installed in editable mode (its source tree's src/ folder, or
+        setuptools' strict editable folder), or in another checkout: one key, so a
+        seed from a run of the installed package reruns in a checkout of it.
+        """
+        found = set()
+        for folder in (
+            tmp_path / "proj" / ".tox" / "py311" / "lib" / "python3.11" / "site-packages",
+            tmp_path / "proj" / "src",
+            tmp_path / "proj" / "build" / "__editable__.acme-1.0",
+            tmp_path / "other" / "src",
+        ):
+            path = folder / "acme" / "testing.py"
+            path.parent.mkdir(parents=True)
+            path.write_text(FIXTURES_SOURCE)
+            with imported(path, "acme.testing") as module:
+                found.add(_fixture_definition(module.conn, _config(tmp_path / "proj")))
+                found.add((source_part(module.conn, tmp_path / "proj", folder=True), "export"))
+
+        assert found == {("acme.testing", "conn"), ("acme.testing", "export")}
+
+    @pytest.mark.parametrize(
+        "name", ["conftest.py", "test_db.py", "db_test.py", "strategies.py", "db_strategies.py"]
+    )
+    def test_a_file_pytest_imports_by_its_path_is_named_by_its_path(self, tmp_path, name):
+        """Its module's name depends on --import-mode and the __init__.py files."""
+        path = tmp_path / "tests" / "acme" / name
+        path.parent.mkdir(parents=True)
+        path.write_text(FIXTURES_SOURCE)
+
+        with imported(path, "acme." + name.removesuffix(".py")) as module:
+            assert _fixture_definition(module.conn, _config(tmp_path)) == (
+                f"tests/acme/{name}",
+                "conn",
+            )
+            assert source_part(module.conn, tmp_path, folder=True) == "tests/acme"
+
+    def test_the_test_modules_are_those_of_python_files(self, tmp_path):
+        config = SimpleNamespace(rootpath=tmp_path, getini={"python_files": ["check_*.py"]}.get)
+        found = []
+        for name in ("check_db.py", "test_db.py"):
+            path = tmp_path / "acme" / name
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(FIXTURES_SOURCE)
+            with imported(path, "acme." + name.removesuffix(".py")) as module:
+                found.append(_fixture_definition(module.conn, config)[0])
+
+        assert found == ["acme/check_db.py", "acme.test_db"]
+
+    @pytest.mark.parametrize("module", ["tests.helpers", "proj.tests.helpers"])
+    def test_a_name_that_begins_above_the_rootdir_is_not_used(self, tmp_path, module):
+        """
+        A rootdir with an __init__.py (pytest.ini in tests/, or a package checkout):
+        a module's name then begins with the name of the rootdir's folder, or of
+        one above it, which another checkout may not have.
+        """
+        path = tmp_path / "proj" / "tests" / "helpers.py"
+        path.parent.mkdir(parents=True)
+        path.write_text(FIXTURES_SOURCE)
+
+        with imported(path, module) as loaded:
+            assert _fixture_definition(loaded.conn, _config(path.parent))[0] == "helpers.py"
+            # From the folder the name is relative to, or a folder below it: the name
+            assert _fixture_definition(loaded.conn, _config(path.parent.parent))[0] == (
+                "tests.helpers" if module == "tests.helpers" else "tests/helpers.py"
+            )
 
     def test_a_partial_counts_as_the_function_it_wraps(self, tmp_path):
         path = tmp_path / "conftest.py"
         path.write_text(FIXTURES_SOURCE)
         module = load(path, "ps_unit_partial_fixtures")
 
-        assert _fixture_definition(functools.partial(module.conn), tmp_path) == (
+        assert _fixture_definition(functools.partial(module.conn), _config(tmp_path)) == (
             "conftest.py",
             "conn",
         )
@@ -744,7 +1127,7 @@ class TestFixtureDefinition:
         found = []
         for cwd in (tmp_path, tmp_path / "tests"):
             monkeypatch.chdir(cwd)
-            found.append(_fixture_definition(namespace["made"], tmp_path))
+            found.append(_fixture_definition(namespace["made"], _config(tmp_path)))
 
         assert found == [(where, "made")] * 2
 

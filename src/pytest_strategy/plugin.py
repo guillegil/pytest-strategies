@@ -25,7 +25,7 @@ import re
 import sys
 import traceback
 from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
-from pathlib import Path, PurePath
+from pathlib import Path
 from types import ModuleType
 from typing import Any, get_args
 
@@ -36,16 +36,19 @@ from pytest import Config, Session
 
 from ._options import VectorMode, constraint_off_item, parse_constraint_off
 from ._registry import (
+    STRATEGY_FILE_PATTERNS,
     Registration,
     _contains,
     _describe_factory,
     display_path,
     factory_source,
+    matches_pattern,
     registry,
     source_part,
+    test_file_patterns,
 )
 from ._runtime import runtime
-from ._streams import StreamKey, path_part, seed_part
+from ._streams import StreamKey, file_part, seed_part
 from ._vector import VECTOR_KEY, VECTORS_KEY, VectorInfo
 from .rng import RNG, _Stream
 
@@ -62,7 +65,7 @@ _UNFILLED_RECORDS = pytest.StashKey[list[tuple[str, str]]]()
 _DIRECT_PARAM_FIXTURE: Any = getattr(_pytest.python, "get_direct_param_fixture_func", None)
 
 # Strategy file names; a file is imported only if it also contains a registration
-_STRATEGY_FILE_PATTERNS = ("strategies.py", "strategy.py", "*_strategies.py", "*_strategy.py")
+_STRATEGY_FILE_PATTERNS = STRATEGY_FILE_PATTERNS
 
 # A registration decorator: @Strategy.register(...), or @register("name") and
 # @<module>.register("name") with a string literal, also as name="..."
@@ -92,13 +95,7 @@ def _matches_norecursedirs(pattern: str, path: Path) -> bool:
     one with a separator (e.g. ``tests/data``) against the end of the path
     (pytest's ``_pytest.pathlib.fnmatch_ex``).
     """
-    if os.sep != "/" and os.sep not in pattern and "/" in pattern:
-        pattern = pattern.replace("/", os.sep)
-    if os.sep not in pattern:
-        return fnmatch.fnmatch(path.name, pattern)
-    if PurePath(path).is_absolute() and not os.path.isabs(pattern):
-        pattern = f"*{os.sep}{pattern}"
-    return fnmatch.fnmatch(str(path), pattern)
+    return matches_pattern(pattern, str(path))
 
 
 class _LoadedModuleLoader(importlib.abc.Loader):
@@ -248,7 +245,7 @@ class PytestStrategyPlugin:
         imported do not depend on which test modules were collected before.
         """
         if isinstance(collector, pytest.Module) and runtime.current is not None:
-            self._load_directories(collector.config, os.path.realpath(collector.path.parent))
+            self._load_directories(collector.config, collector.path.parent)
 
     @pytest.hookimpl(wrapper=True)
     def pytest_make_collect_report(
@@ -256,7 +253,8 @@ class PytestStrategyPlugin:
     ) -> Generator[None, pytest.CollectReport, pytest.CollectReport]:
         """
         Collect a test module on a random stream of its own, root(S, "module", path)
-        (streams v1), where path is the module's path relative to the rootdir.
+        (streams v1), where path is the module's path relative to the rootdir, or
+        below its site-packages folder for an installed package's (``file_part``).
 
         Values the module draws when it is imported (``BASE = RNG.integer(0, 9)`` at
         module level) are then the same whether it is collected alone or with other
@@ -267,7 +265,7 @@ class PytestStrategyPlugin:
             return (yield)
         seed = seed_part(_run_seed())
         path, rootpath = collector.path, collector.config.rootpath
-        with _Stream(lambda: StreamKey.root(seed, "module", path_part(path, rootpath))):
+        with _Stream(lambda: StreamKey.root(seed, "module", file_part(path, rootpath))):
             return (yield)
 
     @pytest.hookimpl(tryfirst=True)
@@ -514,9 +512,9 @@ class PytestStrategyPlugin:
         """
         Set a fixture up on a random stream of its own (streams v1): root(S,
         "fixture", scope, name, param_index, where, qualname, base), where scope is
-        the node ID of the fixture's scope node ("" for the session), and where,
-        qualname and base tell the fixture from another of the same name
-        (``_fixture_definition``, ``_fixture_base``).
+        the node ID of the fixture's scope node ("" for the session and the rootdir's
+        package, ``_node_part``), and where, qualname and base tell the fixture from
+        another of the same name (``_fixture_definition``, ``_fixture_base``).
 
         A module- or session-scoped fixture is set up during the setup of whichever
         test needs it first; with its own stream, its draws, and that test's, do
@@ -528,14 +526,14 @@ class PytestStrategyPlugin:
         if fixturedef.func is _DIRECT_PARAM_FIXTURE or state is None:
             return (yield)
         seed = seed_part(_run_seed())
-        scope = request.node.nodeid
+        scope = _node_part(request.node.nodeid)
         param_index = getattr(request, "param_index", 0)
 
         def key() -> StreamKey:
             definition = state.fixture_definitions.get(fixturedef)
             if definition is None:
                 definition = (
-                    *_fixture_definition(fixturedef.func, request.config.rootpath),
+                    *_fixture_definition(fixturedef.func, request.config),
                     _fixture_base(fixturedef),
                 )
                 state.fixture_definitions[fixturedef] = definition
@@ -598,7 +596,7 @@ class PytestStrategyPlugin:
 
         directory = _file_key(test_path.parent)
         if config is not None:
-            self._load_directories(config, os.path.realpath(test_path.parent))
+            self._load_directories(config, test_path.parent)
         found = registry.nearest(ref, directory)
         if found is not None:
             return ref, found.factory
@@ -621,17 +619,22 @@ class PytestStrategyPlugin:
             raise ValueError(_ambiguous_message(ref, test_path, candidates))
         raise ValueError(strategy_not_found_message(ref, directory, rootpath))
 
-    def _load_directories(self, config: Config, directory: str) -> None:
+    def _load_directories(self, config: Config, folder: Path) -> None:
         """
-        Load the strategy files of ``directory`` and each directory above it, closest first.
+        Load the strategy files of a test module's folder and each directory above
+        it, closest first.
 
-        ``directory`` is a real path as the file system spells it, not a
-        ``_file_key``: files are imported and reported under their own spelling
-        (on Windows, ``_file_key`` lowercases the path).
+        The directories are its real path and those above it, as the file system
+        spells them, not ``_file_key``s: files are imported and reported under their
+        own spelling (on Windows, ``_file_key`` lowercases the path). The random
+        streams of the folder's own files are keyed by its path as pytest spells it
+        (``folder``), which is the same in every checkout for a folder linked into
+        the rootdir from a place that does not move with it (``path_part``).
         """
         state = runtime.current
         if state is None:
             return
+        directory = os.path.realpath(folder)
         for current in self._directories_up(config, directory):
             key = os.path.normcase(current)
             if key in state.loaded_dirs:
@@ -639,7 +642,9 @@ class PytestStrategyPlugin:
             state.loaded_dirs.add(key)
             files = self._strategy_files_in(Path(current))
             if files:
-                self._load_strategy_files(files, config)
+                self._load_strategy_files(
+                    files, config, spelled=folder if current == directory else None
+                )
 
     def _directories_up(self, config: Config, directory: str) -> Iterator[str]:
         """
@@ -1037,7 +1042,9 @@ class PytestStrategyPlugin:
         except OSError:
             return b""
 
-    def _load_strategy_files(self, strategy_files: list[Path], config: Config) -> None:
+    def _load_strategy_files(
+        self, strategy_files: list[Path], config: Config, spelled: Path | None = None
+    ) -> None:
         """
         Load strategy definition files by importing them.
 
@@ -1045,12 +1052,15 @@ class PytestStrategyPlugin:
         importer with the session's --import-mode, so it gets the module name a
         test module importing it would use. Values a file draws from the RNG when
         it is imported come from a stream of its own, derived from the run's seed
-        and its path relative to the rootdir, so they do not depend on which files
-        were loaded before, nor on where the checkout is.
+        and its path relative to the rootdir (or below its site-packages folder,
+        ``file_part``), so they do not depend on which files were loaded before,
+        nor on where the checkout is.
 
         Args:
             strategy_files: List of strategy file paths to load
             config: Pytest config object
+            spelled: The files' folder as pytest spells it, when the files are
+                spelled by its real path (see ``_load_directories``)
         """
         state = runtime.current
         for file_path in strategy_files:
@@ -1074,7 +1084,10 @@ class PytestStrategyPlugin:
                 StreamKey.root(
                     seed_part(_run_seed()),
                     "file",
-                    path_part(file_path, getattr(config, "rootpath", None)),
+                    file_part(
+                        file_path if spelled is None else spelled / file_path.name,
+                        getattr(config, "rootpath", None),
+                    ),
                 )
             )
             try:
@@ -1405,22 +1418,27 @@ def _run_seed() -> int:
     return runtime.run_seed()
 
 
-def _fixture_definition(func: Callable[..., Any], rootpath: Path | None) -> tuple[str, str]:
+def _fixture_definition(func: Callable[..., Any], config: Config | None) -> tuple[str, str]:
     """
-    Return where a fixture is defined, as two parts of its stream key: its file,
-    relative to the rootdir in posix form (``source_part()``), and its function's
+    Return where a fixture is defined, as two parts of its stream key: its module's
+    name, or its file relative to the rootdir in posix form for a conftest.py, a
+    test module or a strategy file (``source_part()``), and its function's
     qualified name (``TestDb.conn`` for one defined in a class).
 
     pytest sets up a fixture that overrides another of the same name (``def
     x(x)`` in a test module, over the conftest's ``x``), and the session fixtures
     of one name in two sibling folders' conftest.py files, for the same scope
-    node: their definitions give them streams of their own. A fixture of an
-    installed package (a file in a site-packages or dist-packages folder, such as
-    a plugin's), or one whose code has no file (``exec``'d code), is named by its
-    module instead of its file, whose path depends on where the package is
-    installed, or on the working directory.
+    node: their definitions give them streams of their own. A fixture that a
+    package defines (a plugin's, or a helper module's) is named by its module, so
+    it draws the same whether the package is installed, installed in editable
+    mode or checked out next to the tests. One whose code has no file
+    (``exec``'d code) is named by its module too: its file would resolve against
+    the working directory.
     """
-    return source_part(func, rootpath), factory_source(func)[1] or ""
+    return (
+        source_part(func, getattr(config, "rootpath", None), test_files=test_file_patterns(config)),
+        factory_source(func)[1] or "",
+    )
 
 
 def _fixture_base(fixturedef: pytest.FixtureDef[Any]) -> str:
@@ -1428,7 +1446,7 @@ def _fixture_base(fixturedef: pytest.FixtureDef[Any]) -> str:
     Return where pytest registered a fixture, as a part of its stream key: the
     node ID below which it is visible (``FixtureDef.baseid``), the folder of its
     conftest.py, its test module or class, or ``""`` for a plugin's fixture and
-    the rootdir's conftest.py (pytest 9 gives ``"."`` there, and pytest 8 ``""``).
+    the rootdir's conftest.py (``_node_part``).
 
     One fixture function that two conftest.py files import (``from
     helpers.fixtures import port``) is registered twice, and pytest sets both up
@@ -1436,8 +1454,20 @@ def _fixture_base(fixturedef: pytest.FixtureDef[Any]) -> str:
     """
     # pytest 9 registers a fixture for a node, and derives baseid from it
     node = getattr(fixturedef, "node", None)
-    base = node.nodeid if node is not None else getattr(fixturedef, "baseid", "")
-    return "" if base == "." else str(base)
+    return _node_part(str(node.nodeid if node is not None else getattr(fixturedef, "baseid", "")))
+
+
+def _node_part(nodeid: str) -> str:
+    """
+    Return a node ID as a part of a fixture's stream key: ``""`` for the rootdir's
+    node (``"."``, a ``Dir``, or a ``Package`` when the rootdir has an
+    ``__init__.py``), as for the session, which covers the same tests.
+
+    pytest 9 gives ``"."`` where pytest 8 gives ``""``: as the base of a fixture of
+    the rootdir's conftest.py, and as the scope node of a package-scoped fixture
+    there when the rootdir is a package (pytest 8 then sets it up for the session).
+    """
+    return "" if nodeid == "." else nodeid
 
 
 def _phase_stream(item: pytest.Item, phase: str) -> contextlib.AbstractContextManager[Any]:

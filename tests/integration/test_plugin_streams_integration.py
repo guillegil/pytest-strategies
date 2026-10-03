@@ -14,6 +14,7 @@ project on purpose (see test_session_isolation_integration.py for rationale).
 import ast
 import importlib.util
 import json
+import os
 import random
 from textwrap import dedent
 
@@ -721,9 +722,10 @@ class TestFixturesOfOneName:
             "modvalue override": fixture(override, "modvalue", override, override),
             "resource a": fixture("", "resource", "tests/a/conftest.py", "tests/a"),
             "resource b": fixture("", "resource", "tests/b/conftest.py", "tests/b"),
-            # One function: the folder pytest registered it for tells them apart
-            "port a": fixture("", "port", "ps_shared_fixtures.py", "tests/a"),
-            "port b": fixture("", "port", "ps_shared_fixtures.py", "tests/b"),
+            # One function, of a module imported by its name: the folder pytest
+            # registered it for tells them apart
+            "port a": fixture("", "port", "ps_shared_fixtures", "tests/a"),
+            "port b": fixture("", "port", "ps_shared_fixtures", "tests/b"),
         }
         # 4.0's first key had no definition, and its second no base: these pairs
         # drew the same values
@@ -845,6 +847,237 @@ def test_an_installed_packages_factory_exports_the_same_from_any_environment(pyt
 
     key = StreamKey.root(SEED, "export", "ps_installed", "ps_installed_strategies")
     assert exported == [str(randint(key))] * 2
+
+
+# ---------------------------------------------------------------------------
+# Keys that do not depend on the environment or the checkout
+# ---------------------------------------------------------------------------
+
+
+# Writes what a project draws to draws.jsonl in the working directory
+DRAWS = """
+    import json
+    import pathlib
+
+    def record(label, value):
+        with open(pathlib.Path.cwd() / "draws.jsonl", "a") as out:
+            out.write(json.dumps([label, value]) + "\\n")
+"""
+
+
+def read_draws(path):
+    """Return the values each label recorded in ``path``/draws.jsonl, then remove it."""
+    found = {}
+    for line in (path / "draws.jsonl").read_text().splitlines():
+        label, value = json.loads(line)
+        found.setdefault(label, set()).add(value)
+    (path / "draws.jsonl").unlink()
+    assert all(len(values) == 1 for values in found.values()), found
+    return {label: values.pop() for label, values in found.items()}
+
+
+ROOT_PACKAGE_CONFTEST = """
+    import pytest
+
+    from pytest_strategy import RNG
+    from ps_draws import record
+
+    @pytest.fixture(scope="package")
+    def root_pkg():
+        value = RNG.integer(0, 10**9)
+        record("root_pkg", value)
+        return value
+"""
+
+
+def test_a_package_fixture_of_a_rootdir_that_is_a_package(pytester, monkeypatch):
+    """
+    pytest 9 sets it up for the rootdir's Package, whose node ID is ".", and pytest
+    8 for the session, whose node ID is "": both are keyed by "", so the fixture
+    draws the same on both.
+    """
+    tests = pytester.mkdir("tests")
+    (tests / "pytest.ini").write_text(f"[pytest]\npythonpath = {pytester.path.as_posix()}\n")
+    (tests / "__init__.py").write_text("")
+    (tests / "conftest.py").write_text(dedent(ROOT_PACKAGE_CONFTEST))
+    (tests / "test_a.py").write_text("def test_a(root_pkg):\n    pass\n")
+    (tests / "sub").mkdir()
+    (tests / "sub" / "__init__.py").write_text("")
+    (tests / "sub" / "test_b.py").write_text("def test_b(root_pkg):\n    pass\n")
+    pytester.makepyfile(ps_draws=DRAWS)
+    monkeypatch.chdir(tests)
+
+    result = pytester.runpytest_subprocess("-p", "no:cacheprovider", f"--rng-seed={SEED}")
+
+    result.assert_outcomes(passed=2)
+    key = StreamKey.root(SEED, "fixture", "", "root_pkg", 0, "conftest.py", "root_pkg", "")
+    assert read_draws(tests) == {"root_pkg": randint(key)}
+
+
+PACKAGE_FIXTURES = """
+    import pytest
+
+    from pytest_strategy import RNG, Parameter, TestArg, register
+
+    @pytest.fixture(scope="session")
+    def device():
+        return RNG.integer(0, 10**9)
+
+    @register("ps_device")
+    def device_rows(rng):
+        return Parameter(TestArg("d", value=rng.randint(0, 10**9)), nsamples=1)
+"""
+
+PACKAGE_TESTS = """
+    import json
+
+    from pytest_strategy import export_strategies
+    from ps_draws import record
+
+    def test_device(device):
+        record("device", device)
+        exported = json.loads(export_strategies())["ps_device"]
+        record("export", exported["arguments"][0]["static_value"])
+"""
+
+
+def test_a_packages_fixture_draws_the_same_installed_or_from_its_source(pytester):
+    """
+    A package that ships fixtures and strategies, run installed (tox, CI) and in
+    editable mode from its checkout's src/ folder: they are keyed by their module's
+    name, so a seed recorded in one reruns in the other.
+    """
+    pytester.makeconftest("from acme_ps.testing import device")
+    pytester.makepyfile(ps_draws=DRAWS, test_device=PACKAGE_TESTS)
+    draws = []
+    for folder in ("src", ".tox/py/lib/python3/site-packages"):
+        package = pytester.path / folder / "acme_ps"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("")
+        (package / "testing.py").write_text(dedent(PACKAGE_FIXTURES))
+        pythonpath = f"{package.parent.as_posix()} {pytester.path.as_posix()}"
+        pytester.makeini(f"[pytest]\npythonpath = {pythonpath}\n")
+
+        result = pytester.runpytest_subprocess("-p", "no:cacheprovider", f"--rng-seed={SEED}")
+
+        result.assert_outcomes(passed=1)
+        draws.append(read_draws(pytester.path))
+        (package / "testing.py").unlink()
+
+    device = StreamKey.root(SEED, "fixture", "", "device", 0, "acme_ps.testing", "device", "")
+    export = StreamKey.root(SEED, "export", "ps_device", "acme_ps.testing")
+    assert draws == [{"device": randint(device), "export": str(randint(export))}] * 2
+
+
+LINKED_CONFTEST = """
+    import pytest
+
+    from pytest_strategy import RNG
+    from ps_draws import record
+
+    @pytest.fixture(scope="session")
+    def shared_fix():
+        value = RNG.integer(0, 10**9)
+        record("fixture", value)
+        return value
+"""
+
+LINKED_STRATEGIES = """
+    from pytest_strategy import RNG, Parameter, TestArg, register
+
+    DRAW = RNG.integer(0, 10**9)
+
+    @register("ps_linked")
+    def linked():
+        return Parameter(TestArg("d", value=DRAW), nsamples=1)
+"""
+
+LINKED_TESTS = """
+    from pytest_strategy import RNG, strategy
+    from ps_draws import record
+
+    record("module", RNG.integer(0, 10**9))
+
+    @strategy("ps_linked")
+    def test_linked(d, shared_fix):
+        record("file", d)
+"""
+
+
+def test_a_folder_linked_into_two_checkouts_draws_the_same(pytester, monkeypatch):
+    """
+    A test folder linked into checkouts at different depths from a place that does
+    not move with them: its module, strategy file and fixture streams are keyed by
+    the folder as linked, as pytest spells its node IDs, not by where it really is.
+    """
+    shared = pytester.mkdir("shared")
+    (shared / "conftest.py").write_text(dedent(LINKED_CONFTEST))
+    (shared / "x_strategies.py").write_text(dedent(LINKED_STRATEGIES))
+    (shared / "test_linked.py").write_text(dedent(LINKED_TESTS))
+    pytester.makepyfile(ps_draws=DRAWS)
+    draws = []
+    for base in ("one", "deeper/x/two"):
+        proj = pytester.path / base / "proj"
+        proj.mkdir(parents=True)
+        try:
+            os.symlink(shared, proj / "tests_shared", target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks are not available")
+        (proj / "pytest.ini").write_text(f"[pytest]\npythonpath = {pytester.path.as_posix()}\n")
+        monkeypatch.chdir(proj)
+
+        result = pytester.runpytest_subprocess("-p", "no:cacheprovider", f"--rng-seed={SEED}")
+
+        result.assert_outcomes(passed=1)
+        draws.append(read_draws(proj))
+
+    folder = "tests_shared"
+    fixture = ("shared_fix", 0, f"{folder}/conftest.py", "shared_fix", folder)
+    expected = {
+        "module": randint(StreamKey.root(SEED, "module", f"{folder}/test_linked.py")),
+        "file": randint(StreamKey.root(SEED, "file", f"{folder}/x_strategies.py")),
+        "fixture": randint(StreamKey.root(SEED, "fixture", "", *fixture)),
+    }
+    assert draws == [expected, expected]
+
+
+SHIPPED_TESTS = """
+    from pytest_strategy import RNG
+    from ps_draws import record
+
+    record("module", RNG.integer(0, 10**9))
+
+    def test_shipped():
+        record("body", RNG.integer(0, 10**9))
+"""
+
+
+def test_tests_an_installed_package_ships_draw_the_same_from_any_environment(pytester, monkeypatch):
+    """--pyargs: a test module's stream is keyed by its path below site-packages."""
+    pytester.makepyfile(ps_draws=DRAWS)
+    run = pytester.mkdir("run")
+    monkeypatch.chdir(run)
+    draws = []
+    for env in ("venv_a", "deeper/venv_b"):
+        tests = pytester.path / env / "lib" / "python3" / "site-packages" / "ps_shipped" / "tests"
+        tests.mkdir(parents=True)
+        (tests.parent / "__init__.py").write_text("")
+        (tests / "__init__.py").write_text("")
+        (tests / "test_shipped.py").write_text(dedent(SHIPPED_TESTS))
+        pythonpath = f"{tests.parent.parent.as_posix()} {pytester.path.as_posix()}"
+        (run / "pytest.ini").write_text(f"[pytest]\npythonpath = {pythonpath}\n")
+
+        result = pytester.runpytest_subprocess(
+            "-p", "no:cacheprovider", f"--rng-seed={SEED}", "--pyargs", "ps_shipped.tests"
+        )
+
+        result.assert_outcomes(passed=1)
+        draws.append(read_draws(run))
+        (tests / "test_shipped.py").unlink()
+
+    module = StreamKey.root(SEED, "module", "ps_shipped/tests/test_shipped.py")
+    assert draws[0] == draws[1]
+    assert draws[0]["module"] == randint(module)
 
 
 # ---------------------------------------------------------------------------

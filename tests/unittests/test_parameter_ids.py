@@ -21,6 +21,17 @@ from pytest_strategy import (
     VectorInfo,
 )
 from pytest_strategy._resolver import build_parametrization
+from pytest_strategy._runtime import runtime
+
+
+@pytest.fixture(autouse=True)
+def _fixed_run_seed(monkeypatch):
+    """
+    Pin the run's seed, which keys the random rows (streams v1). In the values
+    format, rows that draw the same values get suffixed IDs, so which IDs the rows
+    get must not depend on the seed of the run that runs these tests.
+    """
+    monkeypatch.setattr(runtime.current, "run_seed", 1234)
 
 
 def _make_config(*, ids=None, **options):
@@ -52,9 +63,18 @@ def _record_test(b: Burst):
 
 
 def _build(param, test_fn=_named_test, *, name="strat", **options):
-    """Resolve a factory returning ``param`` for ``test_fn``."""
+    """
+    Resolve a factory returning ``param`` for ``test_fn``, under a test key of its
+    name: the fallback key would use the module's name, which depends on the
+    import mode.
+    """
     return build_parametrization(
-        name, lambda: param, test_fn, config=_make_config(**options), pytest_fixtures=set()
+        name,
+        lambda: param,
+        test_fn,
+        config=_make_config(**options),
+        pytest_fixtures=set(),
+        test_key=f"tests/unittests/test_parameter_ids.py::{test_fn.__name__}",
     )
 
 
@@ -210,12 +230,13 @@ class TestTheCallable:
     def test_a_str_replaces_the_id(self):
         def ids(info):
             if info.kind == "random":
-                return f"addr{info.values.addr}"
+                # The index keeps two rows that draw one address apart
+                return f"addr{info.values.addr}-{info.index}"
             return None if info.name == "zeros" else "largest"
 
         parametrization = _build(_burst(ids=ids))
 
-        addrs = [f"addr{info.values.addr}" for info in parametrization.infos[2:]]
+        addrs = [f"addr{info.values.addr}-{info.index}" for info in parametrization.infos[2:]]
         assert parametrization.ids == ["directed-zeros", "largest", *addrs]
         assert [info.id for info in parametrization.infos] == parametrization.ids
 

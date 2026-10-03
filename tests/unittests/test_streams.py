@@ -21,7 +21,16 @@ from pathlib import Path
 import pytest
 
 import pytest_strategy
-from pytest_strategy._streams import VERSION, StreamKey, _part, encode, path_part, seed_part
+from pytest_strategy._streams import (
+    VERSION,
+    StreamKey,
+    _part,
+    encode,
+    file_part,
+    installed_part,
+    path_part,
+    seed_part,
+)
 from pytest_strategy.parameters import _position_keys
 
 
@@ -287,6 +296,28 @@ class TestPathPart:
             path = tmp_path / base / "tests" / "s.py"
             assert path_part(path, tmp_path / "link") == "tests/s.py"
 
+    def test_a_folder_linked_from_outside_keeps_its_spelling(self, tmp_path):
+        """
+        A folder linked into checkouts at different depths, from a place that does
+        not move with them: its real path relative to the rootdir would depend on
+        the depth. pytest's node IDs spell it as linked too.
+        """
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        found = set()
+        for proj in (tmp_path / "one" / "proj", tmp_path / "deeper" / "x" / "two" / "proj"):
+            proj.mkdir(parents=True)
+            try:
+                os.symlink(shared, proj / "tests_shared", target_is_directory=True)
+            except (OSError, NotImplementedError):
+                pytest.skip("symlinks are not available")
+            found.add(path_part(proj / "tests_shared" / "s.py", proj))
+            # Its real path is still keyed relative to the rootdir
+            real = os.path.relpath(os.path.realpath(shared), os.path.realpath(proj))
+            assert path_part(shared / "s.py", proj) == Path(real, "s.py").as_posix()
+
+        assert found == {"tests_shared/s.py"}
+
     def test_without_a_rootdir_the_real_path(self, tmp_path):
         path = tmp_path / "s.py"
 
@@ -304,6 +335,22 @@ class TestPathPart:
             part = path_part(path, tmp_path)
 
         assert part == Path(os.path.realpath(path)).as_posix()
+
+
+class TestInstalledPart:
+    @pytest.mark.parametrize("folder", ["site-packages", "dist-packages"])
+    def test_below_the_last_installed_folder(self, tmp_path, folder):
+        """An installed package's file is keyed alike in any environment."""
+        for env in (tmp_path / "venv", tmp_path / "proj" / ".tox" / "py311"):
+            path = env / "lib" / "python3.11" / folder / "acme" / "tests" / "test_x.py"
+            assert installed_part(path) == "acme/tests/test_x.py"
+            assert file_part(path, tmp_path / "proj") == "acme/tests/test_x.py"
+
+    def test_none_outside_an_installed_folder(self, tmp_path):
+        path = tmp_path / "proj" / "tests" / "test_x.py"
+
+        assert installed_part(path) is None
+        assert file_part(path, tmp_path / "proj") == "tests/test_x.py"
 
 
 # ---------------------------------------------------------------------------

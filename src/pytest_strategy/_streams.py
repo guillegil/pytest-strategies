@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any
 
 # The version of the derivation: the streams version of the generated values
@@ -47,6 +47,9 @@ _LENGTH_SIZE = 8
 
 # A BLAKE2b hasher with nothing fed yet, copied for each key (cheaper than a new one)
 _HASHER = hashlib.blake2b(digest_size=16, person=_PERSON)
+
+# The folders installed packages live in, wherever the environment is
+INSTALLED_FOLDERS = frozenset({"site-packages", "dist-packages"})
 
 
 def _part(value: Any) -> bytes:
@@ -95,21 +98,66 @@ def seed_part(seed: object) -> int | str:
 
 def path_part(path: str | os.PathLike[str], rootpath: str | os.PathLike[str] | None) -> str:
     """
-    Return a file or folder as a key's part: its real path relative to the
-    rootdir's, in posix form, also outside the rootdir (``../shared/strategies.py``),
-    so that two checkouts in different folders key it alike; the absolute real path
-    in posix form only when there is no relative one (another drive on Windows, or
-    no rootdir). The file system's spelling is kept, so the key is the same on
-    every OS.
+    Return a file or folder as a key's part: its path relative to the rootdir, in
+    posix form, so that two checkouts in different folders key it alike:
+
+    - its real path's, when that is in the rootdir (also through a link inside
+      the rootdir, or a rootdir reached through a link);
+    - otherwise the path's as it is spelled, when that is in the rootdir: a
+      folder linked into the checkout from a place that does not move with it
+      (pytest's node IDs spell it so too);
+    - otherwise its real path's, also outside the rootdir (``../shared/strategies.py``,
+      for a folder next to the checkout).
+
+    The absolute real path in posix form only when there is no relative one
+    (another drive on Windows, or no rootdir). The file system's spelling is kept,
+    so the key is the same on every OS.
     """
     real = os.path.realpath(path)
     if rootpath is not None:
         try:
-            return Path(os.path.relpath(real, os.path.realpath(rootpath))).as_posix()
+            relative = os.path.relpath(real, os.path.realpath(rootpath))
         except ValueError:
             # Another drive on Windows
-            pass
+            return Path(real).as_posix()
+        if _leaves(relative):
+            try:
+                spelled = os.path.relpath(os.path.abspath(path), os.path.abspath(rootpath))
+            except ValueError:
+                spelled = relative
+            if not _leaves(spelled):
+                relative = spelled
+        return Path(relative).as_posix()
     return Path(real).as_posix()
+
+
+def _leaves(relative: str) -> bool:
+    """Whether a relative path leaves the folder it is relative to."""
+    return relative == os.pardir or relative.startswith(os.pardir + os.sep)
+
+
+def installed_part(path: str | os.PathLike[str]) -> str | None:
+    """
+    Return the part of a file's path below the last site-packages or dist-packages
+    folder in it (``acme/tests/test_x.py`` for an installed package's file), in posix
+    form, or None when it is in no such folder: an installed package's files are
+    keyed alike wherever it is installed.
+    """
+    parts = PurePath(os.path.abspath(path)).parts
+    for index in range(len(parts) - 1, -1, -1):
+        if parts[index] in INSTALLED_FOLDERS:
+            return PurePath(*parts[index + 1 :]).as_posix()
+    return None
+
+
+def file_part(path: str | os.PathLike[str], rootpath: str | os.PathLike[str] | None) -> str:
+    """
+    Return a file that pytest or the plugin imports by its path (a test module, a
+    strategy file) as a key's part: :func:`installed_part` for an installed
+    package's file (tests run with ``--pyargs``), :func:`path_part` otherwise.
+    """
+    installed = installed_part(path)
+    return installed if installed is not None else path_part(path, rootpath)
 
 
 class StreamKey:

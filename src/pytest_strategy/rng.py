@@ -3,6 +3,7 @@
 import _random
 import builtins
 import math
+import os
 import random
 import threading
 import time
@@ -52,8 +53,11 @@ class _Ambient(random.Random):
     Seeding a pending stream, and entering or ending a stream, hold the
     generator's lock: a thread that draws while another enters or ends a stream
     (a stimulus thread started by a fixture) then never seeds the generator from
-    a stream that has ended, or saves the state on another stream. Its draws
-    still come from whichever stream is in use.
+    a stream that has ended, or saves the state on another stream. A stream
+    stays pending until it is seeded, so such a draw waits for the seeding
+    instead of drawing from the state the seeding replaces. Its draws still come
+    from whichever stream is in use. Streams that two threads enter may end in
+    any order (``_Stream.__exit__``).
     """
 
     # random.Random's cached second value of gauss(), part of its state
@@ -65,10 +69,13 @@ class _Ambient(random.Random):
         self._pending: StreamKey | Callable[[], StreamKey] | None = None
         # The streams entered and not yet ended, the innermost last
         self._streams: list[_Stream] = []
-        # Held while a stream is seeded, entered or ended (see the class docstring);
-        # reentrant, so a signal handler that draws while its thread holds it cannot
-        # deadlock
+        # Held while a stream is seeded, entered or ended (see the class docstring),
+        # and while a row is drawn (parameters.py); reentrant, so that a signal
+        # handler, or a finalizer the garbage collector runs, that draws while its
+        # thread holds it cannot deadlock. A forked child gets a new one.
         self._lock = threading.RLock()
+        # True while the holder of the lock seeds a stream (_settle)
+        self._settling = False
         super().__init__(x)
 
     def _settle(self, seed: bool = True) -> None:
@@ -80,19 +87,37 @@ class _Ambient(random.Random):
         """
         with self._lock:
             # Read again under the lock: another thread may have seeded the stream,
-            # or ended it, since the caller saw it pending
+            # or ended it, since the caller saw it pending. A draw from this thread
+            # while it seeds the stream (a signal handler, or a finalizer) draws from
+            # the state in use: seeding the stream there too would save the state of
+            # the stream as the one to put back.
             pending = self._pending
-            if pending is None:
+            if pending is None or self._settling:
                 return
-            seed_int = None
-            if seed:
-                seed_int = (pending if isinstance(pending, StreamKey) else pending()).seed_int()
-            self._pending = None
-            self._streams[-1]._state = _mt_getstate(self)
-            if seed_int is not None:
-                # As random.Random.seed() seeds with an int; gauss_next was cleared
-                # when the stream was entered
-                _mt_seed(self, seed_int)
+            # Saved first, so that such a draw while the key is built does not move
+            # the state the stream puts back
+            state = _mt_getstate(self)
+            self._settling = True
+            try:
+                # Such a draw before the flag was set seeded the stream itself
+                if self._pending is not pending:
+                    return
+                seed_int = None
+                if seed:
+                    seed_int = (pending if isinstance(pending, StreamKey) else pending()).seed_int()
+                stream = self._streams[-1]
+                # Unless a stream that ended before it handed its own over (_Stream)
+                if stream._state is None:
+                    stream._state = state
+                if seed_int is not None:
+                    # As random.Random.seed() seeds with an int; gauss_next was cleared
+                    # when the stream was entered
+                    _mt_seed(self, seed_int)
+                # Last: until then another thread's draw sees the stream pending, and
+                # waits for the lock
+                self._pending = None
+            finally:
+                self._settling = False
 
     def random(self) -> float:
         if self._pending is not None:
@@ -517,13 +542,56 @@ class _Stream:
     def __exit__(self, *exc_info: object) -> None:
         ambient, pending, gauss_next, generator, seed = self._saved
         with ambient._lock:
-            ambient._streams.pop()
+            streams = ambient._streams
+            if streams and streams[-1] is self:
+                streams.pop()
+            elif self in streams:
+                # Streams that two threads entered (export_strategies() in a thread)
+                # can end in any order. One that ends before a stream entered after it
+                # leaves the state in use, which is that stream's, and hands what it
+                # would put back to it: the state it saved, when it was seeded, and
+                # the pending key, seed and generator in use before it
+                later = streams[streams.index(self) + 1]
+                later._saved = self._saved
+                if self._state is not None:
+                    later._state = self._state
+                streams.remove(self)
+                return
             if self._state is not None:
                 _mt_setstate(ambient, self._state)
             ambient._pending = pending
             ambient.gauss_next = gauss_next
             RNG._generator = generator
             RNG._seed = seed
+
+
+def _before_fork() -> None:
+    """
+    Before ``os.fork()`` (a multiprocessing pool that forks), wait for any other
+    thread to finish seeding, entering or ending a stream or drawing a row, so that
+    the child starts from a generator nothing is changing.
+    """
+    RNG._ambient._lock.acquire()
+
+
+def _after_fork_in_parent() -> None:
+    RNG._ambient._lock.release()
+
+
+def _after_fork_in_child() -> None:
+    """
+    Give the ambient generator a new lock in a forked child, as ``logging`` does for
+    its own: the one the parent held for the fork would otherwise stay held.
+    """
+    RNG._ambient._lock = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):  # not on Windows
+    os.register_at_fork(
+        before=_before_fork,
+        after_in_parent=_after_fork_in_parent,
+        after_in_child=_after_fork_in_child,
+    )
 
 
 # ====

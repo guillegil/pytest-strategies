@@ -10,16 +10,17 @@ only one with that name.
 
 from __future__ import annotations
 
+import fnmatch
 import functools
 import inspect
 import os
 import sys
-from collections.abc import Callable, Iterator, MutableMapping
+from collections.abc import Callable, Iterator, MutableMapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import Any
 
-from ._streams import path_part
+from ._streams import INSTALLED_FOLDERS, path_part
 
 # Factories are user callables that return a Parameter. They receive the inputs
 # they declare by name (nsamples, ctx, rng, options; see _factory.py)
@@ -27,9 +28,12 @@ Factory = Callable[..., Any]
 
 Origin = tuple[str | None, str | None, int | None]
 
-# The folders installed packages live in: code in one is keyed by its module's
-# name, which does not depend on where the package is installed
-_INSTALLED_FOLDERS = frozenset({"site-packages", "dist-packages"})
+# Strategy file names; the plugin imports such a file only if it also contains a
+# registration
+STRATEGY_FILE_PATTERNS = ("strategies.py", "strategy.py", "*_strategies.py", "*_strategy.py")
+
+# The test module names pytest collects by default (its python_files ini option)
+TEST_FILE_PATTERNS = ("test_*.py", "*_test.py")
 
 
 def _unwrap(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -75,29 +79,105 @@ def factory_source(fn: Callable[..., Any]) -> Origin:
     )
 
 
+def test_file_patterns(config: Any) -> Sequence[str]:
+    """Return a pytest config's ``python_files`` patterns, or pytest's default ones."""
+    try:
+        patterns = config.getini("python_files") if config is not None else None
+    except (AttributeError, ValueError):
+        # Not a full pytest config (a unit test's stand-in)
+        patterns = None
+    return patterns if isinstance(patterns, list) else TEST_FILE_PATTERNS
+
+
 def source_part(
-    fn: Callable[..., Any], rootpath: str | os.PathLike[str] | None, *, folder: bool = False
+    fn: Callable[..., Any],
+    rootpath: str | os.PathLike[str] | None,
+    *,
+    folder: bool = False,
+    test_files: Sequence[str] = TEST_FILE_PATTERNS,
 ) -> str:
     """
     Return where a function or a factory is defined, as a part of a random stream's
-    key: the file :func:`factory_source` finds, or with ``folder`` its folder, relative
-    to the rootdir in posix form (``_streams.path_part()``).
+    key that is the same wherever the code is installed or checked out. The
+    fixture and export streams use it.
 
-    The name of its module stands for the file when the file is in an installed
-    package (a site-packages or dist-packages folder), whose path depends on where
-    the package is installed, and when its code has no file (``"<string>"`` for
-    ``exec``'d code, which would resolve against the working directory); ``""``
-    without a module either. The fixture and export streams use it.
+    - The name of its module, for a module imported by that name: an installed
+      package's (in a site-packages or dist-packages folder), an editable install's
+      (whose file is in a source tree), a plugin's or a helper module's.
+    - Otherwise the file :func:`factory_source` finds, or with ``folder`` its
+      folder, relative to the rootdir in posix form (``_streams.path_part()``): for
+      a file that pytest or the plugin imports by its path, whose module name
+      depends on ``--import-mode`` and on the folders' ``__init__.py`` files (a
+      ``conftest.py``, a test module, matched by ``test_files``, pytest's
+      ``python_files``, or a strategy file); for a module that ``sys.modules`` does
+      not have under its name; and for one whose name begins with the rootdir's own
+      folder or a folder above it (a rootdir with an ``__init__.py``).
+    - The name of its module when its code has no file (``"<string>"`` for
+      ``exec``'d code, which would resolve against the working directory); ``""``
+      without a module either.
     """
     source = factory_source(fn)[0]
-    if source and os.path.isfile(source) and _INSTALLED_FOLDERS.isdisjoint(PurePath(source).parts):
-        return path_part(os.path.dirname(source) if folder else source, rootpath)
     # The module of what factory_source() read, through wrappers and partials (a
     # class's, for a callable object)
     fn = _unwrap(fn)
     while isinstance(fn, functools.partial):
         fn = _unwrap(fn.func)
-    return getattr(fn, "__module__", None) or ""
+    module = getattr(fn, "__module__", None) or ""
+    if (
+        source
+        and os.path.isfile(source)
+        and INSTALLED_FOLDERS.isdisjoint(PurePath(source).parts)
+        and not _imported_by_name(source, module, rootpath, test_files)
+    ):
+        return path_part(os.path.dirname(source) if folder else source, rootpath)
+    return module
+
+
+def _imported_by_name(
+    source: str,
+    module: str,
+    rootpath: str | os.PathLike[str] | None,
+    test_files: Sequence[str],
+) -> bool:
+    """
+    Whether the module ``module`` of the file ``source`` is keyed by its name (see
+    :func:`source_part`).
+    """
+    name = os.path.basename(source)
+    if name == "conftest.py" or any(
+        matches_pattern(pattern, source) for pattern in (*STRATEGY_FILE_PATTERNS, *test_files)
+    ):
+        return False
+    loaded = sys.modules.get(module) if module else None
+    file = getattr(loaded, "__file__", None)
+    if not file or (file != source and _normalize(file) != _normalize(source)):
+        return False
+    if rootpath is None:
+        return True
+    # The folder the name is relative to: the file's, up one folder per part
+    parents = PurePath(os.path.realpath(source)).parents
+    depth = module.count(".") + (name == "__init__.py")
+    if depth >= len(parents):
+        return True
+    top = os.path.normcase(str(parents[depth]))
+    root = os.path.normcase(os.path.realpath(rootpath))
+    return top == root or not _contains(top, root)
+
+
+def matches_pattern(pattern: str, path: str) -> bool:
+    """
+    Match a file name pattern as pytest matches ``python_files`` and
+    ``norecursedirs``: one without a path separator against the name, one with a
+    separator (``tests/*.py``) against the end of the path
+    (``_pytest.pathlib.fnmatch_ex``).
+    """
+    if os.sep != "/" and os.sep not in pattern and "/" in pattern:
+        pattern = pattern.replace("/", os.sep)
+    if os.sep not in pattern:
+        return fnmatch.fnmatch(os.path.basename(path), pattern)
+    if PurePath(path).is_absolute() and not os.path.isabs(pattern):
+        pattern = f"*{os.sep}{pattern}"
+    return fnmatch.fnmatch(str(path), pattern)
 
 
 def _factory_origin(fn: Callable[..., Any]) -> Origin:

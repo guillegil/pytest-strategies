@@ -898,23 +898,36 @@ a `StreamKey` under the run seed S (`runtime.run_seed()`, never the mutable
 | `T = root(S, "test", strategy, nodeid)` | everything for one strategy on one test |
 | `T/"factory"` | the factory call: `rng`, `RNG.*`, `RNG.generator()` |
 | `T/"row"/pos/j/name`, `T/"order"/name` | the rows (below) |
-| `root(S, "file", path)` | a strategy file's import |
-| `root(S, "module", path)` | a test module's import (a `pytest_make_collect_report` wrapper for a `Module`) |
+| `root(S, "file", path)` | a strategy file's import; `path` is the file's (`_streams.file_part()`) |
+| `root(S, "module", path)` | a test module's import (a `pytest_make_collect_report` wrapper for a `Module`); `path` is the module's (`_streams.file_part()`) |
 | `root(S, "ctx")` | the `pytest_strategies_context` call |
-| `root(S, "fixture", scope, name, param_index, where, qualname, base)` | a fixture's setup (a `pytest_fixture_setup` wrapper); `scope` is the node ID of the node it is set up for, `""` for the session; `where` and `qualname` are the fixture function's file and qualified name (`plugin._fixture_definition()`), `base` the node ID pytest registered the fixture for (`plugin._fixture_base()`) |
+| `root(S, "fixture", scope, name, param_index, where, qualname, base)` | a fixture's setup (a `pytest_fixture_setup` wrapper); `scope` is the node ID of the node it is set up for, `""` for the session and the rootdir's node (`plugin._node_part()`); `where` and `qualname` are the fixture function's module or file and its qualified name (`plugin._fixture_definition()`), `base` the node ID pytest registered the fixture for (`plugin._fixture_base()`) |
 | `root(S, "body", nodeid, phase)` | one phase of a test, `setup`, `call` or `teardown` (wrappers around `pytest_runtest_setup`, `_call` and `_teardown`) |
 | `root(RNG.get_seed(), "user", key)` | `RNG.refresh_seed(key=...)` |
-| `root(S, "export", name, folder)` | a factory call from `export_strategies()`; `folder` is the factory file's folder relative to the rootdir (absolute outside a session) |
+| `root(S, "export", name, folder)` | a factory call from `export_strategies()`; `folder` is the factory's module or its file's folder (`_registry.source_part()`), relative to the rootdir (absolute outside a session) |
 | `root(RNG.get_seed(), "direct", n)` | `generate_vectors()` and the other generators called directly |
 
-`path`, `folder` and a fixture's `where` are relative to the rootdir in posix
-form, also outside it (`../shared/strategies.py`, `_streams.path_part()`), and
-absolute only on another Windows drive. A fixture or an exported factory of an
-installed package (a file in a `site-packages` or `dist-packages` folder, such
-as a plugin's) has its module's name as `where` or `folder` instead, which does
-not depend on where the package is installed, and so does one whose code has no
-file (`exec`'d code, whose `"<string>"` would resolve against the working
-directory); both keys get these parts from `_registry.source_part()`. The
+A path in a key is relative to the rootdir in posix form
+(`_streams.path_part()`): the real path's when that is in the rootdir, else the
+path's as pytest spells it when that is in the rootdir (a folder linked into the
+checkout from a place that does not move with it, which every checkout that
+links it then keys alike), else the real path's, also outside the rootdir
+(`../shared/strategies.py`); it is absolute only on another Windows drive. A
+test module or strategy file of an installed package (a file in a
+`site-packages` or `dist-packages` folder, a test `--pyargs` runs) has its path
+below that folder instead (`_streams.installed_part()`), which does not depend
+on where the environment is. A fixture's `where` and an exported factory's
+`folder` come from `_registry.source_part()`. They are the module's name for a
+module imported by its name (an installed package's, an editable install's, a
+plugin's or a helper module's), so a package's fixture draws the same installed,
+installed in editable mode or checked out next to the tests, and for code with
+no file (`exec`'d code, whose `"<string>"` would resolve against the working
+directory). They are the file, or its folder for an export, for a file that
+pytest or the plugin imports by its path (a `conftest.py`, a test module that
+`python_files` matches, a strategy file), whose module name depends on
+`--import-mode` and on the `__init__.py` files, and for a module whose name
+begins at the rootdir's folder or above it (a rootdir with an `__init__.py`),
+whose name depends on the folders the checkout is in. The
 fixture's definition and base are in its key because pytest sets up several
 fixtures of one name for the same scope node: an override that requests the
 fixture it overrides (`def x(x)`), the session fixtures of one name in two
@@ -923,7 +936,10 @@ sibling folders' `conftest.py` files, and one fixture function that two
 `base` tells apart: the folder of the `conftest.py`, the test module or class
 the fixture is registered for, or `""` for a plugin and the rootdir's
 `conftest.py` (`FixtureDef.node` on pytest 9, whose node ID is `"."` there, and
-`FixtureDef.baseid` on pytest 8).
+`FixtureDef.baseid` on pytest 8). `plugin._node_part()` turns `"."` into `""`
+for `base` and for `scope`: when the rootdir has an `__init__.py`, pytest 9 sets
+a package-scoped fixture of its `conftest.py` up for the rootdir's `Package`
+(`"."`), and pytest 8 for the session.
 
 Each non-row stream runs in an `rng._Stream` block: in the block,
 `RNG._ambient` (the plugin's generator, an `rng._Ambient`) draws from the key's
@@ -950,15 +966,28 @@ also clears `gauss_next`, as seeding does, and puts it back. Seeding a pending
 block, and entering and ending one, hold the generator's lock
 (`_Ambient._lock`, an `RLock`): a thread that draws while another enters or
 ends a block (a stimulus thread that a fixture starts) never seeds the
-generator from a block that has ended or saves the state on another block. Its
-draws still come from whichever block is in use, so they are not reproducible.
-The plugin passes the fixture, phase and test module streams a function that
-builds the key, so a block that draws nothing costs about 2 µs, and one that
-draws about 20 µs more, mostly the seeding; each draw from the ambient
-generator costs about 0.1 µs more than from a plain `random.Random`. Most test
-phases and fixtures draw nothing: a run of 20,000 trivial tests takes about 5%
-longer than without these streams, most of it in the three hook wrappers per
-test.
+generator from a block that has ended or saves the state on another block, and
+a block stays pending until it is seeded, so such a draw waits for the seeding
+instead of drawing from the state the seeding replaces. Its draws still come
+from whichever block is in use, so they are not reproducible. Blocks that two
+threads enter may end in any order (`export_strategies()` in a thread while a
+test phase runs): a block that ends before a block entered after it hands that
+block what it would have put back. A draw from inside the seeding (a signal
+handler, a garbage collector callback) draws from the state in use, without
+seeding the block again or saving the state twice. Drawing a row holds the lock
+too (`Parameter._build_row()`), because the argument generators it installs as
+`RNG._generator` are process-wide: another thread that draws a row, or enters
+or ends a block, meanwhile cannot take one of them for the generator to put
+back, which would leave it installed after the rows. Another thread's `RNG.*`
+draw meanwhile still draws from it. An `os.register_at_fork` hook takes the
+lock before a fork and gives the child a new one, so a child forked while
+another thread seeds a block can draw. The plugin passes the fixture, phase and
+test module streams a function that builds the key, so a block that draws
+nothing costs about 2 µs, and one that draws about 20 µs more, mostly the
+seeding; each draw from the ambient generator costs about 0.1 µs more than from
+a plain `random.Random`. Most test phases and fixtures draw nothing: a run of
+20,000 trivial tests takes about 5% longer than without these streams, most of
+it in the three hook wrappers per test.
 
 **Row streams (streams v1, `_streams.py`):** the rows draw from streams keyed
 under `T = StreamKey.root(seed, "test", strategy, nodeid)`, where `nodeid` is the
