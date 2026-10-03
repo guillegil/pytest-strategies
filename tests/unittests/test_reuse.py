@@ -7,9 +7,12 @@ the commands that rerun the deselected rows.
 
 import json
 from argparse import Namespace
+from functools import partial
+from pathlib import Path
 
 import pytest
 
+from pytest_strategy._repro import quote
 from pytest_strategy._reuse import (
     KEY,
     LASTFAILED,
@@ -62,8 +65,12 @@ class PluginManager:
         return name == "cacheprovider" and self.cacheprovider
 
 
-def config(root, cache=None, args=(), invocation=None, **options):
-    """A stand-in config for a run in ``root`` with ``options`` and ``args`` on the command line."""
+def config(root, cache=None, args=(), invocation=None, testpaths=(), **options):
+    """
+    A stand-in config for a run in ``root`` with ``options`` and ``args`` on the
+    command line. Without ``args``, pytest starts from the ``testpaths`` (when it
+    runs in the rootdir) or from the folder it runs in, as ``config.args`` holds.
+    """
     defaults = {
         "lf": False,
         "stepwise": False,
@@ -72,13 +79,20 @@ def config(root, cache=None, args=(), invocation=None, **options):
         "cacheclear": False,
     }
     source = pytest.Config.ArgsSource
+    invocation = invocation or root
+    if args:
+        started = (list(args), source.ARGS)
+    elif testpaths and invocation == root:
+        started = (list(testpaths), source.TESTPATHS)
+    else:
+        started = ([str(invocation)], source.INVOCATION_DIR)
     return Namespace(
         option=Namespace(**{**defaults, **options}),
         cache=cache,
         rootpath=root,
-        args=list(args),
-        args_source=source.ARGS if args else source.INVOCATION_DIR,
-        invocation_params=Namespace(dir=invocation or root),
+        args=started[0],
+        args_source=started[1],
+        invocation_params=Namespace(dir=invocation),
         pluginmanager=PluginManager(),
     )
 
@@ -297,6 +311,7 @@ class TestPlan:
             seed=2,
             rows={NODE_B: Entry(2, ("--nsamples=13",)), NODE_C: Entry(2, ())},
             others={NODE_A: Entry(1, ())},
+            failed=frozenset({NODE_A, NODE_B, NODE_C}),
         )
 
     def test_entries_pytest_no_longer_lists_as_failed_are_left_out(self, tmp_path):
@@ -403,6 +418,30 @@ class TestPlan:
 
         assert reuse.seed == seed
         assert reuse.others == ({} if arg not in ("tests", ".") else {NODE_A: Entry(1, ())})
+
+    def test_a_run_without_paths_selects_the_folder_it_runs_in(self, tmp_path):
+        files(tmp_path, NODE_A, NODE_B)
+        values = {
+            KEY: entries((NODE_A, 1, []), (NODE_B, 2, [])),
+            LASTFAILED: {NODE_A: True, NODE_B: True},
+        }
+
+        below = plan(config(tmp_path, Cache(values), invocation=tmp_path / "tests" / "a", lf=True))
+        root = plan(config(tmp_path, Cache(values), lf=True))
+
+        assert (below.seed, below.others) == (1, {})
+        assert (root.seed, root.others) == (2, {NODE_A: Entry(1, ())})
+
+    def test_a_run_without_paths_selects_the_testpaths(self, tmp_path):
+        files(tmp_path, NODE_A, NODE_B)
+        values = {
+            KEY: entries((NODE_A, 1, []), (NODE_B, 2, [])),
+            LASTFAILED: {NODE_A: True, NODE_B: True},
+        }
+
+        reuse = plan(config(tmp_path, Cache(values), testpaths=["tests/a"], lf=True))
+
+        assert (reuse.seed, reuse.others) == (1, {})
 
     def test_paths_are_relative_to_the_invocation_folder(self, tmp_path):
         files(tmp_path, NODE_A, NODE_B)
@@ -513,89 +552,134 @@ class TestDifferences:
 
 class TestCommands:
     def test_one_command_per_seed_with_its_count(self):
-        rows = [Entry(1, ()), Entry(2, ("--nsamples=13",)), Entry(1, ())]
+        rows = [
+            (NODE_A, Entry(1, ())),
+            (NODE_B, Entry(2, ("--nsamples=13",))),
+            (NODE_C, Entry(1, ())),
+        ]
 
         assert commands("--lf", rows) == [
-            ("pytest --lf --rng-seed=1", 2),
-            ("pytest --lf --rng-seed=2 --nsamples=13", 1),
+            ("pytest --lf --rng-seed=1 tests/a/test_w.py tests/b/test_w.py", 2),
+            ("pytest --lf --rng-seed=2 --nsamples=13 tests/b/test_w.py", 1),
         ]
 
     def test_rows_of_one_seed_with_other_options_get_their_own(self):
-        rows = [Entry(1, ()), Entry(1, ("--nsamples=13",))]
+        rows = [(NODE_A, Entry(1, ())), (NODE_B, Entry(1, ("--nsamples=13",)))]
 
         assert commands("--lf", rows) == [
-            ("pytest --lf --rng-seed=1", 1),
-            ("pytest --lf --rng-seed=1 --nsamples=13", 1),
+            ("pytest --lf --rng-seed=1 tests/a/test_w.py", 1),
+            ("pytest --lf --rng-seed=1 --nsamples=13 tests/b/test_w.py", 1),
         ]
 
     def test_the_constraints_turned_off_are_joined(self):
         rows = [
-            Entry(1, ("--nsamples=13", "--strategy-constraint-off=burst:aligned")),
-            Entry(1, ("--nsamples=13", "--strategy-constraint-off=chan:fast,burst:aligned")),
+            (NODE_B, Entry(1, ("--nsamples=13", "--strategy-constraint-off=burst:aligned"))),
+            (
+                NODE_C,
+                Entry(1, ("--nsamples=13", "--strategy-constraint-off=chan:fast,burst:aligned")),
+            ),
         ]
 
         assert commands("--lf", rows) == [
             (
-                "pytest --lf --rng-seed=1 --nsamples=13 --strategy-constraint-off=burst:aligned,chan:fast",
+                "pytest --lf --rng-seed=1 --nsamples=13 "
+                "--strategy-constraint-off=burst:aligned,chan:fast tests/b/test_w.py",
                 2,
             )
         ]
 
     def test_the_flag_and_quoting(self):
-        (found,) = commands("--sw", [Entry(1, ("-c", "my ci/pytest.ini"))])
+        (found,) = commands(
+            "--sw", [("my tests/test_w.py::t", Entry(1, ("-c", "my ci/pytest.ini")))]
+        )
 
         assert found[0] in (
-            "pytest --sw --rng-seed=1 -c 'my ci/pytest.ini'",
-            'pytest --sw --rng-seed=1 -c "my ci/pytest.ini"',
+            "pytest --sw --rng-seed=1 -c 'my ci/pytest.ini' 'my tests/test_w.py'",
+            'pytest --sw --rng-seed=1 -c "my ci/pytest.ini" "my tests/test_w.py"',
+        )
+
+    @pytest.mark.parametrize(
+        "other",
+        [NODE_C, "tests/b/test_w.py::test_plain", "tests/b/test_w.py"],
+        ids=["other_seed", "not_a_strategy_row", "collection_error"],
+    )
+    def test_a_file_with_other_failed_tests_is_named_by_node_ids(self, other):
+        rows = [(NODE_A, Entry(1, ())), (NODE_B, Entry(1, ()))]
+
+        (found,) = commands("--lf", rows, {NODE_A, NODE_B, other})
+
+        assert found == (f"pytest --lf --rng-seed=1 tests/a/test_w.py {quote(NODE_B)}", 2)
+
+    def test_a_file_with_only_its_rows_is_named_once(self):
+        rows = [(NODE_B, Entry(1, ())), (NODE_A, Entry(1, ())), (NODE_C, Entry(1, ()))]
+
+        assert commands("--lf", rows, {NODE_A, NODE_B, NODE_C}) == [
+            ("pytest --lf --rng-seed=1 tests/b/test_w.py tests/a/test_w.py", 3)
+        ]
+
+    def test_paths_are_written_as_given(self):
+        rows = [(NODE_A, Entry(1, ())), (NODE_B, Entry(1, ()))]
+
+        (found,) = commands("--lf", rows, {NODE_A, NODE_B, NODE_C}, lambda path: f"../{path}")
+
+        assert found == (
+            f"pytest --lf --rng-seed=1 ../tests/a/test_w.py {quote('../' + NODE_B)}",
+            2,
         )
 
 
 class TestDeselectedLines:
-    def state(self, deselected=(), workers=None):
+    def state(self):
         state = SessionState()
         state.reuse = Reuse(
             flag="--lf",
             seed=3,
             rows={},
             others={NODE_A: Entry(1, ()), NODE_B: Entry(2, ()), NODE_C: Entry(1, ())},
+            failed=frozenset({NODE_A, NODE_B, NODE_C}),
         )
-        state.deselected = list(deselected)
-        state.worker_reuse = workers or {}
         return state
 
-    def test_a_command_per_seed_of_the_deselected_rows(self):
-        lines = _deselected_lines(self.state([NODE_C, NODE_B, NODE_A]))
+    def config(self, invocation="."):
+        root = Path("/project")
+        stand_in = Namespace(rootpath=root, invocation_params=Namespace(dir=root / invocation))
+        stand_in.cwd_relative_nodeid = partial(pytest.Config.cwd_relative_nodeid, stand_in)
+        return stand_in
+
+    def test_a_command_per_seed_of_the_rows_set_aside(self):
+        lines = _deselected_lines(self.state(), self.config())
 
         assert lines == [
             "pytest-strategies: deselected 3 failed rows recorded under other seeds; run them with:",
-            "  pytest --lf --rng-seed=1  # 2 rows",
-            "  pytest --lf --rng-seed=2  # 1 row",
+            f"  pytest --lf --rng-seed=1 tests/a/test_w.py {quote(NODE_C)}  # 2 rows",
+            f"  pytest --lf --rng-seed=2 {quote(NODE_B)}  # 1 row",
         ]
 
     def test_one_row(self):
-        assert _deselected_lines(self.state([NODE_B])) == [
+        state = self.state()
+        state.reuse = Reuse("--lf", 3, {}, {NODE_B: Entry(2, ())}, frozenset({NODE_B}))
+
+        assert _deselected_lines(state, self.config()) == [
             "pytest-strategies: deselected 1 failed row recorded under another seed; run it with:",
-            "  pytest --lf --rng-seed=2  # 1 row",
+            "  pytest --lf --rng-seed=2 tests/b/test_w.py  # 1 row",
         ]
 
-    def test_rows_that_were_not_collected_are_left_out(self):
-        assert _deselected_lines(self.state()) == []
+    def test_paths_are_relative_to_the_folder_pytest_runs_in(self):
+        lines = _deselected_lines(self.state(), self.config("tests/b"))
+
+        assert lines[1:] == [
+            f"  pytest --lf --rng-seed=1 ../a/test_w.py {quote('test_w.py::test_w[rand-4]')}  # 2 rows",
+            f"  pytest --lf --rng-seed=2 {quote('test_w.py::test_w[rand-2]')}  # 1 row",
+        ]
+
+    def test_nothing_without_rows_under_another_seed(self):
+        state = self.state()
+        state.reuse = Reuse("--lf", 3, {NODE_A: Entry(3, ())}, {})
+
+        assert _deselected_lines(state, self.config()) == []
 
     def test_nothing_without_reuse(self):
-        state = SessionState()
-        state.deselected = [NODE_A]
-
-        assert _deselected_lines(state) == []
-
-    def test_the_rows_the_workers_deselected(self):
-        workers = {
-            "gw1": {"deselected": [NODE_A, NODE_C], "passed": {}},
-            "gw0": {"deselected": [NODE_A, NODE_C]},
-        }
-
-        assert _deselected_lines(self.state(workers=workers))[1:] == [
-            "  pytest --lf --rng-seed=1  # 2 rows"
-        ]
+        assert _deselected_lines(SessionState(), self.config()) == []
 
 
 class TestPluginState:
@@ -635,8 +719,8 @@ class TestPluginState:
         state.run_seed = 7
         state.failed_rows = {NODE_C: row(7)}
         state.worker_reuse = {
-            "gw0": {"deselected": [], "passed": {NODE_A: []}},
-            "gw1": {"deselected": [], "passed": {NODE_B: [], "x": "not a list"}},
+            "gw0": {"passed": {NODE_A: []}},
+            "gw1": {"passed": {NODE_B: [], "x": "not a list"}},
         }
 
         _record_failed_seeds(config(tmp_path, cache), state)
@@ -680,7 +764,6 @@ class TestPluginState:
             state.run_seed = 7
             state.failed_rows = {NODE_A: row(7)}
             state.passed_rows = {NODE_B: ()}
-            state.deselected = [NODE_C]
 
             _plugin_instance.pytest_sessionfinish(
                 Namespace(config=stand_in, items=[], exitstatus=0)
@@ -688,8 +771,5 @@ class TestPluginState:
         finally:
             runtime.pop()
 
-        assert stand_in.workeroutput["pytest_strategies_reuse"] == {
-            "deselected": [NODE_C],
-            "passed": {NODE_B: []},
-        }
+        assert stand_in.workeroutput["pytest_strategies_reuse"] == {"passed": {NODE_B: []}}
         assert (cache.writes, json.loads(cache.values[KEY])) == (0, entries((NODE_B, 7, [])))

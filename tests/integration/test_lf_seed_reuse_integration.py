@@ -15,6 +15,7 @@ node ID of every test it sets up to ``ran.txt`` in the rootdir.
 
 import json
 import re
+import shlex
 
 import pytest
 
@@ -126,6 +127,18 @@ def nodeids(folder="tests", failing=FAILING):
     """The node IDs of the failing rows of the test module in ``folder``."""
     name = folder.rpartition("/")[2]
     return sorted(f"{folder}/test_lfr_{name}.py::{row}" for row in failing)
+
+
+def printed(result):
+    """The arguments of the commands the run printed for the rows it set aside."""
+    lines = result.stdout.lines
+    start = next(i for i, line in enumerate(lines) if "recorded under another seed" in line)
+    commands = []
+    for line in lines[start + 1 :]:
+        if not line.startswith("  pytest "):
+            break
+        commands.append(shlex.split(line.partition("  # ")[0])[1:])
+    return commands
 
 
 REUSED = "pytest-strategies: seed reused from the failed run for {} (--rng-seed overrides)"
@@ -272,16 +285,60 @@ class TestTwoSeeds:
             [
                 "pytest-strategies: deselected 2 failed rows recorded under another seed; "
                 "run them with:",
-                f"  pytest --lf --rng-seed={S1}  # 2 rows",
+                f"  pytest --lf --rng-seed={S1} tests/a/test_lfr_a.py  # 2 rows",
             ]
         )
         # pytest keeps the deselected rows in its last-failed set
         assert lastfailed(pytester) == set(nodeids("tests/a") + nodeids("tests/b"))
 
-        again = run(pytester, "--lf", f"--rng-seed={S1}")
+        (command,) = printed(result)
+        again = run(pytester, *command)
 
-        assert ran(pytester) == nodeids("tests/a") + nodeids("tests/b")
-        assert set(values(a)) <= set(values(again))
+        # The printed command reruns only the rows recorded under S1, with their values
+        again.assert_outcomes(failed=2)
+        assert ran(pytester) == nodeids("tests/a")
+        assert values(again) == values(a)
+        assert sections(again) == sections(a)
+
+    def test_the_printed_command_leaves_the_other_seed_s_rows_alone(self, pytester):
+        # tests/b fails only with the values it got under S2: under S1 it would pass,
+        # and pytest would drop it from its last-failed set, with the bug unfixed
+        a, b = self.record(pytester)
+        failing = [line.rpartition("AssertionError: ")[2] for line in values(b)]
+        fixed_unless = f"""
+from pytest_strategy import strategy
+
+@strategy("burst")
+def test_w(request, addr, len):
+    shown = f"{{request.node.name}}: addr={{addr}} len={{len}}"
+    assert shown not in {failing!r}, shown
+"""
+        (pytester.path / "tests" / "b" / "test_lfr_b.py").write_text(fixed_unless, "utf-8")
+        result = run(pytester, "--lf")
+        result.assert_outcomes(failed=2, deselected=2)
+
+        (command,) = printed(result)
+        run(pytester, *command).assert_outcomes(failed=2)
+
+        assert ran(pytester) == nodeids("tests/a")
+        assert lastfailed(pytester) == set(nodeids("tests/a") + nodeids("tests/b"))
+        again = run(pytester, "--lf")
+        # tests/a failed again under S1, so it is the newest: tests/b is set aside
+        assert header(again)[0] == f"pytest-strategies: RNG seed = {S1}"
+        assert printed(again) == [["--lf", f"--rng-seed={S2}", "tests/b/test_lfr_b.py"]]
+
+    def test_rows_of_a_file_with_other_failures_are_named_by_node_id(self, pytester):
+        project(pytester)
+        first, second = (f"tests/test_lfr_tests.py::{row}" for row in FAILING)
+        run(pytester, f"--rng-seed={S1}", first).assert_outcomes(failed=1)
+        run(pytester, f"--rng-seed={S2}", second).assert_outcomes(failed=1)
+
+        result = run(pytester, "--lf")
+
+        assert ran(pytester) == [second]
+        assert printed(result) == [["--lf", f"--rng-seed={S1}", first]]
+        run(pytester, "--lf", f"--rng-seed={S1}", first).assert_outcomes(failed=1)
+        assert ran(pytester) == [first]
 
     def test_the_paths_on_the_command_line_choose_the_seed(self, pytester):
         a, _ = self.record(pytester)
@@ -292,6 +349,83 @@ class TestTwoSeeds:
         assert ran(pytester) == nodeids("tests/a")
         assert values(result) == values(a)
         result.stdout.no_fnmatch_line("*deselected*")
+
+    def test_run_from_a_subfolder_it_collects_choose_the_seed(self, pytester, monkeypatch):
+        a, _ = self.record(pytester)
+        monkeypatch.chdir(pytester.path / "tests" / "a")
+
+        result = run(pytester, "--lf")
+
+        assert header(result) == [f"pytest-strategies: RNG seed = {S1}", REUSED.format("--lf")]
+        result.assert_outcomes(failed=2)
+        assert ran(pytester) == nodeids("tests/a")
+        # The same values; the summary names the tests relative to tests/a
+        assert sections(result) == sections(a)
+        result.stdout.no_fnmatch_line("*deselected*")
+
+    def test_the_testpaths_choose_the_seed(self, pytester):
+        a, _ = self.record(pytester)
+        # The strategy file must be in the testpaths to be found
+        strategies = pytester.path / "tests" / "strategies.py"
+        for folder in ("a", "b"):
+            (pytester.path / "tests" / folder / "strategies.py").write_text(STRATEGIES, "utf-8")
+        strategies.unlink()
+        pytester.makeini("[pytest]\ntestpaths = tests/a\n")
+
+        result = run(pytester, "--lf")
+
+        assert header(result) == [f"pytest-strategies: RNG seed = {S1}", REUSED.format("--lf")]
+        result.assert_outcomes(failed=2)
+        assert ran(pytester) == nodeids("tests/a")
+        assert values(result) == values(a)
+
+    def test_k_does_not_choose_the_seed(self, pytester):
+        a, _ = self.record(pytester)
+
+        result = run(pytester, "--lf", "-k", "test_lfr_a")
+
+        # The seed is chosen before the tests are collected: the newest row's, of
+        # tests/b, whose rows -k deselects. The printed command reruns tests/a's.
+        assert header(result)[0] == f"pytest-strategies: RNG seed = {S2}"
+        assert ran(pytester) == []
+        (command,) = printed(result)
+        again = run(pytester, *command)
+        assert ran(pytester) == nodeids("tests/a")
+        assert values(again) == values(a)
+
+    def test_rows_whose_ids_show_their_values_get_their_command(self, pytester):
+        # Under another seed, their node IDs are not collected at all
+        project(pytester, folders=("tests/a", "tests/b"))
+        by_index = """
+from pytest_strategy import VECTOR_KEY, strategy
+
+@strategy("burst")
+def test_w(request, addr, len):
+    assert request.node.stash[VECTOR_KEY].index not in (1, 4), f"{request.node.name}"
+"""
+        for folder in ("a", "b"):
+            (pytester.path / "tests" / folder / f"test_lfr_{folder}.py").write_text(
+                by_index, "utf-8"
+            )
+        ids = ("-o", "strategies_ids=values")
+        a = run(pytester, f"--rng-seed={S1}", *ids, "tests/a")
+        run(pytester, f"--rng-seed={S2}", *ids, "tests/b").assert_outcomes(failed=2, passed=4)
+
+        result = run(pytester, "--lf", *ids)
+
+        assert header(result)[0] == f"pytest-strategies: RNG seed = {S2}"
+        result.stdout.fnmatch_lines(
+            [
+                "pytest-strategies: deselected 2 failed rows recorded under another seed; "
+                "run them with:",
+                f"  pytest --lf --rng-seed={S1} -o strategies_ids=values tests/a/test_lfr_a.py"
+                "  # 2 rows",
+            ]
+        )
+        (command,) = printed(result)
+        again = run(pytester, *command)
+        again.assert_outcomes(failed=2)
+        assert values(again) == values(a)
 
     def test_an_entry_whose_file_was_deleted_is_ignored(self, pytester):
         a, _ = self.record(pytester)
@@ -319,7 +453,7 @@ class TestTwoSeeds:
             [
                 "pytest-strategies: deselected 2 failed rows recorded under another seed; "
                 "run them with:",
-                f"  pytest --lf --rng-seed={S1}  # 2 rows",
+                f"  pytest --lf --rng-seed={S1} tests/a/test_lfr_a.py  # 2 rows",
             ]
         )
         assert set(failed_seeds(pytester)) == set(nodeids("tests/a") + nodeids("tests/b"))

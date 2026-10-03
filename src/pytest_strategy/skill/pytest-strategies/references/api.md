@@ -391,8 +391,10 @@ Reporting:
   `directed-zeros (directed vector 'zeros', #0)`), `values` (one per line, cut at
   4,000 characters below `-vv`), `seed`, `context` (only when the factory received
   `ctx`) and `rerun`. A test file outside the rootdir (`-c ci/pytest.ini` with
-  `tests/`) gets a `note` line: its node ID depends on the command line, so pass a
-  `--rootdir` that contains it to get a command that reproduces it.
+  `tests/`) gets a command that starts from the run's paths and selects the row
+  with `-k` (`pytest . --rng-seed=S -c ci/pytest.ini -k 'test_write[rand-3]'`),
+  since its node ID depends on them; when no `-k` expression selects only that
+  row, a `note` line says to pass a `--rootdir` that contains the tests.
 - With `--junitxml`, each failed row's failure text ends with that section, and
   the test suite gets the properties `pytest_strategies.seed` and
   `pytest_strategies.failed.<i>` (the failed rows' commands, from 0). With
@@ -402,16 +404,19 @@ Reporting:
   from the rootdir), as `pytest_strategies.<i>.*` for stacked strategies; the
   default `xunit2` gets none per test case.
 - `--lf`, `--sw` and `--sw-skip` without `--rng-seed` reuse the seed of the newest
-  failed row they rerun (recorded in pytest's cache under
-  `pytest-strategies/failed-seeds` with the options of its rerun command), so the
-  rows fail with the same values. The header adds `pytest-strategies: seed reused
-  from the failed run for --lf (--rng-seed overrides)`, ending with `; recorded
-  with --nsamples=13` when the recorded options differ (they are not applied).
-  Failed rows recorded under another seed are deselected (pytest keeps them in its
-  last-failed set) and the run ends with `pytest-strategies: deselected 2 failed
-  rows recorded under another seed; run them with:` and `  pytest --lf
-  --rng-seed=S1  # 2 rows`. A row leaves the record when it passes under its seed
-  and options. `--rng-seed` wins; `--ff`, `--nf` and `--sw-reset` draw a new seed.
+  failed row they rerun among those the run collects (the paths and node IDs
+  given, else the testpaths or the current folder; not `-k` or `-m`), recorded in
+  pytest's cache under `pytest-strategies/failed-seeds` with the options of its
+  rerun command, so the rows fail with the same values. The header adds
+  `pytest-strategies: seed reused from the failed run for --lf (--rng-seed
+  overrides)`, ending with `; recorded with --nsamples=13` when the recorded
+  options differ (they are not applied). Failed rows recorded under another seed
+  are deselected (pytest keeps them in its last-failed set) and the run ends with
+  `pytest-strategies: deselected 2 failed rows recorded under another seed; run
+  them with:` and `  pytest --lf --rng-seed=S1 tests/a/test_dma.py  # 2 rows`
+  (their files, or their node IDs when a file holds other failed tests). A row
+  leaves the record when it passes under its seed and options. `--rng-seed` wins;
+  `--ff`, `--nf` and `--sw-reset` draw a new seed.
 - `-v` adds, per strategy, the counts of directed and random rows (and of test,
   exhaustive and skipped rows when there are some) and where `nsamples` came from,
   then a "Contexts" block with each context's fingerprint.

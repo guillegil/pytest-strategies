@@ -25,9 +25,12 @@ constraint that only another module's strategy has. Options that shape the
 context cannot be known; its fingerprint shows when the rerun got another one.
 
 A test file outside the rootdir (``-c ci/pytest.ini`` makes ``ci`` the rootdir) is
-named by pytest relative to the path given on the command line that contains it,
-so a run of its node ID gives the row another node ID, and with it other random
-values. Its section says so (``note``).
+named by pytest relative to the path the run started from that contains it, so a
+run of its node ID would give the row another node ID, and with it other random
+values. Its command starts from the run's own paths instead, and selects the row
+with ``-k``: ``pytest . --rng-seed=S -c ci/pytest.ini -k 'test_write[rand-3]'``.
+When no ``-k`` expression selects only that row, the node ID command is given, and
+the section says that it does not reproduce the row (``note``).
 
 A ``--junitxml`` report gets the section in the failure text, the seed and each
 failed row's command as properties of the test suite (``suite_properties``), and,
@@ -46,6 +49,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import pytest
 from _pytest.pathlib import bestrelpath
 
 from ._ids import _value_repr
@@ -53,8 +57,6 @@ from ._options import constraint_off_item
 from ._runtime import runtime
 
 if TYPE_CHECKING:
-    import pytest
-
     from ._vector import VectorInfo
 
 # The title of the section
@@ -68,6 +70,11 @@ VALUE_LIMIT = 4000
 
 # The width of the section's labels ("strategy  ")
 _LABEL = 10
+
+# A name in a -k expression (pytest's match-expression grammar), and the words that
+# are its operators
+_KEYWORD_NAME = re.compile(r"[\w:+\-.\[\]\\/]+")
+_KEYWORD_OPERATORS = frozenset({"and", "or", "not"})
 
 # The arguments cmd.exe and PowerShell leave as they are (no ",", which PowerShell
 # reads as an array, no "%", "@", "&", quotes or brackets)
@@ -206,6 +213,94 @@ def rerun_command(nodeid: str, seed: int, options: Sequence[str]) -> str:
     return " ".join(["pytest", quote(nodeid), f"--rng-seed={seed}", *map(quote, options)])
 
 
+def start_args(config: pytest.Config, start: Path) -> list[str] | None:
+    """
+    Return the paths and node IDs the run started from (``config.args``: those on
+    the command line, or else the testpaths or the folder pytest was started in),
+    relative to the folder ``start``, or None when one of them is not an existing
+    path (a ``--pyargs`` module).
+    """
+    found = []
+    for arg in config.args:
+        text, separator, names = arg.partition("::")
+        path = Path(os.path.abspath(config.invocation_params.dir / text))
+        if not path.exists():
+            return None
+        found.append(bestrelpath(start, path) + separator + names)
+    return found
+
+
+def keyword(item: pytest.Item) -> str | None:
+    """
+    Return a ``-k`` expression that selects only ``item`` among the tests the run
+    collected, those it deselected included: the item's name
+    (``test_write[rand-3]``), else with its module's (``test_dma.py and
+    test_write[rand-3]``), else with its classes' too. None when there is no such
+    expression, or a name does not fit ``-k``'s grammar (``test_esm[ch=2-rand-1]``).
+
+    The tests are matched with pytest's own ``-k`` matcher; without it, None.
+    """
+    state = runtime.session_of(item.config)
+    if state is None:
+        return None
+    try:
+        from _pytest.mark import KeywordMatcher
+        from _pytest.mark.expression import Expression
+    except ImportError:
+        # A pytest that moved them
+        return None
+    chain = item.listchain()
+    module = [node.name for node in chain if isinstance(node, pytest.Module)]
+    classes = [node.name for node in chain if isinstance(node, pytest.Class)]
+    if state.keyword_matchers is None:
+        tests = [*getattr(item.session, "items", ()), *state.deselected_items]
+        state.keyword_matchers = [(test, KeywordMatcher.from_item(test)) for test in tests]
+    for names in ([item.name], [*module, item.name], [*module, *classes, item.name]):
+        if not all(_KEYWORD_NAME.fullmatch(n) and n not in _KEYWORD_OPERATORS for n in names):
+            continue
+        text = " and ".join(names)
+        expression = Expression.compile(text)
+        matched = [test for test, matcher in state.keyword_matchers if expression.evaluate(matcher)]
+        if matched == [item]:
+            return text
+    return None
+
+
+def keyword_command(args: Sequence[str], seed: int, options: Sequence[str], expression: str) -> str:
+    """
+    Return the command that runs a row outside the rootdir again, ``pytest <args>
+    --rng-seed=S`` followed by ``options`` and ``-k <expression>``, quoted for the
+    platform's shell.
+    """
+    return " ".join(
+        [
+            "pytest",
+            *map(quote, args),
+            f"--rng-seed={seed}",
+            *map(quote, options),
+            "-k",
+            quote(expression),
+        ]
+    )
+
+
+def _outside_command(
+    item: pytest.Item, seed: int, options: Sequence[str], start: Path
+) -> str | None:
+    """
+    Return the command that runs a row outside the rootdir again from the folder
+    ``start``: from the paths the run started from, so that pytest gives it the same
+    node ID, selected with ``-k``. None when there is no such command.
+    """
+    args = start_args(item.config, start)
+    if args is None:
+        return None
+    expression = keyword(item)
+    if expression is None:
+        return None
+    return keyword_command(args, seed, options, expression)
+
+
 def describe(infos: Sequence[VectorInfo]) -> str:
     """
     Name a row's strategies and rows for the list of failed rows: ``burst random
@@ -235,8 +330,16 @@ def _vector_line(info: VectorInfo) -> str:
 
 
 def _value_shown(value: Any, verbosity: int) -> str:
-    """Return a value's stable repr, cut at ``VALUE_LIMIT`` characters below -vv."""
-    text = _value_repr(value)
+    """
+    Return a value's stable repr, cut at ``VALUE_LIMIT`` characters below -vv. A
+    value whose repr raises is shown by its type and the exception's
+    (``<Reg: repr() raised RuntimeError>``), as the report of its failure must
+    still be made: an exception here would stop the session with an INTERNALERROR.
+    """
+    try:
+        text = _value_repr(value)
+    except Exception as error:
+        text = f"<{type(value).__name__}: repr() raised {type(error).__name__}>"
     if verbosity < 2 and len(text) > VALUE_LIMIT:
         text = f"{text[:VALUE_LIMIT]}... ({len(text)} characters; -vv shows all)"
     return text
@@ -291,10 +394,11 @@ def failure(item: pytest.Item, infos: Sequence[VectorInfo]) -> tuple[str, dict[s
     controller):
 
     - ``command``: the rerun command, with the node ID relative to the folder
-      pytest was started in;
+      pytest was started in (for a file outside the rootdir, the paths the run
+      started from and ``-k``);
     - ``row``: the row's strategies and rows, as ``describe()`` names them, and
-      ``(outside the rootdir)`` for a file whose node ID depends on the paths on
-      the command line;
+      ``(outside the rootdir)`` for a file outside the rootdir that the command
+      does not reproduce;
     - ``seed``: the run's seed;
     - ``options``: the command's arguments after ``--rng-seed``, unquoted, as a
       JSON list (``["--nsamples=13", "-c", "ci/pytest.ini"]``).
@@ -302,19 +406,24 @@ def failure(item: pytest.Item, infos: Sequence[VectorInfo]) -> tuple[str, dict[s
     config = item.config
     seed = infos[0].seed
     options = generation_options(config, infos)
-    command = rerun_command(rerun_nodeid(item), seed, options)
     verbosity = int(getattr(config.option, "verbose", 0))
     row = describe(infos)
     note = None
-    if outside_rootdir(item):
-        row += " (outside the rootdir)"
-        rootdir = bestrelpath(config.invocation_params.dir, config.rootpath)
-        note = (
-            f"the test is outside the rootdir ({rootdir}), so pytest names it by the path "
-            "on the command line: this command gives the row another node ID and other "
-            "values. A run with a --rootdir that contains the test prints a command that "
-            "reproduces it."
-        )
+    outside = outside_rootdir(item)
+    command = (
+        _outside_command(item, seed, options, config.invocation_params.dir) if outside else None
+    )
+    if command is None:
+        command = rerun_command(rerun_nodeid(item), seed, options)
+        if outside:
+            row += " (outside the rootdir)"
+            rootdir = bestrelpath(config.invocation_params.dir, config.rootpath)
+            note = (
+                f"the test is outside the rootdir ({rootdir}), so pytest names it by the "
+                "path it was collected from: this command gives the row another node ID "
+                "and other values. A run with a --rootdir that contains the test prints a "
+                "command that reproduces it."
+            )
     attribute = {"command": command, "row": row, "seed": str(seed), "options": json.dumps(options)}
     return section(infos, command, verbosity, note), attribute
 
@@ -336,8 +445,13 @@ def testcase_properties(item: pytest.Item, infos: Sequence[VectorInfo]) -> list[
     """
     config = item.config
     verbosity = int(getattr(config.option, "verbose", 0))
+    seed = infos[0].seed
     options = generation_options(config, infos, start=config.rootpath)
-    command = rerun_command(rootdir_nodeid(item), infos[0].seed, options)
+    command = None
+    if outside_rootdir(item):
+        command = _outside_command(item, seed, options, config.rootpath)
+    if command is None:
+        command = rerun_command(rootdir_nodeid(item), seed, options)
     properties = []
     for position, info in enumerate(infos):
         prefix = f"{PROPERTY}." if len(infos) == 1 else f"{PROPERTY}.{position}."

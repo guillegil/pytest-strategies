@@ -195,13 +195,17 @@ class SessionState:
         # this run's seed (a pytest-xdist worker gets both from the controller)
         self.deselect: set[str] = set()
         self.recorded: set[str] = set()
-        # The rows the run deselected, and the rows of ``recorded`` whose call
-        # passed, with the options of their rerun command in this run, by node ID:
-        # an entry leaves the failed-seeds map when its row passes under its seed
-        # and its options
-        self.deselected: list[str] = []
+        # The tests the run deselected, and pytest's -k matcher of each test the run
+        # collected, computed for the first failed row outside the rootdir: its rerun
+        # command selects it with a -k expression that matches no other test
+        # (_repro.keyword)
+        self.deselected_items: list[pytest.Item] = []
+        self.keyword_matchers: list[tuple[pytest.Item, Any]] | None = None
+        # The rows of ``recorded`` whose call passed, with the options of their
+        # rerun command in this run, by node ID: an entry leaves the failed-seeds
+        # map when its row passes under its seed and its options
         self.passed_rows: dict[str, tuple[str, ...]] = {}
-        # On the controller: what each worker sent of those two, by worker ID
+        # On the controller: what each worker sent of those, by worker ID
         self.worker_reuse: dict[str, dict[str, Any]] = {}
         # Where each fixture that drew is defined and registered
         # (plugin._fixture_definition and _fixture_base), the last parts of its

@@ -367,6 +367,25 @@ class TestCommands:
         assert_reruns(command, pytester.path / "ci", pytester.path / "ci", FAILED[0])
         assert_reruns(failed, pytester.path, pytester.path / "ci", FAILED[0])
 
+    def test_a_test_outside_the_rootdir_is_selected_with_k_from_the_rootdir(self, pytester):
+        # -c ci/pytest.ini makes ci the rootdir, and the tests in tests/ are outside it
+        project(pytester.path, folder="tests")
+        write(pytester.path, {"ci/pytest.ini": INI})
+
+        result = run(pytester, "-c", "ci/pytest.ini", "-o", "junit_family=xunit1")
+
+        suite = report(pytester)
+        (case,) = cases(suite, "test_write[rand-1]")
+        command = dict(properties(case))["pytest_strategies.command"]
+        expression = quote("test_write[rand-1]")
+        assert command == f"pytest .. --rng-seed={SEED} -c pytest.ini -k {expression}"
+        failed = dict(properties(suite))["pytest_strategies.failed.0"]
+        assert failed == f"pytest . --rng-seed={SEED} -c ci/pytest.ini -k {expression}"
+        assert failed == failed_rows(result.stdout.lines)[0]
+        nodeid = "tests/test_jx_rows.py::test_write[rand-1]"
+        assert_reruns(command, pytester.path / "ci", pytester.path / "ci", nodeid)
+        assert_reruns(failed, pytester.path, pytester.path / "ci", nodeid)
+
 
 class TestOutcomes:
     def test_a_failure_and_a_teardown_error_both_carry_the_properties(self, pytester):

@@ -17,20 +17,22 @@ row passed under its seed and its options.
 With ``--lf`` or ``--sw`` (``--sw-skip`` too) and no ``--rng-seed``, the run reads
 pytest's own last-failed set (``cache/lastfailed``) or the test ``--sw`` resumes
 from (``cache/stepwise``), keeps the entries of those node IDs whose file still
-exists and that the paths on the command line select, and seeds from the newest
-one: its rows run with the values they failed with. The rows recorded under another
-seed are deselected, which leaves them in pytest's last-failed set, and the
-terminal summary gives a ``pytest --lf --rng-seed=S ...`` command for them. The
-options are not applied: the header line that says the seed was reused names the
-recorded ones that differ from the run's.
+exists and that the run collects (the paths and node IDs on the command line, or
+else the testpaths or the folder pytest was started in), and seeds from the newest
+one: its rows run with the values they failed with. ``-k`` and ``-m`` are applied
+only once the tests are collected, after the seed is chosen. The rows recorded
+under another seed are deselected, which leaves them in pytest's last-failed set,
+and the terminal summary gives a ``pytest --lf --rng-seed=S ...`` command that
+reruns only them. The options are not applied: the header line that says the seed
+was reused names the recorded ones that differ from the run's.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -75,12 +77,15 @@ class Reuse:
         seed: The seed of the newest failed row, the run's seed
         rows: The failed rows recorded under that seed, by node ID
         others: The failed rows recorded under other seeds, which the run deselects
+        failed: The node IDs of the failed tests the run reruns: pytest's
+            last-failed set, or the test ``--sw`` resumes from
     """
 
     flag: str
     seed: int
     rows: dict[str, Entry]
     others: dict[str, Entry]
+    failed: frozenset[str] = field(default_factory=frozenset)
 
 
 def _entry(value: object) -> Entry | None:
@@ -222,12 +227,11 @@ def _exists(rootpath: Path, nodeid: str) -> bool:
 
 def _selection(config: pytest.Config) -> Callable[[str], bool] | None:
     """
-    Return a test of whether the paths and node IDs on the command line select a
-    node ID, or None when the run has none (it collects the testpaths or the
-    folder it started in) or one that is not a path (``--pyargs``).
+    Return a test of whether the run collects a node ID: whether one of the paths
+    and node IDs it starts from (``config.args``: those on the command line, or
+    else the testpaths or the folder pytest was started in) selects it. None when
+    one of them is not a path (``--pyargs``).
     """
-    if config.args_source != pytest.Config.ArgsSource.ARGS:
-        return None
     targets: list[tuple[str, str]] = []
     for arg in config.args:
         text, _, names = arg.partition("::")
@@ -283,6 +287,7 @@ def plan(config: pytest.Config) -> Reuse | None:
         seed=seed,
         rows={nodeid: entry for nodeid, entry in kept.items() if entry.seed == seed},
         others={nodeid: entry for nodeid, entry in kept.items() if entry.seed != seed},
+        failed=frozenset(failed),
     )
 
 
@@ -368,25 +373,60 @@ def differences(
     return ", ".join(parts) or None
 
 
-def commands(flag: str, rows: Iterable[Entry]) -> list[tuple[str, int]]:
+def _targets(nodeids: Sequence[str], failed: Collection[str]) -> list[str]:
+    """
+    Return what selects the rows ``nodeids`` on a command line, in their order: the
+    file of the rows whose file holds no other failed test (of ``failed``), and the
+    node ID of each of the others.
+    """
+    mine = set(nodeids)
+    shared = {nodeid.partition("::")[0] for nodeid in failed if nodeid not in mine}
+    targets: dict[str, None] = {}
+    for nodeid in nodeids:
+        file = nodeid.partition("::")[0]
+        targets[nodeid if file in shared else file] = None
+    return list(targets)
+
+
+def commands(
+    flag: str,
+    rows: Iterable[tuple[str, Entry]],
+    failed: Collection[str] = (),
+    where: Callable[[str], str] = str,
+) -> list[tuple[str, int]]:
     """
     Return the commands that rerun failed rows recorded under other seeds, each
-    with the number of rows it covers: ``pytest --lf --rng-seed=S`` followed by the
-    rows' options, one command per seed (more when rows of one seed were recorded
-    with other options), in the order of the map. The constraints the rows turned
-    off are joined into one ``--strategy-constraint-off``; its items name their
-    strategy, so each row gets its own.
+    with the number of rows it covers: ``pytest --lf --rng-seed=S``, the rows'
+    options, and the files or node IDs that select the rows, one command per seed
+    (more when rows of one seed were recorded with other options), in the order of
+    the map. The constraints the rows turned off are joined into one
+    ``--strategy-constraint-off``; its items name their strategy, so each row gets
+    its own.
+
+    A command names a row's file when every failed test of that file is one of its
+    rows, and the row's node ID otherwise, so it reruns no failed test under a seed
+    that test was not recorded under: one that passed with those other values would
+    leave pytest's last-failed set, and its failure would be lost.
+
+    Args:
+        flag: The option that reruns failed tests, ``--lf``, ``--sw`` or ``--sw-skip``
+        rows: The rows' node IDs (relative to the rootdir) and entries, in the
+            order of the map
+        failed: The node IDs of the failed tests the run reruns (``Reuse.failed``)
+        where: Write a node ID or a file relative to the rootdir as the command
+            gives it (relative to the folder pytest was started in)
     """
     groups: dict[tuple[int, tuple[tuple[str, ...], ...]], dict[tuple[str | None, str], None]] = {}
-    counts: dict[tuple[int, tuple[tuple[str, ...], ...]], int] = {}
-    for row in rows:
+    nodeids: dict[tuple[int, tuple[tuple[str, ...], ...]], list[str]] = {}
+    for nodeid, row in rows:
         row_units, row_off = _split(row.options)
         key = (row.seed, tuple(row_units))
         groups.setdefault(key, {}).update(dict.fromkeys(row_off))
-        counts[key] = counts.get(key, 0) + 1
+        nodeids.setdefault(key, []).append(nodeid)
     found = []
     for (seed, units), off in groups.items():
         options = list(units) + ([_off_unit(off)] if off else [])
-        command = " ".join(["pytest", flag, f"--rng-seed={seed}", _text(options)]).rstrip()
-        found.append((command, counts[(seed, units)]))
+        targets = [quote(where(target)) for target in _targets(nodeids[(seed, units)], failed)]
+        parts = ["pytest", flag, f"--rng-seed={seed}", _text(options), *targets]
+        found.append((" ".join(part for part in parts if part), len(nodeids[(seed, units)])))
     return found

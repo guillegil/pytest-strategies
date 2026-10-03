@@ -122,9 +122,12 @@ class TestDocumentedCliOptions:
         Every --option mentioned in the docs and examples must be accepted by pytest,
         except the names reserved for later releases, which must not be.
         """
+        # The names the contributing guide reserves for later releases, which must
+        # not be options yet; only its sentence may name them
+        guide, reserved = _without_reserved((REPO_ROOT / "docs" / "dev.md").read_text("utf-8"))
         sources = [
             (REPO_ROOT / "README.md").read_text(encoding="utf-8"),
-            (REPO_ROOT / "docs" / "dev.md").read_text(encoding="utf-8"),
+            guide,
             pytest_strategy.__doc__ or "",
             *(path.read_text(encoding="utf-8") for path in EXAMPLES),
         ]
@@ -152,20 +155,22 @@ class TestDocumentedCliOptions:
         )
         # Options of the other tools the contributing guide runs (black, mypy)
         known.update({"--check", "--strict"})
-        # The prefix of new options (--strategy-<x>), and the names the contributing
-        # guide reserves for later releases, which must not be options yet
-        prefixes = {option for option in documented if option.endswith("-")}
-        reserved = _reserved_options(sources[1])
+        # The prefix of new options, as the naming rule writes it (--strategy-<x>)
+        known.add("--strategy-")
         assert reserved
         assert reserved & known == set()
-        assert documented - known - defined - prefixes - reserved == set()
+        assert documented - known - defined == set()
 
 
-def _reserved_options(text: str) -> set[str]:
-    """Return the options of docs/dev.md's sentence that reserves names (D20)."""
+def _without_reserved(text: str) -> tuple[str, set[str]]:
+    """
+    Return docs/dev.md without its sentence that reserves names for later releases
+    (D20), and the options that sentence names.
+    """
     match = re.search(r"Reserved for later releases:(.*?)\.(?:\s|$)", text, re.DOTALL)
     assert match is not None
-    return set(OPTION_RE.findall(match.group(1)))
+    rest = text[: match.start()] + text[match.end() :]
+    return rest, set(OPTION_RE.findall(match.group(1)))
 
 
 def _load_example_factories(path: Path, monkeypatch) -> tuple:

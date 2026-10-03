@@ -300,6 +300,41 @@ def test_blob(blob):
         )
         assert "values    blob='" + "x" * 5000 + "'" in full.stdout.lines
 
+    @pytest.mark.parametrize("family", ["xunit2", "xunit1"])
+    def test_a_value_whose_repr_raises_is_shown_by_its_type(self, pytester, family):
+        write(
+            pytester.path,
+            {
+                "test_reg.py": """
+from pytest_strategy import Parameter, RNGChoice, TestArg, strategy
+
+class Reg:
+    def __init__(self, n):
+        self.n = n
+
+    def __repr__(self):
+        raise RuntimeError("no repr while the device is off")
+
+def regs():
+    return Parameter(TestArg("reg", rng_type=RNGChoice([Reg(1), Reg(2)])), nsamples=2)
+
+@strategy(regs)
+def test_reg(reg):
+    assert reg.n > 5
+""",
+            },
+        )
+
+        result = run(pytester, "--junitxml=out.xml", "-o", f"junit_family={family}")
+
+        # The failures are reported, and the session goes on
+        result.assert_outcomes(failed=2)
+        assert result.ret == pytest.ExitCode.TESTS_FAILED
+        assert [section[2] for section in sections(result.stdout.lines)] == [
+            "values    reg=<Reg: repr() raised RuntimeError>"
+        ] * 2
+        assert "INTERNALERROR" not in result.stdout.str() + result.stderr.str()
+
 
 class TestRerun:
     """The printed command runs exactly the failed row, which fails the same way."""
@@ -444,23 +479,113 @@ def test_name(request, a):
         assert command == (f"pytest {quote(nodeid)} --rng-seed={SEED} -c ci/pytest.ini --rootdir=.")
         assert_reruns(command, pytester.path, pytester.path, nodeid, section, result.stdout.lines)
 
-    def test_a_test_outside_the_rootdir_is_noted(self, pytester):
-        # pytest names a test outside the rootdir by the path on the command line, so
-        # a run of its node ID gives it another node ID, and other values
+    def test_a_test_outside_the_rootdir_is_selected_with_k(self, pytester):
+        # pytest names a test outside the rootdir by the path the run started from
+        # (here the folder it runs in), so the command starts from the same path and
+        # selects the row with -k
         write(pytester.path, {"ci/pytest.ini": "[pytest]\n"})
         project(pytester.path, module('"rand-1" in request.node.name'), folder="tests")
 
         result = run(pytester, "-c", "ci/pytest.ini")
 
         (section,) = sections(result.stdout.lines)
-        nodeid = str(Path("tests", "test_dma.py")) + "::test_write[rand-1]"
-        assert (
-            rerun_command(section) == f"pytest {quote(nodeid)} --rng-seed={SEED} -c ci/pytest.ini"
+        command = rerun_command(section)
+        assert command == (
+            f"pytest . --rng-seed={SEED} -c ci/pytest.ini -k {quote('test_write[rand-1]')}"
+        )
+        assert not section[-1].startswith("note")
+        assert failed_rows(result.stdout.lines) == [f"{command}  # burst random 1"]
+        assert_reruns(
+            command,
+            pytester.path,
+            pytester.path / "ci",
+            "tests/test_dma.py::test_write[rand-1]",
+            section,
+            result.stdout.lines,
+        )
+
+    def test_outside_the_rootdir_the_run_s_own_paths(self, pytester):
+        write(pytester.path, {"ci/pytest.ini": "[pytest]\n"})
+        project(pytester.path, module('"rand-1" in request.node.name'), folder="tests")
+        nodeid = str(Path("tests", "test_dma.py")) + "::test_write"
+
+        result = run(pytester, "-c", "ci/pytest.ini", nodeid)
+
+        (section,) = sections(result.stdout.lines)
+        command = rerun_command(section)
+        assert command == (
+            f"pytest {quote(nodeid)} --rng-seed={SEED} -c ci/pytest.ini"
+            f" -k {quote('test_write[rand-1]')}"
+        )
+        assert_reruns(
+            command,
+            pytester.path,
+            pytester.path / "ci",
+            "::test_write[rand-1]",
+            section,
+            result.stdout.lines,
+        )
+
+    def test_outside_the_rootdir_k_names_the_module_when_needed(self, pytester):
+        # test_other.py has a test of the same name, which -k deselects: the rerun
+        # command, which runs without that -k, must not select it either
+        write(pytester.path, {"ci/pytest.ini": "[pytest]\n"})
+        project(pytester.path, module('"rand-1" in request.node.name'), folder="tests")
+        write(pytester.path, {"tests/test_other.py": module('"rand-1" in request.node.name')})
+
+        result = run(pytester, "-c", "ci/pytest.ini", "-k", "test_dma")
+
+        (section,) = sections(result.stdout.lines)
+        command = rerun_command(section)
+        expression = "test_dma.py and test_write[rand-1]"
+        assert command == f"pytest . --rng-seed={SEED} -c ci/pytest.ini -k {quote(expression)}"
+        assert_reruns(
+            command,
+            pytester.path,
+            pytester.path / "ci",
+            "tests/test_dma.py::test_write[rand-1]",
+            section,
+            result.stdout.lines,
+        )
+
+    @pytest.mark.parametrize(
+        ("files", "failing"),
+        [
+            # Two modules of the same name: no -k expression tells their rows apart
+            (
+                {"tests/b/test_dma.py": module('"rand-1" in request.node.name')},
+                "test_write[rand-1]",
+            ),
+            # A name -k cannot hold
+            ({}, "test_chan[ch=1-dev=b]"),
+        ],
+        ids=["same_names", "not_a_k_name"],
+    )
+    def test_outside_the_rootdir_without_a_k_expression_a_note(self, pytester, files, failing):
+        # importlib lets two test modules have one name
+        ini = "[pytest]\naddopts = --import-mode=importlib\n"
+        write(pytester.path, {"ci/pytest.ini": ini, **files})
+        project(
+            pytester.path,
+            module('"rand-1" in request.node.name')
+            + module("ch == 1 and dev == 'b'", "chan", "ch, dev, x", "test_chan"),
+            folder="tests",
+        )
+
+        result = run(pytester, "-c", "ci/pytest.ini", "--nsamples=auto")
+
+        nodeid = str(Path("tests", "test_dma.py")) + f"::{failing}"
+        (section,) = [
+            s
+            for s in sections(result.stdout.lines)
+            if rerun_command(s).startswith(f"pytest {quote(nodeid)} ")
+        ]
+        assert rerun_command(section) == (
+            f"pytest {quote(nodeid)} --rng-seed={SEED} --nsamples=auto -c ci/pytest.ini"
         )
         assert section[-1].startswith("note      the test is outside the rootdir (ci), so pytest")
-        assert failed_rows(result.stdout.lines) == [
-            f"{rerun_command(section)}  # burst random 1 (outside the rootdir)"
-        ]
+        assert f"{rerun_command(section)}  # " in "\n".join(failed_rows(result.stdout.lines))
+        assert "(outside the rootdir)" in "\n".join(failed_rows(result.stdout.lines))
 
     def test_only_the_constraints_of_the_failed_row_s_strategy(self, pytester):
         write(
@@ -655,6 +780,39 @@ def test_write(request, addr, len):
         assert sections(result.stdout.lines) == []
         assert failed_rows(result.stdout.lines) == [
             f"pytest {quote('test_dma.py::test_write[rand-1]')} --rng-seed={SEED}  # burst random 1"
+        ]
+
+    def test_a_failure_a_later_wrapper_sets_gets_a_section_and_a_row(self, pytester):
+        # sub/conftest.py is loaded while the tests are collected, after the plugin
+        # registered: its makereport wrapper runs inside the plugin's (tryfirst)
+        project(pytester.path, module("False"), folder="sub")
+        (pytester.path / "sub" / "conftest.py").write_text(
+            CONFTEST + """
+import pytest
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item, call):
+    report = yield
+    if call.when == "call" and item.name == "test_write[rand-1]":
+        try:
+            raise AssertionError("flagged by the bus checker")
+        except AssertionError:
+            excinfo = pytest.ExceptionInfo.from_current()
+        report.outcome = "failed"
+        report.longrepr = item.repr_failure(excinfo)
+    return report
+""",
+            encoding="utf-8",
+        )
+
+        result = run(pytester)
+
+        result.assert_outcomes(failed=1, passed=4)
+        (section,) = sections(result.stdout.lines)
+        nodeid = str(Path("sub", "test_dma.py")) + "::test_write[rand-1]"
+        assert rerun_command(section) == f"pytest {quote(nodeid)} --rng-seed={SEED}"
+        assert failed_rows(result.stdout.lines) == [
+            f"pytest {quote(nodeid)} --rng-seed={SEED}  # burst random 1"
         ]
 
     def test_the_report_carries_the_row_as_strings(self, pytester):

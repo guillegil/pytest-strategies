@@ -683,15 +683,16 @@ strategies of its tests may not have been resolved). It is not checked under
   the failed strategy rows' commands (`report.pytest_strategies`, see `_repro`)
 - `pytest_terminal_summary` - After a failed run, prints `pytest-strategies:
   reproduce with --rng-seed=S` with the failed tests' contexts and the failed
-  rows, and in any run the commands of the deselected `--lf` rows; with `-v`, a
+  rows, and in any run the commands of the `--lf` rows set aside; with `-v`, a
   Strategy Summary (rows of each kind per strategy, where `nsamples` came from)
   and the Contexts block (label, fingerprint, tests per context). The xdist
   controller first prints the workers' context line, and in red what differed
 - `pytest_sessionfinish` - A tryfirst one adds the `--junitxml` suite
   properties. The other maps the failed tests to their factories' contexts and
-  records the failed seeds; a pytest-xdist worker sends its `-v` summary, its
-  `--lf` rows and its part of the same-vectors check, and the controller
-  compares the parts and turns exit status 0 or 5 into 4 when they differ
+  records the failed seeds; a pytest-xdist worker sends its `-v` summary, the
+  recorded rows that passed and its part of the same-vectors check, and the
+  controller compares the parts and turns exit status 0 or 5 into 4 when they
+  differ
 - `pytest_testnodedown` - (pytest-xdist only) keeps what each worker sent, by
   worker ID; a worker that crashed sent nothing
 
@@ -1129,9 +1130,11 @@ without `--rng-seed` picks a seed from the clock, and passing that printed seed
 reproduces the run.
 
 **Failed rows (`_repro.py`, D18):** the plugin's `pytest_runtest_makereport`
-wrapper (`tryfirst`, so it wraps skipping's wrapper and sees an XPASS(strict)
-as the failure it becomes) reads `item.stash[VECTORS_KEY]` for a failed setup or
-call report. `_repro.failure()` returns the text of the row's section (a block
+wrapper reads `item.stash[VECTORS_KEY]` for a failed setup or call report. It
+wraps the other wrappers, so it sees the outcome they set: skipping's (which
+turns an XPASS(strict) into a failure) because it is registered after it, and
+through `tryfirst` also those registered later, such as a `conftest.py` loaded
+during collection. `_repro.failure()` returns the text of the row's section (a block
 per `VectorInfo`: strategy and origin, the vector line by kind, each value's
 `_value_repr` cut at `VALUE_LIMIT` characters below `-vv`, seed, context when
 set; then the `rerun` line) and the report's `pytest_strategies` attribute: a
@@ -1155,11 +1158,21 @@ keeps each attribute in `SessionState.failed_rows` by node ID, and
 strategies. `quote()` uses `shlex.quote` on POSIX, and on Windows double quotes
 with the C runtime's backslash rules, leaving arguments of
 `[A-Za-z0-9_+=:./\-]` bare. pytest gives a file outside the rootdir a node ID
-relative to the command-line path that contains it (`-c ci/pytest.ini` with
-`tests/`), and `cwd_relative_nodeid()` then joins it to the rootdir, a path that
-does not exist; `rerun_nodeid()` uses the file's path from the invocation folder
-instead, and the section's `note` line and the row's `(outside the rootdir)` say
-that the rerun gets another node ID, and so other values. The integration tests
+relative to the path the run started from that contains it (`config.args`: `-c
+ci/pytest.ini` with `tests/` and no paths gives the invocation folder), and the
+random streams follow that node ID. So the command of such a row
+(`_outside_command()`) starts from the same paths (`start_args()`, relative to the
+folder the command runs from) and selects the row with `-k` (`keyword()`): the
+row's name, else with its module's name, else with its classes' too, the first
+expression that pytest's own `KeywordMatcher` and `Expression` match to that item
+alone among the session's items and those the run deselected (kept by the
+plugin's `pytest_deselected`; the rerun runs without the run's own selection).
+The matchers are built once per session, for the first such failure. Without such
+an expression (a name outside `-k`'s grammar, such as one with `=`, or two modules
+of one name), or when a start path does not exist (`--pyargs`), `rerun_nodeid()`
+gives the file's path from the invocation folder, and the section's `note` line
+and the row's `(outside the rootdir)` say that the rerun gets another node ID, and
+so other values. The integration tests
 (test_repro_section_integration.py) run each printed command through the
 platform's shell from the folder of the run, so the Windows CI cells check the
 quoting.
@@ -1198,9 +1211,8 @@ report's `pytest_strategies` attribute. The makereport wrapper takes a passing
 row's options (`generation_options()`) from a passing call report, only for the
 items in `SessionState.recorded`, the node IDs of the map's entries under the
 run's seed. A pytest-xdist worker gets `recorded` and `deselect` through
-`workerinput` and sends its passed rows' options and the node IDs it deselected
-through `workeroutput`, which `pytest_testnodedown` keeps in
-`SessionState.worker_reuse`. The map is written only when it changed, so a run
+`workerinput` and sends its passed rows' options through `workeroutput`, which
+`pytest_testnodedown` keeps in `SessionState.worker_reuse`. The map is written only when it changed, so a run
 that never failed creates nothing. With `--lf`, `--sw` or `--sw-skip` (not
 `--sw-reset`) and no seed given, the tryfirst `pytest_configure` calls
 `_reuse.plan()`. It reads the cache through `Cache.for_config(config,
@@ -1209,11 +1221,13 @@ has not set `config.cache` yet, and a conftest.py's `pytest_configure` can
 compute a context, which draws from the run's seed (nothing is read without the
 cache plugin or under `--cache-clear`). It takes the keys of pytest's
 `cache/lastfailed`, or the `last_failed` of `cache/stepwise`, and keeps the
-map's entries among them whose file exists and that the command line selects
-(when `config.args_source` is `ARGS`: a path is a prefix, and a node ID's `::`
-names match the test and its parametrizations; an argument that is not an
-existing path, such as a `--pyargs` module, selects everything). The newest kept
-entry gives the seed. `Reuse.rows` are the kept entries of that seed, and
+map's entries among them whose file exists and that the run collects, by
+`config.args`: the paths and node IDs on the command line or, without any, the
+expanded testpaths or the folder pytest was started in, which pytest puts there
+too (a path is a prefix, and a node ID's `::` names match the test and its
+parametrizations; an argument that is not an existing path, such as a
+`--pyargs` module, selects everything). `-k` and `-m` cannot take part, since
+they apply to collected items. The newest kept entry gives the seed. `Reuse.rows` are the kept entries of that seed, and
 `Reuse.others` the rest, which a second `pytest_collection_modifyitems`
 deselects through `pytest_deselected`: pytest's `LFPlugin` drops a test from
 `lastfailed` only on a report, so they stay there. When none of the failed tests
@@ -1228,8 +1242,15 @@ and those the run adds (`without`), from `generation_options(config, ())`; a
 constraint the rows turned off counts as off when the run turns it off in their
 strategy or everywhere. After the failed rows, at every verbosity,
 `_deselected_lines()` prints one `pytest --lf --rng-seed=S ...` per seed and set
-of options (`_reuse.commands()`, the constraint items of a group merged into one
-option). test_lf_seed_reuse_integration.py runs pytest in subprocesses, with the
+of options for every row of `Reuse.others` (`_reuse.commands()`, the constraint
+items of a group merged into one option): the deselected ones, and those the run
+did not collect, such as rows whose `strategies_ids = values` IDs this seed
+names otherwise. Each command ends with what selects its rows, relative to the
+folder pytest was started in: a row's file when every test of that file in
+`Reuse.failed` (the last-failed set read at configure time) is one of the
+command's rows, else the row's node ID. A command without them would rerun the
+newest seed's rows with other values, and pytest drops a passing test from
+`lastfailed`, losing its failure. test_lf_seed_reuse_integration.py runs pytest in subprocesses, with the
 cache plugin, `-n 2` included.
 
 **One generator of the plugin's own:** every draw (the RNG types and the `RNG.*`

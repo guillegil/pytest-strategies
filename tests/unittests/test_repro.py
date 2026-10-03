@@ -17,12 +17,14 @@ from pytest_strategy._repro import (
     VALUE_LIMIT,
     describe,
     generation_options,
+    keyword_command,
     outside_rootdir,
     quote,
     rerun_command,
     rerun_nodeid,
     rootdir_nodeid,
     section,
+    start_args,
     suite_properties,
     testcase_properties,
 )
@@ -199,6 +201,25 @@ class TestSection:
         lines = section([info(values=row)], "pytest x", 0).splitlines()
 
         assert lines[2:4] == ["values    tags=frozenset({'a', 'b', 'c'})", "          obj=object"]
+
+    def test_a_value_whose_repr_raises_is_shown_by_its_type(self):
+        class Reg:
+            def __repr__(self):
+                raise RuntimeError("no repr while the device is off")
+
+        class Bank:
+            def __repr__(self):
+                raise ValueError("no")
+
+        row = vector_type(("reg", "banks", "n"))(Reg(), [Bank()], 2)
+
+        lines = section([info(values=row)], "pytest x", 0).splitlines()
+
+        assert lines[2:5] == [
+            "values    reg=<Reg: repr() raised RuntimeError>",
+            "          banks=<list: repr() raised ValueError>",
+            "          n=2",
+        ]
 
     def test_a_long_value_is_cut_below_vv(self):
         row = vector_type(("blob",))("x" * 5000)
@@ -460,6 +481,45 @@ class TestRerunNodeid:
         assert rootdir_nodeid(inside) == "t/test_x.py::test_a"
         assert rootdir_nodeid(outside) == str(Path("..", "tests", "test_x.py")) + "::test_a"
 
+    @pytest.mark.parametrize(
+        ("args", "start", "expected"),
+        [
+            (["tests", "tests/test_x.py::test_a"], ".", ["tests", "tests/test_x.py::test_a"]),
+            (["./tests/"], ".", ["tests"]),
+            (["{root}"], ".", ["."]),
+            (["tests"], "ci", ["../tests"]),
+            (["{root}"], "ci", [".."]),
+        ],
+        ids=["as_given", "normalized", "invocation_folder", "from_ci", "from_ci_to_it"],
+    )
+    def test_the_paths_the_run_started_from(self, tmp_path, args, start, expected):
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_x.py").touch()
+        config = Namespace(
+            args=[arg.format(root=tmp_path) for arg in args],
+            invocation_params=Namespace(dir=tmp_path),
+        )
+
+        found = start_args(config, tmp_path / start)
+
+        # In the platform's form
+        parts = (text.partition("::") for text in expected)
+        assert found == [str(Path(*path.split("/"))) + sep + names for path, sep, names in parts]
+
+    def test_no_paths_when_one_is_not_a_path(self, tmp_path):
+        (tmp_path / "tests").mkdir()
+        config = Namespace(args=["tests", "acme.tests"], invocation_params=Namespace(dir=tmp_path))
+
+        assert start_args(config, tmp_path) is None
+
+    def test_the_k_command(self):
+        command = keyword_command([".", "a b"], 5, ["-c", "ci/pytest.ini"], "m.py and t[x]")
+
+        assert command == " ".join(
+            ["pytest", ".", quote("a b"), "--rng-seed=5", "-c", "ci/pytest.ini"]
+            + ["-k", quote("m.py and t[x]")]
+        )
+
     def test_the_command(self):
         nodeid = "t.py::test_a[it's]"
 
@@ -548,6 +608,17 @@ class TestTestcaseProperties:
             ("pytest_strategies.value.none", "None"),
             ("pytest_strategies.value.tags", "{'a', 'b'}"),
         ]
+
+    def test_a_value_whose_repr_raises_is_shown_by_its_type(self, tmp_path):
+        class Reg:
+            def __repr__(self):
+                raise RuntimeError("no repr while the device is off")
+
+        row = vector_type(("reg",))(Reg())
+
+        names = dict(testcase_properties(self.item(tmp_path), [info(values=row)]))
+
+        assert names["pytest_strategies.value.reg"] == "<Reg: repr() raised RuntimeError>"
 
     def test_a_directed_row_has_a_name(self, tmp_path):
         row = info(kind="directed", name="zeros", index=0, id="directed-zeros")
