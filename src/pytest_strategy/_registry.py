@@ -95,7 +95,6 @@ def source_part(
     *,
     folder: bool = False,
     test_files: Sequence[str] = TEST_FILE_PATTERNS,
-    searched: Callable[[str], bool] | None = None,
 ) -> str:
     """
     Return where a function or a factory is defined, as a part of a random stream's
@@ -108,28 +107,28 @@ def source_part(
       of the checkout), a plugin's or a helper module's.
     - Otherwise the file :func:`factory_source` finds, or with ``folder`` its
       folder, relative to the rootdir in posix form (``_streams.path_part()``): for
-      a file that pytest or the plugin imports by its path, whose module name
+      a file that pytest or the plugin may import by its path, whose module name
       depends on ``--import-mode`` and on the folders' ``__init__.py`` files (a
-      ``conftest.py``, and a test module, matched by ``test_files``, pytest's
-      ``python_files``, or a strategy file in a folder the session searches for
-      them, ``searched``); for a module that ``sys.modules`` does not have under
-      its name; and for one whose name begins with the rootdir's own folder or a
-      folder above it (a rootdir with an ``__init__.py``), which another checkout
-      may not have.
+      ``conftest.py``, a test module, matched by ``test_files``, pytest's
+      ``python_files``, or a strategy file); for a module that ``sys.modules`` does
+      not have under its name; and for one whose name begins with the rootdir's
+      own folder or a folder above it (a rootdir with an ``__init__.py``), which
+      another checkout may not have.
     - The name of its module when its code has no file (``"<string>"`` for
       ``exec``'d code, which would resolve against the working directory); ``""``
       without a module either.
+
+    The file name alone decides whether a file counts as a test module or a
+    strategy file, not the testpaths or the folders named on the command line, so
+    that every run of one checkout keys it alike. A package module named like one
+    (``src/acme/test_utils.py``) therefore keeps its path in a checkout, and draws
+    other values there than installed, where it has its module's name.
 
     Args:
         fn: The function, factory, partial or callable object
         rootpath: The session's rootdir, or None outside a session
         folder: Return the folder of the file instead of the file
         test_files: The ``python_files`` patterns of test modules
-        searched: Whether the session searches the folder of a file for test
-            modules and strategy files (``plugin._searched``): a package module
-            named like one in another folder (``src/acme/test_utils.py`` with
-            ``testpaths = tests``) is imported by its name only. None outside a
-            session: every file named like one counts as one.
     """
     source = factory_source(fn)[0]
     # The module of what factory_source() read, through wrappers and partials (a
@@ -142,7 +141,7 @@ def source_part(
         source
         and os.path.isfile(source)
         and INSTALLED_FOLDERS.isdisjoint(PurePath(source).parts)
-        and not _imported_by_name(source, module, rootpath, test_files, searched)
+        and not _imported_by_name(source, module, rootpath, test_files)
     ):
         return path_part(os.path.dirname(source) if folder else source, rootpath)
     return module
@@ -153,18 +152,16 @@ def _imported_by_name(
     module: str,
     rootpath: str | os.PathLike[str] | None,
     test_files: Sequence[str],
-    searched: Callable[[str], bool] | None,
 ) -> bool:
     """
     Whether the module ``module`` of the file ``source`` is keyed by its name (see
     :func:`source_part`).
     """
     name = os.path.basename(source)
-    if name == "conftest.py":
-        return False
-    if any(
+    # By the file's name only, whatever the run collects (see source_part)
+    if name == "conftest.py" or any(
         matches_pattern(pattern, source) for pattern in (*STRATEGY_FILE_PATTERNS, *test_files)
-    ) and (searched is None or searched(source)):
+    ):
         return False
     loaded = sys.modules.get(module) if module else None
     file = getattr(loaded, "__file__", None)

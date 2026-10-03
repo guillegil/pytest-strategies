@@ -310,7 +310,7 @@ json_data = export_strategies(format="json")
 print(json_data)
 ```
 
-In a pytest session every strategy file is imported first. A name registered in several folders is exported once, for the registration made last. Each factory gets the inputs it declares, as at collection, with the session's options: `nsamples` is the `--nsamples` value, `"auto"`, or 10 without the option. Its random draws come from a stream derived from the seed, the strategy name and the factory's module name, or the folder of its file for a factory in a strategy file, a test module or a `conftest.py`, so every call in a session, and in every environment and checkout, exports the same values.
+In a pytest session every strategy file is imported first. A name registered in several folders is exported once, for the registration made last. Each factory gets the inputs it declares, as at collection, with the session's options: `nsamples` is the `--nsamples` value, `"auto"`, or 10 without the option. Its random draws come from a stream derived from the seed, the strategy name and the factory's module name, or the folder of its file for a factory in a strategy file, a test module or a `conftest.py`, so every call in a session, and in every environment and checkout, exports the same values. The file's name alone makes a strategy file or a test module: a factory in a package module named like one (`acme/strategies.py`, `acme/test_utils.py`) is keyed by its folder in a checkout or an editable install and by its module's name when installed, so the two export different values; rename the module (`acme/catalog.py`) to avoid that.
 
 ### 7. Test Values (New in v2.0.0)
 

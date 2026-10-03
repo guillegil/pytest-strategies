@@ -1169,59 +1169,73 @@ class TestFixtureDefinition:
             assert definition_part(loaded.conn, config, folder=True) == ".."
 
     @pytest.mark.parametrize("name", ["test_utils.py", "utils_test.py", "strategies.py"])
-    def test_a_package_module_named_like_a_test_module_elsewhere_is_named_by_it(
-        self, tmp_path, name
+    @pytest.mark.parametrize(
+        ("rootdir", "checkout", "where"),
+        [("proj", "proj/src", "src/acme"), ("proj/tests", "proj", "../acme")],
+        ids=["src-layout", "flat-rootdir-in-tests"],
+    )
+    def test_a_package_module_named_like_a_test_module_keeps_its_path_in_a_checkout(
+        self, tmp_path, name, rootdir, checkout, where
     ):
         """
-        pytest never collects src/acme/test_utils.py with testpaths = tests, nor does
-        the plugin load src/acme/strategies.py: they are package modules, imported
-        by their names, and draw as the installed package's do.
+        The file's name alone makes a test module or a strategy file, so
+        src/acme/test_utils.py, which pytest never collects with testpaths = tests,
+        is keyed by its path in a checkout, inside the rootdir or next to it, and by
+        its module's name installed: the two draw different values (the limitation
+        docs/dev.md states; renaming the module avoids it).
         """
         module = "acme." + name.removesuffix(".py")
-        found = set()
+        found = []
         for folder in (
-            tmp_path / "proj" / "src",
+            tmp_path / checkout,
             tmp_path / "proj" / ".venv" / "lib" / "python3.11" / "site-packages",
         ):
             path = folder / "acme" / name
             path.parent.mkdir(parents=True)
             path.write_text(FIXTURES_SOURCE)
             with imported(path, module) as loaded:
-                config = _ini_config(tmp_path / "proj", testpaths=["tests"])
-                found.add(_fixture_definition(loaded.conn, config)[0])
-                found.add(definition_part(loaded.conn, config, folder=True))
+                config = _ini_config(tmp_path / rootdir, testpaths=["tests"])
+                found.append(_fixture_definition(loaded.conn, config)[0])
+                found.append(definition_part(loaded.conn, config, folder=True))
 
-        assert found == {module}
+        assert found == [f"{where}/{name}", where, module, module]
 
     @pytest.mark.parametrize(
-        ("testpaths", "folder", "where"),
+        "folder",
         [
-            (["tests"], "tests/acme", "tests/acme/test_utils.py"),
-            (["t*s"], "tests/acme", "tests/acme/test_utils.py"),
-            (["../shared"], "../shared/acme", "../shared/acme/test_utils.py"),
-            # Without testpaths a bare run collects it from the rootdir
-            ([], "src/acme", "src/acme/test_utils.py"),
-            # pytest does not enter build/ (norecursedirs) or a hidden folder
-            ([], "build/acme", "acme.test_utils"),
-            ([], ".cache/acme", "acme.test_utils"),
-            (["tests"], "src/acme", "acme.test_utils"),
+            "tests/acme",
+            "src/acme",
+            # Folders pytest does not enter (norecursedirs, hidden)
+            "build/acme",
+            ".cache/acme",
+            # Outside the rootdir: a testpaths entry, or a folder next to the rootdir
+            "../shared/acme",
+            "../acme",
         ],
     )
-    def test_the_test_modules_are_those_in_the_folders_pytest_searches(
-        self, tmp_path, testpaths, folder, where
+    @pytest.mark.parametrize("name", ["test_utils.py", "strategies.py", "conftest.py"])
+    def test_a_test_module_is_named_by_its_path_whatever_the_session_searches(
+        self, tmp_path, folder, name
     ):
         """
-        A file named like a test module in the testpaths, or below the rootdir
-        without them, is keyed by its path in every run, whatever the command line
-        names, so a run of one node ID keys it as the run it repeats did.
+        A conftest.py, a file named like a test module or a strategy file is keyed by
+        its path whatever the testpaths, norecursedirs and the folders named on the
+        command line, which differ between a full run and a run of one node ID or of
+        a folder outside the testpaths: pytest imports it by its path in some of
+        them, under a module name that depends on --import-mode.
         """
-        path = tmp_path / "proj" / folder / "test_utils.py"
+        path = tmp_path / "proj" / folder / name
         path.parent.mkdir(parents=True)
         path.write_text(FIXTURES_SOURCE)
 
-        with imported(path, "acme.test_utils") as loaded:
-            config = _ini_config(tmp_path / "proj", testpaths=testpaths)
-            assert _fixture_definition(loaded.conn, config)[0] == where
+        found = set()
+        with imported(path, "acme." + name.removesuffix(".py")) as loaded:
+            for testpaths in ([], ["tests"], ["t*s"], ["src"], ["../shared"], ["tests/unit"]):
+                config = _ini_config(tmp_path / "proj", testpaths=testpaths)
+                found.add(_fixture_definition(loaded.conn, config)[0])
+                found.add(definition_part(loaded.conn, config, folder=True))
+
+        assert found == {f"{folder}/{name}", folder}
 
     def test_a_partial_counts_as_the_function_it_wraps(self, tmp_path):
         path = tmp_path / "conftest.py"

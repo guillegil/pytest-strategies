@@ -918,27 +918,39 @@ test module or strategy file of an installed package (a file in a
 below that folder instead (`_streams.installed_part()`), which does not depend
 on where the environment is. A fixture's `where` and an exported factory's
 `folder` come from `_registry.source_part()` (through `plugin.definition_part()`).
-They are the module's name for a module imported by its name (an installed
-package's, an editable install's, a plugin's or a helper module's), so a
-package's fixture draws the same installed, installed in editable mode or
-checked out next to the tests (also next to a rootdir in the checkout's
-`tests/` folder), and for code with no file (`exec`'d code, whose `"<string>"`
-would resolve against the working directory). They are the file, or its folder
-for an export, for a file that pytest or the plugin imports by its path, whose
-module name depends on `--import-mode` and on the `__init__.py` files: a
-`conftest.py`, and a test module that `python_files` matches or a strategy file
-in a folder the session searches for them (`plugin._searched()`: below the
-testpaths, or below the rootdir without them, outside `norecursedirs`, hidden
-folders and virtual environments). The folders named on the command line do not
-count there, so a run of one node ID keys a file as the run it repeats did. A
-package module named like a test module elsewhere (`src/acme/test_utils.py`
-with `testpaths = tests`) is imported by its name only; without testpaths a
-bare `pytest` collects it as a test module, so it keeps its path, and draws
-other values than the installed package's. They are also the file for a module
-whose name begins with the rootdir's folder or a folder above it (a rootdir with
-an `__init__.py`, or `proj.util` for the tests of a package checkout in
-`proj/tests`), whose name depends on the folders the checkout is in. The
-fixture's definition and base are in its key because pytest sets up several
+They are the file, or its folder for an export, for a file that pytest or the
+plugin may import by its path, whose module name depends on `--import-mode` and
+on the `__init__.py` files: a `conftest.py`, a test module that `python_files`
+matches and a strategy file. The file's name alone decides it, inside the rootdir
+or outside it, whatever the testpaths, `norecursedirs` and the folders named on
+the command line say, so that every run of one checkout keys the file alike: a
+full run, the run of a folder outside the testpaths (`pytest tests/integration`
+with `testpaths = tests/unit`, or `pytest examples/` here), the run of one node
+ID, every `--import-mode`, pytest 8 and 9. They are the module's name for another
+module imported by its name (an installed package's, an editable install's, a
+plugin's or a helper module's), so a package's fixture draws the same installed,
+installed in editable mode or checked out next to the tests (also next to a
+rootdir in the checkout's `tests/` folder), and for code with no file (`exec`'d
+code, whose `"<string>"` would resolve against the working directory). They are
+also the file for a module whose name begins with the rootdir's folder or a
+folder above it (a rootdir with an `__init__.py`, or `proj.util` for the tests of
+a package checkout in `proj/tests`), whose name depends on the folders the
+checkout is in.
+
+The rule has one limitation: a package module in a checkout (inside the rootdir,
+or next to a rootdir in `tests/`) whose file name matches `python_files` or a
+strategy file pattern (`src/acme/test_utils.py`, `src/acme/strategies.py`) keeps
+its path there and has its module's name installed, so its fixtures and exported
+factories draw other values from an editable install or the checkout than from
+the installed package. Renaming the module (`src/acme/testing.py`) avoids that.
+Telling such a module from a test module by where the session looks for tests
+would make the key depend on the run: pytest collects the same file in one run
+and not in another (a bare `pytest` without testpaths collects
+`src/acme/test_utils.py`; `pytest tests/integration` collects a folder outside
+`testpaths = tests/unit`), and a file it collects has a module name that depends
+on `--import-mode`. Determinism within one checkout comes first.
+
+A fixture's definition and base are in its key because pytest sets up several
 fixtures of one name for the same scope node: an override that requests the
 fixture it overrides (`def x(x)`), the session fixtures of one name in two
 sibling folders' `conftest.py` files, and one fixture function that two

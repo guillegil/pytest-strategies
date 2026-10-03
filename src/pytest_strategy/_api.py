@@ -114,7 +114,12 @@ def export_strategies(*, format: str = "json") -> str:
     factory in a strategy file, a test module or a ``conftest.py``, which pytest
     imports by their paths, the file's folder, relative to the rootdir in a
     session and absolute outside one. ``""`` when the factory's code has neither
-    a file nor a module.
+    a file nor a module. The file's name alone makes it a strategy file or a test
+    module, whatever the testpaths and the command line, so that every run of a
+    checkout draws the same: a package module named like one
+    (``acme/strategies.py``) is keyed by its folder in a checkout and by its
+    module's name installed, and draws other values in each; renaming it avoids
+    that.
 
     Args:
         format: Export format (currently only "json" is supported), keyword-only

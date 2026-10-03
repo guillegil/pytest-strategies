@@ -970,17 +970,13 @@ def test_a_packages_fixture_draws_the_same_installed_or_from_its_source(pytester
     assert draws == [{"device": randint(device), "export": str(randint(export))}] * 2
 
 
-@pytest.mark.parametrize(
-    ("layout", "name"),
-    [("flat", "testing"), ("src", "test_utils"), ("src", "strategies")],
-    ids=["flat-rootdir-in-tests", "src-test_utils", "src-strategies"],
-)
-def test_a_packages_fixture_draws_the_same_installed_or_next_to_the_rootdir(pytester, layout, name):
+def run_package_project(pytester, layout, name):
     """
-    The same for a flat layout whose rootdir is its tests/ folder (tests/pytest.ini),
-    so that the package is next to the rootdir, and for a package module named like
-    a test module or a strategy file outside the testpaths, which pytest and the
-    plugin never import by its path.
+    Run a project whose tests/conftest.py imports the fixture ``device`` from the
+    package module acme_ps.<name>, first from its checkout, then installed, and
+    return what each run drew. The src layout has testpaths = tests, which pytest
+    collects from the rootdir; the flat layout has its rootdir in tests/
+    (tests/pytest.ini), so that the package is next to the rootdir.
     """
     pytester.makepyfile(ps_draws=DRAWS)
     tests = pytester.mkdir("tests")
@@ -1005,12 +1001,156 @@ def test_a_packages_fixture_draws_the_same_installed_or_next_to_the_rootdir(pyte
         draws.append(read_draws(pytester.path))
         # The working directory is on sys.path: the next run must not find it there
         shutil.rmtree(package)
+    return draws
 
+
+def package_draws(where, folder, base):
+    """What test_device records when the fixture and the factory are keyed by ``where``."""
+    device = StreamKey.root(SEED, "fixture", "", "device", 0, where, "device", base)
+    export = StreamKey.root(SEED, "export", "ps_device", folder)
+    return {"device": randint(device), "export": str(randint(export))}
+
+
+def test_a_packages_fixture_draws_the_same_installed_or_next_to_the_rootdir(pytester):
+    """
+    The same for a flat layout whose rootdir is its tests/ folder: the package's
+    name begins next to the rootdir, not with its folder or one above it.
+    """
+    draws = run_package_project(pytester, "flat", "testing")
+
+    assert draws == [package_draws("acme_ps.testing", "acme_ps.testing", "")] * 2
+
+
+@pytest.mark.parametrize(
+    ("layout", "name"),
+    [("src", "test_utils"), ("src", "strategies"), ("flat", "test_utils")],
+    ids=["src-test_utils", "src-strategies", "flat-rootdir-in-tests-test_utils"],
+)
+def test_a_package_module_named_like_a_test_module_keeps_its_path_in_a_checkout(
+    pytester, layout, name
+):
+    """
+    The file's name alone makes a test module or a strategy file, whatever the
+    testpaths: acme_ps/test_utils.py, which pytest never collects here, is keyed by
+    its path in the checkout and by its module's name installed, so the two draw
+    different values (the limitation docs/dev.md states; renaming the module
+    avoids it).
+    """
+    draws = run_package_project(pytester, layout, name)
+
+    folder, base = ("../acme_ps", "") if layout == "flat" else ("src/acme_ps", "tests")
     module = f"acme_ps.{name}"
-    base = "" if layout == "flat" else "tests"
-    device = StreamKey.root(SEED, "fixture", "", "device", 0, module, "device", base)
-    export = StreamKey.root(SEED, "export", "ps_device", module)
-    assert draws == [{"device": randint(device), "export": str(randint(export))}] * 2
+    assert draws == [
+        package_draws(f"{folder}/{name}.py", folder, base),
+        package_draws(module, module, base),
+    ]
+
+
+# A test module and a strategy file in a folder that a run names on the command
+# line, outside the testpaths (testpaths = tests/unit and pytest tests/integration,
+# or this repository's testpaths = tests and pytest examples/), or in a testpaths
+# folder outside the rootdir. pytest imports them by their paths, under module
+# names that depend on --import-mode
+
+OUTSIDE_STRATEGIES = """
+    from pytest_strategy import Parameter, TestArg, register
+
+    @register("ps_outside")
+    def outside(rng):
+        return Parameter(TestArg("e", value=rng.randint(0, 10**9)), nsamples=1)
+"""
+
+OUTSIDE_TESTS = """
+    import json
+
+    import pytest
+
+    from pytest_strategy import RNG, export_strategies
+    from ps_draws import record
+
+    @pytest.fixture
+    def drawn():
+        return RNG.integer(0, 10**9)
+
+    def test_outside(drawn, request):
+        record("test", request.node.nodeid)
+        record("fixture", drawn)
+        exported = json.loads(export_strategies())["ps_outside"]
+        record("export", exported["arguments"][0]["static_value"])
+"""
+
+
+@pytest.mark.parametrize(
+    ("testpaths", "folder"),
+    [("tests/unit", "tests/integration"), ("tests", "integration")],
+    ids=["integration-next-to-unit", "folder-next-to-the-testpaths"],
+)
+@pytest.mark.parametrize("mode", ["prepend", "append", "importlib"])
+def test_a_test_module_outside_the_testpaths_draws_the_same_in_every_import_mode(
+    pytester, testpaths, folder, mode
+):
+    """
+    A fixture in a test module and export_strategies() for a strategy file in a
+    folder that the command line names outside the testpaths: they are keyed by
+    their paths, in that run and in the run of the test's node ID, whatever module
+    names --import-mode gives them.
+    """
+    pytester.makepyfile(ps_draws=DRAWS)
+    pytester.makeini(f"[pytest]\ntestpaths = {testpaths}\npythonpath = .\n")
+    (pytester.path / testpaths).mkdir(parents=True)
+    (pytester.path / testpaths / "test_other.py").write_text("def test_other():\n    pass\n")
+    (pytester.path / folder).mkdir(parents=True)
+    (pytester.path / folder / "strategies.py").write_text(dedent(OUTSIDE_STRATEGIES))
+    (pytester.path / folder / "test_outside.py").write_text(dedent(OUTSIDE_TESTS))
+    module = f"{folder}/test_outside.py"
+    test = f"{module}::test_outside"
+    draws = []
+    for target in (folder, test):
+        result = pytester.runpytest_subprocess(
+            "-p", "no:cacheprovider", f"--rng-seed={SEED}", f"--import-mode={mode}", target
+        )
+
+        result.assert_outcomes(passed=1)
+        draws.append(read_draws(pytester.path))
+
+    fixture = StreamKey.root(SEED, "fixture", test, "drawn", 0, module, "drawn", module)
+    export = StreamKey.root(SEED, "export", "ps_outside", folder)
+    expected = {"test": test, "fixture": randint(fixture), "export": str(randint(export))}
+    assert draws == [expected] * 2
+
+
+def test_a_testpaths_folder_outside_the_rootdir_draws_the_same_in_every_import_mode(
+    pytester, monkeypatch
+):
+    """
+    The same for a testpaths entry outside the rootdir (testpaths = ../shared): a
+    file named like a test module or a strategy file is keyed by its path outside
+    the rootdir too.
+    """
+    proj = pytester.mkdir("proj")
+    shared = pytester.mkdir("shared")
+    (shared / "strategies.py").write_text(dedent(OUTSIDE_STRATEGIES))
+    (shared / "test_outside.py").write_text(dedent(OUTSIDE_TESTS))
+    (proj / "ps_draws.py").write_text(dedent(DRAWS))
+    (proj / "pytest.ini").write_text("[pytest]\ntestpaths = ../shared\npythonpath = .\n")
+    monkeypatch.chdir(proj)
+    draws = []
+    for mode in ("prepend", "append", "importlib"):
+        result = pytester.runpytest_subprocess(
+            "-p", "no:cacheprovider", f"--rng-seed={SEED}", f"--import-mode={mode}"
+        )
+
+        result.assert_outcomes(passed=1)
+        draws.append(read_draws(proj))
+
+    # pytest names the test outside the rootdir from its testpaths folder
+    test = draws[0]["test"]
+    module = "../shared/test_outside.py"
+    base = test.partition("::")[0]
+    fixture = StreamKey.root(SEED, "fixture", test, "drawn", 0, module, "drawn", base)
+    export = StreamKey.root(SEED, "export", "ps_outside", "../shared")
+    expected = {"test": test, "fixture": randint(fixture), "export": str(randint(export))}
+    assert draws == [expected] * 3
 
 
 LINKED_CONFTEST = """
