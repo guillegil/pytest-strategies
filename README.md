@@ -624,7 +624,7 @@ A `--junitxml` report holds the same information, under pytest-xdist too:
 pytest-strategies: RNG seed = 1763926297314361000
 pytest-strategies: seed reused from the failed run for --lf (--rng-seed overrides)
 ```
-- The recorded options are not applied. When they differ from the run's, the line ends with them (`; recorded with --nsamples=13`, or `without --vector-mode=test`): add them to get the same rows. A recorded `-c` or `--rootdir` is kept relative to the rootdir, so it names the same file from any folder, and agrees with a run that uses that ini file or rootdir without giving it (`pytest --lf` in `ci` after `pytest -c ci/pytest.ini`).
+- The recorded options are not applied. When they differ from the run's, the line ends with them (`; recorded with --nsamples=13`, or `without --vector-mode=test`): add them to get the same rows. A recorded `-c` or `--rootdir` is kept relative to the rootdir, so it names the same file from any folder (an ini file outside the rootdir, as in `-c /dev/null`, by its absolute path), and agrees with a run that uses that ini file or rootdir without giving it (`pytest --lf` in `ci` after `pytest -c ci/pytest.ini`). A `--rootdir` the run gives agrees with rows recorded without it.
 - Failed rows recorded under another seed are deselected, so pytest keeps them in its last-failed set, and the end of the run gives the command that reruns them, one per seed (and per set of options), even with `-qq`. It names their files, or their node IDs when a file also holds other failed tests, so it reruns no other failed test with values it did not fail with:
   ```text
   pytest-strategies: deselected 2 failed rows recorded under another seed; run them with:

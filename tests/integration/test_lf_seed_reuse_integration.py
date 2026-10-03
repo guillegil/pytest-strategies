@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 from pathlib import Path
 
 import pytest
@@ -709,6 +710,47 @@ class TestFromAnotherFolder:
         assert list(failed_seeds(pytester, "ci")) == nodeids("tests/b")
 
 
+class TestAnIniFileOutsideTheRootdir:
+    """
+    The rows are recorded with ``-c`` naming an ini file outside the rootdir and
+    ``--rootdir=.`` (as ``pytest -c /dev/null --rootdir=.``), then the project moves,
+    with its cache, one folder deeper: the map holds the ini file's absolute path,
+    which a chain of ``..`` from the rootdir would not keep.
+    """
+
+    def test_a_project_moved_deeper_still_agrees(self, pytester, monkeypatch):
+        ini = pytester.path / "shared.ini"
+        ini.write_text("[pytest]\n", encoding="utf-8")
+        files = {
+            "conftest.py": CONFTEST,
+            "tests/strategies.py": STRATEGIES,
+            "tests/a/test_lfr_a.py": module(),
+            "tests/b/test_lfr_b.py": module(),
+        }
+        for name, text in files.items():
+            (pytester.path / "project" / name).parent.mkdir(parents=True, exist_ok=True)
+            (pytester.path / "project" / name).write_text(text, encoding="utf-8")
+        monkeypatch.chdir(pytester.path / "project")
+        for folder, seed in (("a", S1), ("b", S2)):
+            args = ["-c", str(ini), "--rootdir=.", str(Path("tests", folder)), f"--rng-seed={seed}"]
+            run(pytester, *args, rootdir="project").assert_outcomes(failed=2, passed=4)
+        options = {tuple(entry["options"]) for entry in failed_seeds(pytester, "project").values()}
+        assert options == {("-c", str(ini), "--rootdir=.")}
+        shutil.copytree(pytester.path / "project", pytester.path / "moved" / "project")
+        monkeypatch.chdir(pytester.path / "moved" / "project")
+        # tests/b is fixed
+        Path("tests", "b", "test_lfr_b.py").write_text(module(()), encoding="utf-8")
+
+        result = run(pytester, "--lf", "-c", str(ini), "--rootdir=.", rootdir="moved/project")
+
+        assert header(result) == [f"pytest-strategies: RNG seed = {S2}", REUSED.format("--lf")]
+        result.assert_outcomes(passed=2, deselected=2)
+        assert printed(result) == [
+            ["--lf", f"--rng-seed={S1}", "-c", str(ini), "--rootdir=.", "tests/a/test_lfr_a.py"]
+        ]
+        assert list(failed_seeds(pytester, "moved/project")) == nodeids("tests/a")
+
+
 class TestTheMap:
     def test_a_row_that_passes_under_its_seed_is_removed(self, pytester):
         project(pytester, folders=("tests/a", "tests/b"))
@@ -719,6 +761,24 @@ class TestTheMap:
 
         result = run(pytester, "--lf")
 
+        result.assert_outcomes(passed=2, deselected=2)
+        assert list(failed_seeds(pytester)) == nodeids("tests/a")
+
+    @pytest.mark.parametrize(
+        ("recorded", "given"),
+        [([], ["--rootdir=."]), (["--rootdir=."], [])],
+        ids=["given_by_the_run_only", "recorded_only"],
+    )
+    def test_a_rootdir_given_on_one_side_only_agrees(self, pytester, recorded, given):
+        # The rows were recorded under the rootdir whose cache holds them, the run's
+        project(pytester, folders=("tests/a", "tests/b"))
+        run(pytester, f"--rng-seed={S1}", "tests/a", *recorded)
+        run(pytester, f"--rng-seed={S2}", "tests/b", *recorded)
+        (pytester.path / "tests" / "b" / "test_lfr_b.py").write_text(module(()), encoding="utf-8")
+
+        result = run(pytester, "--lf", *given)
+
+        assert header(result) == [f"pytest-strategies: RNG seed = {S2}", REUSED.format("--lf")]
         result.assert_outcomes(passed=2, deselected=2)
         assert list(failed_seeds(pytester)) == nodeids("tests/a")
 

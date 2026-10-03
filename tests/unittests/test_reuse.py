@@ -246,6 +246,18 @@ class TestUpdated:
 
         assert updated(before, 1, {NODE_A: options}, {}, own) == before
 
+    @pytest.mark.parametrize(
+        ("recorded", "options"),
+        [((), ["--rootdir=."]), (("--rootdir=.",), [])],
+        ids=["given_by_the_run_only", "recorded_only"],
+    )
+    def test_a_rootdir_given_on_one_side_only_agrees(self, recorded, options):
+        # The rows were recorded under the rootdir whose cache holds them, the run's
+        before = {NODE_A: Entry(1, ("--nsamples=13", *recorded))}
+        own = [("-c", "pytest.ini"), ("--rootdir=.",)]
+
+        assert updated(before, 1, {NODE_A: ["--nsamples=13", *options]}, {}, own) == {}
+
     def test_a_row_that_passed_and_then_failed_stays_as_the_newest(self):
         before = {NODE_A: Entry(1, ()), NODE_B: Entry(1, ())}
 
@@ -322,6 +334,14 @@ class TestOwnUnits:
         stand_in.inipath = tmp_path / "ci" / "pytest.ini"
 
         assert own_units(stand_in) == [("-c", "pytest.ini"), ("--rootdir=.",)]
+
+    @pytest.mark.parametrize("depth", [1, 3])
+    def test_an_ini_file_outside_the_rootdir_is_absolute(self, tmp_path, depth):
+        # pytest -c /dev/null --rootdir=. (a stand-in file), at any depth
+        stand_in = config(tmp_path.joinpath(*["deep"] * (depth - 1), "project"))
+        stand_in.inipath = tmp_path / "shared.ini"
+
+        assert own_units(stand_in) == [("-c", str(tmp_path / "shared.ini")), ("--rootdir=.",)]
 
     def test_without_an_ini_file_the_rootdir(self, tmp_path):
         stand_in = config(tmp_path)
@@ -703,6 +723,22 @@ class TestDifferences:
 
         assert text == "without -c pytest.ini"
 
+    def test_a_rootdir_the_rows_were_recorded_without_agrees(self):
+        # The rows were recorded under the rootdir whose cache holds them, the run's
+        text = differences(self.rows(["--nsamples=13"]), ["--rootdir=."], (), self.OWN)
+
+        assert text == "with --nsamples=13"
+
+    def test_an_ini_file_outside_the_rootdir_is_named_by_its_absolute_path(self):
+        ini = str(Path("/dev/null").absolute())
+        own = (("-c", ini), ("--rootdir=.",))
+        rows = self.rows(["-c", ini, "--rootdir=."], ["-c", "other.ini", "--rootdir=."])
+
+        assert differences(rows[:1], ["-c", ini, "--rootdir=."], (), own, "../{}".format) is None
+        assert differences(rows[1:], ["-c", ini], (), own, "../{}".format) == (
+            f"with -c ../other.ini, without -c {quote(ini)}"
+        )
+
     def test_the_run_s_own_constraints_are_not_compared(self):
         assert differences(self.rows([]), [], [(None, "aligned")]) is None
 
@@ -787,6 +823,22 @@ class TestCommands:
         # The paths are the platform's, as pytest's own bestrelpath writes them
         assert found == (
             f"pytest --lf --rng-seed=1 -c {quote(str(Path('..', 'pytest.ini')))} --rootdir=.. "
+            + quote(str(Path("a", "test_w.py"))),
+            1,
+        )
+
+    def test_an_ini_file_outside_the_rootdir_keeps_its_absolute_path(self):
+        # pytest -c /dev/null --rootdir=. records the ini file by its absolute path
+        root = Path("/project").absolute()
+        ini = str(Path("/dev/null").absolute())
+        stand_in = Namespace(rootpath=root, invocation_params=Namespace(dir=root / "tests"))
+        where = partial(pytest.Config.cwd_relative_nodeid, stand_in)
+        rows = [(NODE_A, Entry(1, ("-c", ini, "--rootdir=.")))]
+
+        (found,) = commands("--lf", rows, {NODE_A}, where)
+
+        assert found == (
+            f"pytest --lf --rng-seed=1 -c {quote(ini)} --rootdir=.. "
             + quote(str(Path("a", "test_w.py"))),
             1,
         )

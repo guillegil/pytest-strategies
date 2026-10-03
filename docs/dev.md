@@ -1217,13 +1217,18 @@ passed in this run under the entry's seed and options, then adds each row of
 report's `pytest_strategies` attribute. Those options are the ones of the
 command run from the rootdir (`generation_options(..., start=rootpath)`), so the
 map holds `-c` and `--rootdir` relative to the rootdir and they name the same
-files from any folder: `_reuse.commands()` and `_reuse.differences()` write them
-relative to the invocation folder (`_placed()`, through
-`config.cwd_relative_nodeid`), and a recorded unit that names the ini file or the
-rootdir the run uses (`own_units()`, given or found) agrees with the run
-(`_matched()`, also in the removal check of `updated()`; a `-c` the run gives and
-the rows were recorded without still differs, as the ini file the recording run
-found is not known). The makereport wrapper takes a passing row's options
+files from any folder. An ini file outside the rootdir (`-c /dev/null
+--rootdir=.`) is held by its absolute path (`path_from()`), as a chain of `..`
+would change with the depth of a project moved with its cache.
+`_reuse.commands()` and `_reuse.differences()` write the relative ones relative
+to the invocation folder (`_placed()`, through `config.cwd_relative_nodeid`) and
+leave an absolute one as it is, and a recorded unit that names the ini file or
+the rootdir the run uses (`own_units()`, given or found, by the same rule)
+agrees with the run (`_matched()`, also in the removal check of `updated()`; a
+`-c` the run gives and the rows were recorded without still differs, as the ini
+file the recording run found is not known, while a `--rootdir` the run gives
+agrees with rows recorded without it, as they were recorded under the rootdir
+whose cache holds them). The makereport wrapper takes a passing row's options
 (`generation_options(..., start=rootpath)`) from a passing call report, only for
 the items in `SessionState.recorded`, the node IDs of the map's entries under the
 run's seed. A pytest-xdist worker gets `recorded`, `deselect` and `reused`

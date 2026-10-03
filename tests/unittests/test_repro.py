@@ -7,6 +7,7 @@ report.
 """
 
 import copy
+import os
 import shlex
 from argparse import Namespace
 from pathlib import Path
@@ -412,6 +413,21 @@ class TestGenerationOptions:
 
         assert generation_options(config, [info()]) == ["-c", str(tmp_path / "ci" / "pytest.ini")]
         assert generation_options(config, [info()], start=tmp_path / "ci") == ["-c", "pytest.ini"]
+
+    @pytest.mark.parametrize("depth", [1, 3])
+    @pytest.mark.parametrize("given", ["absolute", "relative"])
+    def test_an_ini_file_outside_the_folder_is_absolute(self, tmp_path, depth, given):
+        # pytest -c /dev/null --rootdir=. (a stand-in file): a chain of .. would
+        # change with the depth of the project
+        ini = tmp_path / "shared.ini"
+        root = tmp_path.joinpath(*["deep"] * (depth - 1), "project")
+        inifilename = str(ini) if given == "absolute" else os.path.relpath(ini, root)
+        config = located(Config(inifilename=inifilename, rootdir="."), root, inipath=ini)
+
+        args = generation_options(config, [info()], start=root)
+
+        assert args == ["-c", str(ini), "--rootdir=."]
+        assert generation_options(config, [info()]) == ["-c", inifilename, "--rootdir=."]
 
 
 class TestQuote:

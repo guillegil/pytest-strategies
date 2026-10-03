@@ -146,6 +146,19 @@ def quote(arg: str, *, windows: bool | None = None) -> str:
     return '"' + "".join(quoted) + '"'
 
 
+def path_from(folder: Path, path: Path) -> str:
+    """
+    Write ``path`` relative to ``folder`` when it is ``folder`` or below it, and
+    absolute otherwise: a file elsewhere (``-c /dev/null``) would be named by a
+    chain of ``..`` that depends on how deep ``folder`` is.
+    """
+    try:
+        path.relative_to(folder)
+    except ValueError:
+        return str(path)
+    return bestrelpath(folder, path)
+
+
 def generation_options(
     config: pytest.Config, infos: Sequence[VectorInfo], *, start: Path | None = None
 ) -> list[str]:
@@ -161,7 +174,8 @@ def generation_options(
         config: The run's config
         infos: The row's VectorInfo for each of the item's strategies
         start: The folder the command runs from, when it is not the one pytest was
-            started in: ``-c`` and ``--rootdir`` are then relative to it
+            started in: ``-c`` and ``--rootdir`` are then relative to it, but an
+            ini file that is not below it is absolute (``path_from``)
     """
     base = runtime.session_options(config).base
     args = []
@@ -186,7 +200,7 @@ def generation_options(
     if inifile:
         if start is not None and config.inipath is not None:
             # The path pytest resolved from the folder it was started in
-            inifile = bestrelpath(start, config.inipath)
+            inifile = path_from(start, config.inipath)
         args += ["-c", str(inifile)]
     rootdir = getattr(config.option, "rootdir", None)
     if rootdir:

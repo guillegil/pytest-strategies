@@ -12,10 +12,12 @@ The options are those of the row's rerun command after ``--rng-seed``
 (``_repro.generation_options``), unquoted, as the command runs from the rootdir:
 ``-c`` and ``--rootdir`` are relative to it, so that they name the same files
 whatever folder a later run starts in, and the commands a run prints give them
-relative to the folder it was started in. The process that reports the run (the
-pytest-xdist controller, not a worker) writes the map when the session finishes:
-it records the rows that failed, as the newest, and removes an entry only when its
-row passed under its seed and its options.
+relative to the folder it was started in. An ini file outside the rootdir (``-c
+/dev/null``) is kept by its absolute path, which does not depend on how deep the
+rootdir is. The process that reports the run (the pytest-xdist controller, not a
+worker) writes the map when the session finishes: it records the rows that
+failed, as the newest, and removes an entry only when its row passed under its
+seed and its options.
 
 With ``--lf`` or ``--sw`` (``--sw-skip`` too) and no ``--rng-seed``, the run reads
 pytest's own last-failed set (``cache/lastfailed``) or the test ``--sw`` resumes
@@ -43,10 +45,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from _pytest.pathlib import bestrelpath
 
 from ._options import constraint_off_item, parse_constraint_off
-from ._repro import quote, start_args
+from ._repro import path_from, quote, start_args
 
 # The cache key of the map
 KEY = "pytest-strategies/failed-seeds"
@@ -171,13 +172,13 @@ def from_row(row: Mapping[str, str]) -> Entry | None:
 def own_units(config: pytest.Config) -> list[tuple[str, ...]]:
     """
     Return the ``-c`` and ``--rootdir`` units of the ini file and the rootdir the run
-    uses, relative to the rootdir as the map holds them, whether the run gave them
-    or pytest found them (``_matched``).
+    uses, as the map holds them (relative to the rootdir, or absolute for an ini
+    file outside it), whether the run gave them or pytest found them (``_matched``).
     """
     units: list[tuple[str, ...]] = []
     inipath = getattr(config, "inipath", None)
     if inipath is not None:
-        units.append(("-c", bestrelpath(config.rootpath, inipath)))
+        units.append(("-c", path_from(config.rootpath, inipath)))
     units.append((_ROOTDIR + os.curdir,))
     return units
 
@@ -193,9 +194,13 @@ def _matched(
     not: a row recorded with ``-c ci/pytest.ini`` and rerun from ``ci``, where
     pytest finds that file, was recorded with the run's own ini file. A ``-c`` the
     run gives and the rows were recorded without still differs, as the ini file
-    the recording run found is not known.
+    the recording run found is not known. The run's ``--rootdir`` agrees either
+    way: the rows were recorded under the rootdir whose cache holds them, the
+    run's.
     """
-    return [*current, *(unit for unit in own if unit in recorded and unit not in current)]
+    rootdir = [unit for unit in own if unit[0].startswith(_ROOTDIR)]
+    kept = [unit for unit in current if unit in recorded or unit not in rootdir]
+    return [*kept, *(unit for unit in own if unit in recorded and unit not in current)]
 
 
 def updated(
@@ -218,7 +223,8 @@ def updated(
             call failed, by node ID, in the order they failed
         own: The ``-c`` and ``--rootdir`` units of the ini file and the rootdir
             the run uses (``own_units``): an entry recorded with them passed
-            under its options in a run that did not give them
+            under its options in a run that did not give them, and one recorded
+            without ``--rootdir`` in a run that gave it (``_matched``)
     """
     result = dict(entries)
     for nodeid, options in passed.items():
@@ -478,12 +484,15 @@ def _placed(unit: tuple[str, ...], where: Callable[[str], str]) -> tuple[str, ..
     """
     Write the path of a ``-c`` or ``--rootdir`` unit, which the map holds relative
     to the rootdir, as ``where`` gives it (relative to the folder pytest was
-    started in); other units are left as they are.
+    started in); an absolute path (an ini file outside the rootdir, ``-c
+    /dev/null``) and other units are left as they are.
     """
     if len(unit) == 2 and unit[0] == "-c":
-        return ("-c", where(unit[1]))
+        path = unit[1]
+        return ("-c", path if os.path.isabs(path) else where(path))
     if len(unit) == 1 and unit[0].startswith(_ROOTDIR):
-        return (_ROOTDIR + where(unit[0][len(_ROOTDIR) :]),)
+        path = unit[0][len(_ROOTDIR) :]
+        return (_ROOTDIR + (path if os.path.isabs(path) else where(path)),)
     return unit
 
 
@@ -506,8 +515,9 @@ def differences(
     when they agree.
 
     A ``-c`` or ``--rootdir`` the rows were recorded with agrees with the run when it
-    names the ini file or the rootdir the run uses, given or found (``_matched``). A
-    constraint the rows had turned off counts as off in the run when the run turns
+    names the ini file or the rootdir the run uses, given or found, and a
+    ``--rootdir`` the run gives agrees with rows recorded without it (``_matched``).
+    A constraint the rows had turned off counts as off in the run when the run turns
     it off in their strategy or everywhere. The run's own items are not compared:
     which strategies a bare name reaches is known only once the tests are collected.
 

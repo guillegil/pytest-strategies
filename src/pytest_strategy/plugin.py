@@ -2078,8 +2078,9 @@ def _record_failed_seeds(config: Config, state: Any) -> None:
     row whose setup or call failed, as the newest entry, and remove the entries of
     the rows that passed under their seed and their options (``_reuse.updated``; a
     ``-c`` or ``--rootdir`` an entry holds counts as the run's when it names the ini
-    file or the rootdir the run uses). The map is read again first, and written only
-    when it changed.
+    file or the rootdir the run uses, and a ``--rootdir`` the run gives agrees with
+    an entry without it). The map is read again first, and written only when it
+    changed.
     """
     cache = getattr(config, "cache", None)
     if cache is None:
@@ -2107,8 +2108,10 @@ def _reuse_line(config: Config, reuse: _reuse.Reuse) -> str:
     seed, naming the options the newest reused row was recorded with when they
     differ from the run's (``recorded with --nsamples=13``); they are not applied.
     Both are compared as the commands run from the rootdir, a recorded ``-c`` or
-    ``--rootdir`` agrees when it names the ini file or the rootdir the run uses,
-    and the paths are written relative to the folder pytest was started in.
+    ``--rootdir`` agrees when it names the ini file or the rootdir the run uses, a
+    ``--rootdir`` the run gives agrees with rows recorded without it, and the paths
+    are written relative to the folder pytest was started in (an ini file outside
+    the rootdir by its absolute path).
     """
     text = (
         f"pytest-strategies: seed reused from the failed run for {reuse.flag} "
