@@ -7,7 +7,9 @@ A pytest plugin for constrained-randomized test parametrization with directed te
 `pytest_strategy` enables you to write powerful parametrized tests that combine:
 - **Constrained random generation** - Generate test inputs with specific constraints
 - **Directed testing** - Define specific test cases (edge cases, known bugs, etc.)
-- **Reproducibility** - Seed-based random generation for consistent test runs
+- **Reproducibility** - Seed-based random generation for consistent test runs,
+  with row-stable random streams and a repro command for each failed row
+- **Stable test IDs** - Rows are named (`directed-zeros`, `rand-3`), the same for every seed
 - **CLI control** - Run specific test vectors via command-line arguments
 
 ## Project Goal
@@ -28,7 +30,7 @@ from pytest_strategy import Parameter, RNGInteger, TestArg, register, strategy
 
 # Define a strategy
 @register("test_addition_strategy")
-def create_addition_samples(nsamples):
+def create_addition_samples():
     # Return a Parameter; the plugin generates the vectors from it
     return Parameter(
         TestArg("a", rng_type=RNGInteger(0, 100)),
@@ -72,7 +74,19 @@ pytest test_example.py --vector-index 0
 
 # Set seed for reproducibility
 pytest test_example.py --rng-seed 42
+
+# Select rows by name: one directed vector, every directed row, no random rows
+pytest test_example.py -k zeros
+pytest test_example.py -k directed
+pytest test_example.py -k "not rand"
+
+# Run one random row again with the values it had in the run with seed 42
+pytest "test_example.py::test_addition[rand-3]" --rng-seed 42
 ```
+
+The test IDs name the rows (`test_addition[directed-zeros]`,
+`test_addition[rand-3]`), so they are the same for every seed; the README's
+"Test IDs and Selecting Rows" section has the grammar.
 
 ## Architecture
 
@@ -82,27 +96,38 @@ pytest test_example.py --rng-seed 42
 src/pytest_strategy/
 ├── __init__.py          # Package initialization and public names
 ├── __main__.py          # python -m pytest_strategy (the pytest-strategies command)
-├── plugin.py            # Pytest plugin hooks, CLI options, strategy file loading,
-│                        # the strategies_ctx fixture
+├── plugin.py            # Pytest plugin hooks, CLI and ini options, strategy file loading,
+│                        # the strategies_ctx fixture, the repro output, the xdist check
+├── hookspecs.py         # Hooks the plugin adds (pytest_strategies_context)
 ├── _api.py              # register(), strategy(), export_strategies(), get_context() and
 │                        # the Strategy facade
 ├── _registry.py         # The folder-scoped strategy registry
 ├── _resolver.py         # Turns a strategy and a test into a parametrization
+├── _factory.py          # Calls a factory with the inputs it declares, by name
+├── _options.py          # StrategyOptions, and the --strategy-constraint-off items
+├── _context.py          # Each folder's pytest_strategies_context answer, in the plugin's order
+├── _fingerprint.py      # The fingerprint of a context, and the encoder of the value digests
+├── parameters.py        # Parameter class (arguments, vectors, constraints, row generation)
+├── _vector.py           # Vector (the class of the rows), VectorInfo and the stash keys
+├── _records.py          # Record mode: which test parameter takes the row as one object
+├── _ids.py              # Test IDs: the names format and the 3.0 values format
+├── _streams.py          # Random streams v1: the stream keys and the streams VERSION
+├── _encode.py           # The schema 1 value encoding (VectorInfo.to_dict(), the export)
+├── _export.py           # The schema 1 export and the to_dict() methods' fragments
+├── _repro.py            # A failed row's section, rerun command and JUnit properties
+├── _reuse.py            # The seeds --lf and --sw reuse (cache key pytest-strategies/failed-seeds)
+├── _runtime.py          # Per-session state, on a stack for nested pytester sessions
+├── _introspection.py    # Signature helpers for the named-mode check
+├── _warnings.py         # PytestStrategiesWarning
 ├── _cli.py              # pytest-strategies skill install
 ├── strategy.py          # 2.x compatibility module (Strategy, PytestStrategiesWarning)
-├── parameters.py        # Parameter class (vector container)
-├── _vector.py           # Vector, the class of the generated rows (a namedtuple per argument names),
-│                        # and VectorInfo, each row's metadata in item.stash[VECTOR_KEY]
 ├── test_args.py         # TestArg class (single argument definition)
-├── rng.py               # Random number generation and RNG types
-├── hookspecs.py         # Hooks the plugin adds (pytest_strategies_context)
+├── rng.py               # Random number generation, RNG types and the plugin's generator
 ├── skill/               # The agent skill that pytest-strategies skill install copies
-├── py.typed             # PEP 561 marker: type checkers use the package's annotations
-└── _*.py                # Other internal helpers (introspection, test IDs, record mode,
-                         # StrategyOptions, factory calls, each folder's context and its
-                         # fingerprint, runtime state, warnings, schema 1 export and encoding,
-                         # stream keys, a failed row's repro section, the seeds --lf reuses)
+└── py.typed             # PEP 561 marker: type checkers use the package's annotations
 ```
+
+Section 6 below describes the modules 4.0 added.
 
 ## Core Components
 
@@ -248,18 +273,17 @@ the type `Any`.
 
 **Inside a `Parameter`:** a strategy uses each argument's `rng_type` (or static
 `value`) and its `validator`. Define edge cases as the `Parameter`'s
-`directed_vectors` and `test_vectors`. (The argument-level `directed_values`,
-`test_values` and `always_include_directed`, deprecated in 3.0, are removed in 4.0:
-a `Parameter` never turned them into vectors.) The validator runs on random draws,
-static values and `Series`/`RNGSequence` values, but not on directed or test
-vectors. A value that fails it stops collection with a `ValueError` and is not
+`directed_vectors` and `test_vectors`; a `TestArg` holds no vectors of its own,
+and `generate_samples(n)` returns `[value]` for a static argument and `n` draws
+otherwise. The validator runs on random draws, static values and
+`Series`/`RNGSequence` values, but not on directed or test vectors. A value that fails it stops collection with a `ValueError` and is not
 redrawn, so use a predicate on the RNG type to filter values instead.
 
 ---
 
 ### 3. `parameters.py` - Parameter Vector Container
 
-Groups multiple `TestArg` instances into parameter vectors (tuples). Every row
+Groups multiple `TestArg` instances into parameter vectors. Every row
 it generates is a `Vector` (`_vector.py`): `vector_type(names)` builds one
 namedtuple class per tuple of argument names, which also subclasses `Vector`, and
 caches it, so `Parameter.vector_type` is shared by Parameters with the same names
@@ -305,8 +329,8 @@ names = param.list_vector_names()                 # List all vector names
 # Add vectors dynamically
 param.add_directed_vector("custom", (25, 2.5, "slow"))
 
-# Add constraints (cross-parameter validation)
-param.add_constraint(lambda v: v[0] < v[1])  # Ensure first < second
+# Add constraints (cross-parameter validation); a row is a Vector, read by name
+param.add_constraint(lambda v: v.count <= v.timeout * 10, name="fits_timeout")
 ```
 
 **Sampling Modes:**
@@ -430,7 +454,7 @@ drawing random values (an invalid `n` still raises). `filter_by_name`/`filter_by
 `KeyError`/`IndexError` for a missing vector, so the CLI can tell whether a
 filter matched. The resolver then parametrizes the test with a single
 `pytest.param(None, ..., marks=pytest.mark.skip(reason=...))` row, whose ID is `skipped`,
-also in dataclass mode, where no instance is built but the dataclass fields are
+also in record mode, where no instance is built but the dataclass fields are
 still checked against the strategy's arguments. `skip_if_empty` is keyword-only,
 and a non-callable `predicate` (such as a reason passed positionally) raises.
 
@@ -474,7 +498,7 @@ from pytest_strategy import Parameter, RNGInteger, TestArg, register, strategy
 
 # Register a strategy
 @register("my_strategy")
-def create_samples(nsamples):
+def create_samples():
     # Return the Parameter itself; the plugin generates the vectors from it,
     # which is what lets CLI options such as --vector-mode apply to it
     return Parameter(
@@ -552,7 +576,7 @@ value to a name that 4.0 accepted.
 
 A test parameter that is not one of the strategy's argument names is left to
 pytest as a fixture. A test can also take the vector as one dataclass instance:
-see "Dataclass Parameters" in the README. `_records.py` holds that rule:
+see "Record Parameters" in the README. `_records.py` holds that rule:
 `detect_record_param(test_fn, argnames, fixturenames)` reads
 `metafunc.fixturenames`, so an argument that the test or any of its fixtures asks
 for keeps the strategy in named mode, and the named-mode signature check counts
@@ -604,6 +628,10 @@ Provides pytest hooks and CLI options.
 strategies_max_exhaustive = 100000  # Most rows --nsamples=auto (or per_sequence_samples) may generate per strategy
 strategies_ids = names              # Test IDs of strategy rows: names, or values (the 3.0 format)
 ```
+
+**Fixture and marker:** the session fixture `strategies_ctx` (D8, below) and the
+`strategy` marker, `strategy(name_or_factory, *, validate_signature=True)`,
+which `@strategy` adds and which also carries each row's `VectorInfo`.
 
 `--nsamples` is checked when the command line is parsed: anything other than an
 integer >= 0 or `auto` (in any case) is a usage error. Under `auto`, directed
@@ -960,6 +988,63 @@ first worker's value in worker order.
 
 ---
 
+### 6. The modules 4.0 added
+
+Each holds one part of the 4.0 design (the plan's decision numbers in brackets);
+the sections above and under Reproducibility give the details.
+
+- `_factory.py` (D6): factory inputs by name. `analyse(factory)` reads the
+  signature into a `CallPlan` without calling anything, and
+  `call_factory(name, factory, inputs)` calls the factory once, with `ctx` as a
+  zero-argument provider, so the context hook runs only for a factory that
+  declares `ctx`. Its errors are `FactoryError`s (a `ValueError`) with an
+  optional `note`, which the resolver reports as `In test_x: ...` and the export
+  writes as an `error` entry. See "Factory inputs" in section 4.
+- `_options.py` (D6, D12): `StrategyOptions`, frozen, keyword-only and slotted,
+  and `VectorMode`. `parse_session_options(config)` reads the session-wide part
+  once into a `SessionOptions`, which `StrategyRuntime.strategy_options()` caches
+  per session; `for_strategy(name)` gives each strategy its instance, with the
+  `--strategy-constraint-off` names aimed at it. `parse_constraint_off()` splits
+  the option's items, and `constraint_off_item()` writes them back for the rerun
+  commands.
+- `_streams.py` (D5): random streams v1. `StreamKey.root(seed, *parts)`,
+  `.child(*parts)` and `.seed_int()` hash typed, length-prefixed parts with
+  BLAKE2b; `path_part()`, `file_part()` and `installed_part()` turn paths into
+  key parts. `VERSION` is the streams version that `VectorInfo.streams` reports.
+  `rng._Stream`, `rng._Ambient` and `parameters._RowStreams` use the keys (see
+  Reproducibility).
+- `_vector.py` (D10, D17): `Vector`, and `vector_type(names)`, which builds and
+  caches one namedtuple class per tuple of argument names (picklable through
+  `__reduce__`, also in a fresh process); `VectorInfo`, frozen and keyword-only,
+  and the stash keys `VECTOR_KEY` and `VECTORS_KEY`.
+- `_context.py` (D7): the context per folder. `call_order()` orders the
+  implementations a folder sees, `visible_from()` picks them for a path,
+  `ContextStore` calls each one at most once per session and keeps its `Answer`,
+  `FolderContext` computes a folder's answer when a factory asks for it, and
+  `unloaded_conftests()` names the `conftest.py` files the export cannot know.
+  `_fingerprint.py` (D9) holds `fingerprint()` and `canonical()`, the encoder of
+  the context fingerprints and of the xdist value digests.
+- `_records.py` (D16): the record-mode rule. `detect_record_param(test_fn,
+  argnames, fixturenames)` returns the parameter that takes the row as one
+  record, or None for named mode; it recognizes dataclasses, NamedTuple, TypedDict
+  and pydantic v2 models with fixed field sets, and builds only dataclasses.
+- `_encode.py` (D17, D19): `encode()`, the schema 1 value encoding, used by
+  `VectorInfo.to_dict()` and the export.
+- `_export.py` (D19): `document()`, the `export_strategies()` document, and the
+  fragments of `Parameter.to_dict()`, `TestArg.to_dict()` and
+  `RNGType.to_dict()` (`rng_type_dict()`); `context_folder()` gives the folder
+  whose context an exported factory gets.
+- `_ids.py` (D3): `names_id()`, the names format, next to the 3.0 values format
+  (`generate_test_ids()`), which `strategies_ids = values` selects.
+- `_repro.py` (D18): a failed row's section (`failure()`), its rerun command
+  (`generation_options()`, `quote()`), the JUnit properties
+  (`suite_properties()`, `testcase_properties()`) and `SectionedRepr`.
+- `_reuse.py` (D4): the cache key `pytest-strategies/failed-seeds` (`updated()`),
+  the seed a `--lf` or `--sw` run reuses (`plan()`), and the commands of the rows
+  it sets aside (`commands()`).
+
+---
+
 ## Complete Example
 
 ```python
@@ -968,7 +1053,7 @@ first worker's value in worker order.
 from pytest_strategy import Parameter, RNGInteger, RNGWeightedInteger, TestArg, register, strategy
 
 @register("division_strategy")
-def create_division_samples(nsamples):
+def create_division_samples():
     param = Parameter(
         TestArg(
             name="dividend",
@@ -994,8 +1079,8 @@ def create_division_samples(nsamples):
         always_include_directed=True
     )
 
-    # Add constraint: divisor must not be zero
-    param.add_constraint(lambda v: v[1] != 0)
+    # Add a named constraint: divisor must not be zero
+    param.add_constraint(lambda v: v.divisor != 0, name="nonzero_divisor")
 
     return param
 
@@ -1015,7 +1100,7 @@ def test_division(dividend, divisor):
         assert result < 0
 
 @register("string_concat_strategy")
-def create_string_samples(nsamples):
+def create_string_samples():
     from pytest_strategy.rng import RNGString, RNGChoice
 
     return Parameter(
@@ -1056,8 +1141,15 @@ pytest test_math_operations.py --vector-mode directed_only
 # Only random tests
 pytest test_math_operations.py --nsamples 50 --vector-mode random_only
 
-# Run specific vector
+# Run specific vector, by its option or by its name in the test ID
 pytest test_math_operations.py --vector-name "simple"
+pytest test_math_operations.py -k simple
+
+# Rerun one random row with the values it had in a run with seed 42
+pytest "test_math_operations.py::test_division[rand-3]" --rng-seed 42
+
+# Turn the named constraint off for one run
+pytest test_math_operations.py --strategy-constraint-off=division_strategy:nonzero_divisor
 
 # Reproducible run
 pytest test_math_operations.py --rng-seed 42
@@ -1074,14 +1166,16 @@ pytest test_math_operations.py -v
 param = Parameter(
     TestArg("min_val", rng_type=RNGInteger(0, 100)),
     TestArg("max_val", rng_type=RNGInteger(0, 100)),
+    # Ensure min < max; a row is a Vector, read by argument name
+    vector_constraints={"ordered": lambda v: v.min_val < v.max_val},
 )
 
-# Ensure min < max
-param.add_constraint(lambda v: v[0] < v[1])
-
-# Multiple constraints
-param.add_constraint(lambda v: v[1] - v[0] >= 10)  # At least 10 apart
+# More constraints run in order after it
+param.add_constraint(lambda v: v.max_val - v.min_val >= 10, name="apart")  # At least 10 apart
 ```
+
+`--strategy-constraint-off=apart` turns `apart` off for one run, and the error
+for a constraint that rejects every draw counts the rejections by name.
 
 ### Weighted Distributions
 
@@ -1109,8 +1203,8 @@ arg = TestArg(
     validator=lambda x: 0 <= x <= 100
 )
 
-# Vector-level validation
-param.add_constraint(lambda v: v[0] + v[1] <= 100)
+# Vector-level validation, by argument name
+param.add_constraint(lambda v: v.cpu + v.io <= 100, name="total")
 ```
 
 ### Reproducibility
@@ -1617,7 +1711,7 @@ directed_vectors={
 
 ```python
 # Instead of hoping random generation produces valid inputs
-param.add_constraint(lambda v: v[0] < v[1])  # min < max
+param.add_constraint(lambda v: v.min_val < v.max_val, name="ordered")
 ```
 
 ### 3. Use Weighted Distributions for Important Cases
@@ -1645,13 +1739,12 @@ directed_vectors={
 ### 5. Use Validation for Complex Constraints
 
 ```python
-def is_valid_config(config_tuple):
-    timeout, retries, mode = config_tuple
-    if mode == "fast":
-        return timeout < 1.0 and retries <= 3
+def fast_mode_limits(v):
+    if v.mode == "fast":
+        return v.timeout < 1.0 and v.retries <= 3
     return True
 
-param.add_constraint(is_valid_config)
+param.add_constraint(fast_mode_limits)  # Named after the function
 ```
 
 ## Troubleshooting
@@ -1703,20 +1796,20 @@ the size guard allows. Use fewer sequence values, or raise the limit with
 ### Tests not reproducible
 
 - Pass the same `--rng-seed` value (a run's seed is shown in the report header, and after a failed run); calling `RNG.seed()` inside a test body does not change its parametrized values
-- Use the same rootdir and a pytest-strategies version that generates the same values (2.0.0 and 3.0.0 do, except values strategy files draw when they are imported; 1.x and 4.0.0 do not)
+- Use the same rootdir, the same `--nsamples` and options (the rerun command a failure prints has them), and a pytest-strategies version with the same streams version (`VectorInfo.streams`: 1 since 4.0.0; 3.x and earlier draw other values)
 - Draw from the RNG types or `RNG.generator()` in factories: plain `random` calls are not seeded by the plugin
 - Draws made when a `conftest.py` is imported are not covered by the seed, and those of a helper module that test modules import depend on which module imports it first; move them into the context hook, a fixture or a strategy file (see [Reproducibility](#reproducibility))
 
 ## Future Enhancements
 
-- [ ] Vector groups (categorize directed vectors)
-- [ ] Combinatorial mode (all combinations of directed values)
-- [ ] Replay support (save/load generated vectors)
-- [ ] Statistics tracking (which vectors found bugs)
-- [ ] Partial vector support (None = generate random)
-- [ ] Vector inheritance/templates
-- [ ] Integration with hypothesis
-- [ ] Custom RNG types (user-defined)
+4.0 settles the contracts these build on (see "Compatibility rules for 4.x"
+under Contributing):
+
+- [ ] Dependent arguments: an argument whose values depend on the arguments before it
+- [ ] Strategy composition (`extends=`, `derive()`, `where=`)
+- [ ] Coverage bins
+- [ ] Records built from NamedTuple, TypedDict and pydantic models
+- [ ] Vector export and import, a regression bank, subtests mode and run profiles
 
 ## Contributing
 
@@ -1752,13 +1845,49 @@ of reseeding them, so the cost per accepted row does not grow with the rejection
 rate: 16 to 17 µs more than 3.0 at 0%, 50% and 90%. Collecting 100,000
 exhaustive rows takes about 10 s and 417 MiB at peak (3.0: 6 s and 328 MiB).
 
-Options that a 4.x release adds to a public callable go after a `*`, so that
-they are keyword-only and no existing positional call changes meaning. Since 4.0,
-`TestArg`'s options after `rng_type`, `strategy()`'s `validate_signature`,
-`export_strategies()`'s `format` and `Parameter.generate_vectors()`'s options
-after `n` are keyword-only.
+The suite runs with `filterwarnings = error`, `--strict-markers`,
+`--strict-config` and `empty_parameter_set_mark = fail_at_collect`, and an
+autouse fixture in `tests/conftest.py` restores the registry, the seed and the
+random state after each test. Inner `pytester` runs that expect a warning use
+`runpytest_subprocess`, so the outer `error` filter does not apply to them.
 
-Command-line options that a 4.x release adds are named `--strategy-<x>` and read
+### Compatibility rules for 4.x
+
+A 4.x release only adds: a test suite, a factory, a recorded seed and an export
+reader that work with 4.0.0 keep working, with the same values.
+
+- **Keyword-only additions.** Options that a 4.x release adds to a public
+  callable go after a `*`, so that they are keyword-only and no existing
+  positional call changes meaning. Since 4.0, `TestArg`'s options after
+  `rng_type`, `strategy()`'s `validate_signature`, `export_strategies()`'s
+  `format` and `Parameter.generate_vectors()`'s options after `n` are
+  keyword-only. Fields added to `StrategyOptions` and `VectorInfo` are
+  keyword-only and have defaults.
+- **New factory inputs.** A new factory input arrives as a new
+  `StrategyOptions` field with a default, or under a reserved parameter name
+  (`base`, `config`, `request`). The plugin never starts passing a value to a
+  parameter name that 4.0 left alone, and `*args` and `**kwargs` never receive
+  anything (`_factory.py`).
+- **Schema evolution.** Schema 1 (the export, `Parameter.to_dict()`,
+  `VectorInfo.to_dict()`) changes by addition only; the paragraph on
+  `export_strategies()` below has the rule.
+- **Streams version.** The random streams are versioned (`_streams.VERSION`,
+  which `VectorInfo.streams` reports). Whatever changes the values a seed gives
+  (a stream key or its encoding, the order in which a row's arguments draw, the
+  retry rule, the position tokens of enumerated values, replacing
+  `random.Random`) changes every recorded seed's rows, so it waits for a major
+  release and comes with a new `VERSION`, new goldens
+  (`tests/golden/seed1.json` and the key goldens in
+  `tests/unittests/test_streams.py`) and a migration note in the CHANGELOG. A
+  built-in RNG type added in 4.x gets a strategy and a test of its own in the
+  golden project, which adds rows and changes none.
+- **Test IDs.** The names format (`_ids.names_id()`) is part of the contract:
+  `-k` expressions, `--deselect` lists and the `--lf` cache name rows by it.
+- **Record kinds.** The field sets of the four record kinds are fixed, so
+  building NamedTuple, TypedDict or pydantic records later cannot change which
+  parameter takes the row.
+
+**Option names.** Command-line options that a 4.x release adds are named `--strategy-<x>` and read
 as `config.option.strategy_<x>`, and ini options are named `strategies_<x>`; the
 3.0 options `--rng-seed`, `--nsamples`, `--vector-mode`, `--vector-name`,
 `--vector-index` and `--list-strategies` keep their names. A run sets an ini
@@ -1778,7 +1907,7 @@ another. Reserved for later releases: `--strategy-coverage` (4.2),
 `tests/integration/test_option_names_integration.py` checks the names against
 `pytest --help` with and without the plugin.
 
-`export_strategies()` and the `to_dict()` methods write schema 1 (`_export.py`,
+**Schema 1.** `export_strategies()` and the `to_dict()` methods write schema 1 (`_export.py`,
 whose values go through `_encode.encode()`, as `VectorInfo.to_dict()`'s do).
 `_export.document()` calls each registration's factory as collection does and
 writes one entry per registration; an entry whose factory raised, or whose
@@ -1797,12 +1926,6 @@ not know and unknown values of the string enums (`kind`, `source`,
 a project covering every RNG type with `tests/golden/export-schema1.json`,
 `generator.version` masked: update the file only for such an addition, as its
 docstring says.
-
-The suite runs with `filterwarnings = error`, `--strict-markers`,
-`--strict-config` and `empty_parameter_set_mark = fail_at_collect`, and an
-autouse fixture in `tests/conftest.py` restores the registry, the seed and the
-random state after each test. Inner `pytester` runs that expect a warning use
-`runpytest_subprocess`, so the outer `error` filter does not apply to them.
 
 ## Releasing
 

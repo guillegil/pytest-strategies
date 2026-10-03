@@ -43,7 +43,7 @@ class UserRole(Enum):
 # ============================================================================
 
 @register("http_status_strategy")
-def create_http_status_strategy(nsamples: int) -> Parameter:
+def create_http_status_strategy() -> Parameter:
     """Strategy with simple enum selection"""
     return Parameter(
         TestArg("status_code", rng_type=RNGEnum(HttpStatus)),
@@ -69,7 +69,7 @@ def test_http_status(status_code: HttpStatus, method: RequestMethod):
 # ============================================================================
 
 @register("weighted_status_strategy")
-def create_weighted_status_strategy(nsamples: int) -> Parameter:
+def create_weighted_status_strategy() -> Parameter:
     """Strategy with weighted enum selection (mostly success cases)"""
     return Parameter(
         TestArg("status_code", rng_type=RNGEnum(
@@ -106,7 +106,7 @@ def test_weighted_status(status_code: HttpStatus, user_id: int):
 # ============================================================================
 
 @register("filtered_status_strategy")
-def create_filtered_status_strategy(nsamples: int) -> Parameter:
+def create_filtered_status_strategy() -> Parameter:
     """Strategy with predicate filtering (only success codes)"""
     return Parameter(
         TestArg("status_code", rng_type=RNGEnum(
@@ -138,7 +138,7 @@ def test_filtered_status(status_code: HttpStatus, method: RequestMethod):
 # ============================================================================
 
 @register("role_based_strategy")
-def create_role_based_strategy(nsamples: int) -> Parameter:
+def create_role_based_strategy() -> Parameter:
     """Strategy with weighted roles and filtered methods"""
     return Parameter(
         TestArg("role", rng_type=RNGEnum(
@@ -158,10 +158,10 @@ def create_role_based_strategy(nsamples: int) -> Parameter:
                 RequestMethod.PUT: 0.2,
             }
         )),
-        vector_constraints=[
+        vector_constraints={
             # Guests can only read
-            lambda v: v.role != UserRole.GUEST or v.method == RequestMethod.GET,
-        ],
+            "guests_read_only": lambda v: v.role != UserRole.GUEST or v.method == RequestMethod.GET,
+        },
         directed_vectors={
             "guest_read": (UserRole.GUEST, RequestMethod.GET),
             "user_write": (UserRole.USER, RequestMethod.POST),
@@ -193,19 +193,19 @@ def test_role_based_access(role: UserRole, method: RequestMethod):
 # ============================================================================
 
 @register("api_test_strategy")
-def create_api_test_strategy(nsamples: int) -> Parameter:
+def create_api_test_strategy() -> Parameter:
     """Complex strategy with multiple enums and constraints"""
     return Parameter(
         TestArg("method", rng_type=RNGEnum(RequestMethod)),
         TestArg("status_code", rng_type=RNGEnum(HttpStatus)),
         TestArg("role", rng_type=RNGEnum(UserRole)),
         TestArg("retry_count", rng_type=RNGInteger(0, 5)),
-        vector_constraints=[
+        vector_constraints={
             # GET requests should mostly succeed
-            lambda v: v.method != RequestMethod.GET or v.status_code.value < 500,
+            "get_succeeds": lambda v: v.method != RequestMethod.GET or v.status_code.value < 500,
             # Guests can't get server errors
-            lambda v: v.role != UserRole.GUEST or v.status_code.value != 500,
-        ],
+            "no_guest_errors": lambda v: v.role != UserRole.GUEST or v.status_code.value != 500,
+        },
         directed_vectors={
             "guest_get_ok": (RequestMethod.GET, HttpStatus.OK, UserRole.GUEST, 0),
             "user_post_created": (RequestMethod.POST, HttpStatus.CREATED, UserRole.USER, 0),
@@ -252,8 +252,16 @@ pytest examples/enum_example.py --nsamples=50 -v
 # Run only directed vectors
 pytest examples/enum_example.py --vector-mode=directed_only -v
 
-# Run specific directed vector
-pytest examples/enum_example.py --vector-name=success -v
+# Run specific directed vector. The tests without a vector of that name get no
+# rows and are skipped (-o overrides this repository's fail_at_collect)
+pytest examples/enum_example.py --vector-name=success -o empty_parameter_set_mark=skip -v
+
+# Select rows by the names in their test IDs (the same for every seed)
+pytest examples/enum_example.py -k guest_read -v
+pytest examples/enum_example.py -k "test_http_status and not rand" -v
+
+# Run one random row again with the values it had in the run with seed 42
+pytest "examples/enum_example.py::test_role_based_access[rand-3]" --rng-seed=42 -v
 
 # Run with specific seed for reproducibility
 pytest examples/enum_example.py --rng-seed=42 -v

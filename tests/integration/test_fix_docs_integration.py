@@ -3,9 +3,10 @@ End-to-end checks that documented examples and CLI options actually work.
 
 The package docstring, the runnable snippets of README.md / docs/dev.md and the
 scripts in examples/ are copied into a pytester sandbox and run the way a user
-would run them. These documents went stale before (they called the renamed
-``Parameter.generate_samples`` and a ``--seed`` flag that never existed), and
-nothing ran examples/, so a flaky example went unnoticed.
+would run them, the examples also with each command their docstrings show. These
+documents went stale before (they called the renamed ``Parameter.generate_samples``
+and a ``--seed`` flag that never existed), and nothing ran examples/, so a flaky
+example went unnoticed.
 """
 
 import argparse
@@ -67,7 +68,7 @@ def _bench_parser() -> argparse.ArgumentParser:
 def _package_docstring_example() -> str:
     """The "Example Usage" section of ``help(pytest_strategy)``."""
     doc = pytest_strategy.__doc__ or ""
-    return textwrap.dedent(doc.split("Example Usage:", 1)[1].split("Dataclass Support:", 1)[0])
+    return textwrap.dedent(doc.split("Example Usage:", 1)[1].split("Record Parameters:", 1)[0])
 
 
 def _package_docstring_cli_lines() -> list:
@@ -104,6 +105,19 @@ class TestPackageDocstring:
         """The example's directed vectors are the rows --vector-mode=directed_only keeps."""
         pytester.makepyfile(test_doc_example=_package_docstring_example())
         pytester.runpytest("--vector-mode", "directed_only").assert_outcomes(passed=2)
+
+    @pytest.mark.parametrize("seed", ["1", "2"])
+    def test_example_has_the_documented_ids(self, pytester, seed):
+        """The "Test IDs" section names the rows, the same for every seed."""
+        documented = ["directed-zeros", "directed-max", *(f"rand-{i}" for i in range(10))]
+        assert all(f"test_addition[{name}]" in pytest_strategy.__doc__ for name in documented[:3])
+        pytester.makepyfile(test_doc_example=_package_docstring_example())
+
+        result = pytester.runpytest("--collect-only", "-q", f"--rng-seed={seed}")
+
+        assert [line for line in result.stdout.lines if "::" in line] == [
+            f"test_doc_example.py::test_addition[{name}]" for name in documented
+        ]
 
 
 class TestMarkdownExamples:
@@ -215,7 +229,7 @@ class TestExamples:
         module, factories = _load_example_factories(
             REPO_ROOT / "examples" / "enum_example.py", monkeypatch
         )
-        param = factories["role_based_strategy"](nsamples=10)
+        param = factories["role_based_strategy"]()
 
         bad = []
         for seed in range(100):
@@ -274,7 +288,7 @@ class TestExamples:
         module, factories = _load_example_factories(
             REPO_ROOT / "examples" / "test_values_example.py", monkeypatch
         )
-        param = factories["date_range_test"](nsamples=10)
+        param = factories["date_range_test"]()
         assert list(param.vector_constraints) == ["ordered"]
 
         RNG.seed(1)
@@ -284,3 +298,58 @@ class TestExamples:
         assert reversed_rows
         for row in reversed_rows:
             module.test_date_ranges(*row)
+
+
+def _example_commands() -> list:
+    """The pytest command lines that the examples show, as (example, arguments)."""
+    params = []
+    for path in EXAMPLES:
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if line.lstrip().startswith("pytest "):
+                args = shlex.split(line, comments=True)[1:]
+                params.append(pytest.param(path, args, id=f"{path.name}:{number}"))
+    return params
+
+
+class TestExampleCommands:
+    """
+    The commands in the examples' docstrings run as shown from the repository root,
+    with its pytest configuration (strict markers, warnings as errors and
+    ``empty_parameter_set_mark = fail_at_collect``).
+    """
+
+    def test_each_example_shows_how_to_select_and_rerun_rows(self):
+        commands: dict[str, list[list[str]]] = {}
+        for param in _example_commands():
+            path, args = param.values
+            commands.setdefault(path.name, []).append(args)
+
+        assert sorted(commands) == [
+            "enum_example.py",
+            "sequence_example.py",
+            "strategy_example.py",
+            "test_values_example.py",
+        ]
+        for name, lines in commands.items():
+            assert any("-k" in args for args in lines), f"{name} shows no -k selection"
+            assert any("::" in args[0] for args in lines), f"{name} shows no node ID"
+
+    @pytest.mark.parametrize(("example", "args"), _example_commands())
+    def test_command_runs(self, pytester, example, args):
+        """A command without --rng-seed runs with seed 1, so the test is deterministic."""
+        pytester.makefile(".toml", pyproject=(REPO_ROOT / "pyproject.toml").read_text("utf-8"))
+        pytester.mkdir("examples")
+        (pytester.path / "examples" / example.name).write_text(
+            example.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        if not any(arg.startswith("--rng-seed") for arg in args):
+            args = [*args, "--rng-seed=1"]
+
+        result = pytester.runpytest(*args)
+
+        assert result.ret == pytest.ExitCode.OK, result.stdout.str()
+        outcomes = result.parseoutcomes()
+        if "::" in args[0]:
+            assert outcomes.get("passed") == 1 and "deselected" not in outcomes
+        else:
+            assert outcomes.get("passed", 0) > 0

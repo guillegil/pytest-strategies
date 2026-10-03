@@ -84,7 +84,7 @@ same module object the plugin loaded.
   All are optional. It rarely needs `nsamples`: return a `Parameter` and the
   plugin generates the rows. Any other parameter needs a default (`def f(n)`
   fails), and `base`, `config` and `request` are reserved.
-- It returns a `Parameter`. Returning an `(argnames, samples)` tuple fails since 4.0.
+- It returns a `Parameter`; anything else fails collection (see Upgrading from 3.x).
 - The test must take every `TestArg` name as a parameter (checked at collection;
   `@strategy(..., validate_signature=False)` turns the check off). Its other
   parameters are fixtures, as usual. Or use dataclass mode (see Traps).
@@ -358,11 +358,6 @@ To reproduce a failure:
 - **`--vector-name`/`--vector-index` select directed vectors only.** Strategies
   without that vector yield an empty parameter set (their tests are skipped). If no
   strategy has it, the run stops with a usage error.
-- **Removed in 4.0:** tuple-returning factories,
-  `TestArg(directed_values=..., test_values=...)` (use `Parameter(directed_vectors=,
-  test_vectors=)`), `RNG.set_max_retries()` (use `Parameter(max_retries=)`),
-  `configure()` and `Strategy.set_config()`. `Strategy.register`/`Strategy.strategy`
-  still work as aliases; write new code with `register`/`strategy`.
 - **Warnings as errors.** Projects with `filterwarnings = error` turn a
   `PytestStrategiesWarning` (for example a skipped `Series` combination) into a
   failure. Import it from `pytest_strategy`.
@@ -374,6 +369,16 @@ To reproduce a failure:
   rows were generated".
 - Do not call a factory or `Parameter.generate_vectors()` from a test to get rows;
   decorate the test with `@strategy` so seeding, IDs and CLI options apply.
+
+## Upgrading from 3.x
+
+- **Removed in 4.0:** tuple-returning factories (return a `Parameter`),
+  `TestArg(directed_values=..., test_values=...)` (use `Parameter(directed_vectors=,
+  test_vectors=)`), `RNG.set_max_retries()` (use `Parameter(max_retries=)`),
+  `configure()` and `Strategy.set_config()` (delete the call). The full table is in
+  references/api.md, section 16.
+- `Strategy.register`/`Strategy.strategy` still work as aliases; write new code with
+  `register`/`strategy`.
 
 ## Checking your work
 

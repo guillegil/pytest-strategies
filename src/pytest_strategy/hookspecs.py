@@ -27,9 +27,14 @@ def pytest_strategies_context(config: pytest.Config) -> Any:
             return Testbench.parse_config(config.getoption("--tb-config"))
 
         # strategies.py
-        @Strategy.register("channels")
-        def channels(nsamples, ctx):
+        @register("channels")
+        def channels(ctx):
             return Parameter(TestArg("channel", rng_type=RNGSequence(ctx.channels)))
+
+        # conftest.py: the testbench fixture builds on the same object
+        @pytest.fixture(scope="session")
+        def tb(strategies_ctx):
+            return Testbench(strategies_ctx)
 
     ``optionalhook=True`` keeps the ``conftest.py`` usable when pytest-strategies
     is not loaded; without it, pytest stops with "unknown hook".
@@ -58,14 +63,15 @@ def pytest_strategies_context(config: pytest.Config) -> Any:
     folders without it. A wrapper must leave the object it receives as it is,
     since the folders that do not see the wrapper get that object too: when its
     fingerprint (below) changed while the wrappers ran, the folders that see the
-    wrapper fail with an error that says so. Each
-    implementation runs once, for the first folder that asks, so a wrapper's code
-    before its ``yield`` runs after the implementations it wraps, not before them
-    as in other hooks.
+    wrapper fail with an error that says so. Each implementation runs once, for
+    the first folder that asks, so a wrapper's code before its ``yield`` runs after
+    the implementations it wraps, not before them as in other hooks.
 
     A factory registered in one folder and used by a test in another gets the
     context of the test's folder; ``export_strategies()``, which has no test, gives
-    it the context of the folder it is registered in. Tests and fixtures get the
+    it the context of the folder it is registered in (an entry reads
+    ``unavailable`` when a ``conftest.py`` of that folder or above it was not
+    loaded in the session). Tests and fixtures get the
     same object: the ``strategies_ctx`` session fixture gives the context of the
     tests that use it (which must share one), and
     ``pytest_strategy.get_context(config, path)`` the context of a folder, for the
@@ -76,14 +82,16 @@ def pytest_strategies_context(config: pytest.Config) -> Any:
     ``ctx`` parameter, ``strategies_ctx`` or ``get_context()``: the folders that
     end at the same implementation share its result. A wrapper runs once for each
     implementation that answers under it, and again for each other set of
-    wrappers it is in (a folder whose ``conftest.py`` adds a wrapper). Factories without a ``ctx`` parameter never
-    trigger it. When nothing answers, ``ctx`` keeps its default (or a value bound
-    with ``functools.partial``), and is ``None`` without one. Random draws in an
+    wrappers it is in (a folder whose ``conftest.py`` adds a wrapper). Factories
+    without a ``ctx`` parameter never trigger it. When nothing answers, ``ctx``
+    keeps its default (or a value bound with ``functools.partial``), and is
+    ``None`` without one. Random draws in an
     implementation come from a stream derived from the seed, started anew for
     each implementation, and do not change any test's vectors. Under
     pytest-xdist every worker calls the implementations it needs, and the results
     must be the same in all of them: when two workers' fingerprints of one
-    context (below) differ, the run fails with exit code 4, naming the context.
+    context (below) differ, the run fails with exit code 4, naming the context's
+    label (the ``conftest.py`` or plugin that answered).
 
     When an implementation returns an object, the plugin takes its fingerprint,
     a hash of what the object holds (sets sorted, paths inside the rootdir
@@ -91,8 +99,9 @@ def pytest_strategies_context(config: pytest.Config) -> Any:
     and prints it after the collection (``pytest-strategies: context 976bcfdf``;
     under pytest-xdist, at the end of the run), at the end of the reproduce line
     of a failed run, and in ``VectorInfo.context``, so two runs can tell whether
-    they received the same context. Keep volatile values (temporary paths, process IDs, times) out of
-    the object, or exclude them, so that it stays the same from run to run.
+    they received the same context. Keep volatile values (temporary paths,
+    process IDs, times) out of the object, or exclude them, so that it stays the
+    same from run to run.
 
     An exception raised by an implementation fails the collection of each module
     whose folder asks it before any other implementation answers, and that uses

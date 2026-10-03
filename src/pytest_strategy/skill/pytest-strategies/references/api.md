@@ -111,8 +111,8 @@ def factory(nsamples, ctx, rng, options):   # each one optional, any order, by n
   decorator without `functools.wraps` hides the signature, so the factory is called
   with no arguments. `mock.patch` mocks must be the first parameters. An `async def`
   factory fails.
-- Return a `Parameter`. Since 4.0 an `(argnames, samples)` tuple fails the
-  collection of the tests that use it.
+- Return a `Parameter`. Anything else fails the collection of the tests that use
+  it (for 3.x factories, see section 16).
 - An exception in the factory fails the collection of the tests that use it, with
   `Error calling strategy factory '<name>' (nsamples=...)`.
 - Values the factory draws itself are reproducible only when drawn through the
@@ -220,9 +220,9 @@ class TestArg:
 - `validator` runs on generated and fixed values. A value that fails it stops
   collection with `ValueError` and is not redrawn, so filter with a `predicate` on the
   RNG type instead, and use `validator` only as an assertion.
-- `directed_values=`, `test_values=` and `always_include_directed=` were removed in
-  4.0: they never produced rows. Use the `Parameter`'s `directed_vectors`,
-  `test_vectors` and `always_include_directed`.
+- A `TestArg` holds no directed or test vectors: give them to the `Parameter`, as
+  `directed_vectors`, `test_vectors` and `always_include_directed` (the 3.x
+  `TestArg` options for them are gone, see section 16).
 
 ## 6. RNG types
 

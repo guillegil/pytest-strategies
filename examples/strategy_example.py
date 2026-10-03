@@ -5,6 +5,12 @@ A strategy is a factory that returns a Parameter. Register it with @register
 and apply it to tests with @strategy, by name or by passing the factory itself.
 All CLI options (--nsamples, --vector-mode, --vector-name, --vector-index)
 apply to it.
+
+Each row's test ID names it, the same for every seed:
+test_addition[directed-zeros] for the directed vector "zeros", and
+test_addition[rand-0] to test_addition[rand-9] for the random rows. So -k
+selects rows by name, and a node ID with --rng-seed runs one row again with the
+values it had (see the commands at the end of this file).
 """
 
 from pytest_strategy import (
@@ -23,15 +29,14 @@ from pytest_strategy import (
 # ============================================================================
 
 @register("addition_strategy")
-def create_addition_strategy(nsamples):
+def create_addition_strategy():
     """
-    Strategy using Parameter class (NEW RECOMMENDED WAY).
-    
-    This enables:
-    - CLI options: --vector-mode, --vector-name, --vector-index
-    - Directed test vectors
-    - Constraints
-    - All Parameter features
+    A strategy is a factory that returns a Parameter.
+
+    The plugin generates the rows from it, so the CLI options apply:
+    --nsamples, --vector-mode, --vector-name and --vector-index. A factory
+    receives only the inputs it declares (nsamples, ctx, rng, options); this
+    one needs none.
     """
     return Parameter(
         TestArg("a", rng_type=RNGInteger(0, 100)),
@@ -57,14 +62,15 @@ def test_addition(a, b):
 # ============================================================================
 
 @register("range_strategy")
-def create_range_strategy(nsamples):
-    """Strategy with constraints ensuring min < max."""
+def create_range_strategy():
+    """Strategy with a named constraint ensuring min < max."""
     return Parameter(
         TestArg("min_val", rng_type=RNGInteger(0, 50)),
         TestArg("max_val", rng_type=RNGInteger(50, 100)),
-        vector_constraints=[
-            lambda v: v.min_val < v.max_val  # The row is a Vector: v.min_val is v[0]
-        ],
+        vector_constraints={
+            # The row is a Vector: v.min_val is v[0]
+            "min_below_max": lambda v: v.min_val < v.max_val,
+        },
         directed_vectors={
             "edge_case": (0, 100),
             "narrow": (49, 51),
@@ -85,16 +91,17 @@ def test_range_validation(min_val, max_val):
 # ============================================================================
 
 @register("api_endpoint_strategy")
-def create_api_test_strategy(nsamples):
+def create_api_test_strategy():
     """Strategy simulating API endpoint testing."""
     return Parameter(
         TestArg("user_id", rng_type=RNGInteger(1, 10000)),
         TestArg("timeout", rng_type=RNGFloat(0.1, 5.0)),
         TestArg("method", rng_type=RNGChoice(["GET", "POST", "PUT", "DELETE"])),
+        # A directed vector is a tuple in argument order, or a dict by name
         directed_vectors={
             "admin_user": (1, 1.0, "GET"),
-            "regular_user": (5000, 2.0, "POST"),
-            "slow_request": (100, 5.0, "GET"),
+            "regular_user": {"user_id": 5000, "timeout": 2.0, "method": "POST"},
+            "slow_request": {"method": "GET", "user_id": 100, "timeout": 5.0},
         }
     )
 
@@ -111,7 +118,7 @@ def test_api_endpoint(user_id, timeout, method):
 # EXAMPLE 4: Passing the Factory Instead of a Name
 # ============================================================================
 
-def create_doubling_strategy(nsamples):
+def create_doubling_strategy():
     """
     A factory that is not registered: the test passes the function itself.
 
@@ -146,8 +153,9 @@ pytest examples/strategy_example.py --vector-mode=directed_only
 # Use only random samples
 pytest examples/strategy_example.py --vector-mode=random_only
 
-# Run specific directed vector by name
-pytest examples/strategy_example.py --vector-name=zeros
+# Run specific directed vector by name. The tests without a vector of that name
+# get no rows and are skipped (-o overrides this repository's fail_at_collect)
+pytest examples/strategy_example.py --vector-name=zeros -o empty_parameter_set_mark=skip
 
 # Run specific directed vector by index
 pytest examples/strategy_example.py --vector-index=0
@@ -157,6 +165,15 @@ pytest examples/strategy_example.py --rng-seed=42
 
 # Combine options
 pytest examples/strategy_example.py --nsamples=50 --vector-mode=all --rng-seed=42
+
+# Select rows by the names in their test IDs
+pytest examples/strategy_example.py -k zeros       # The directed vector "zeros"
+pytest examples/strategy_example.py -k directed    # Every directed vector
+pytest examples/strategy_example.py -k "not rand"  # Leave out the random rows
+pytest examples/strategy_example.py -k "test_addition[rand-3]"  # One random row
+
+# Run one random row again with the values it had in the run with seed 42
+pytest "examples/strategy_example.py::test_addition[rand-3]" --rng-seed=42
 """
 
 
@@ -167,4 +184,9 @@ if __name__ == "__main__":
     print("Example commands:")
     print("  pytest examples/strategy_example.py -v")
     print("  pytest examples/strategy_example.py --vector-mode=directed_only -v")
-    print("  pytest examples/strategy_example.py --vector-name=zeros -v")
+    print(
+        "  pytest examples/strategy_example.py --vector-name=zeros"
+        " -o empty_parameter_set_mark=skip -v"
+    )
+    print("  pytest examples/strategy_example.py -k zeros -v")
+    print('  pytest "examples/strategy_example.py::test_addition[rand-3]" --rng-seed=42')

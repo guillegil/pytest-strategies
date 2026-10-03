@@ -12,6 +12,12 @@ To run with all vectors (directed + random):
 
 To turn the date range constraint off for one run, by its name:
     pytest examples/test_values_example.py --strategy-constraint-off=date_range_test:ordered -v
+
+Each row's test ID names it: test_date_ranges[test-one_week] for the test vector
+"one_week", test_user_permissions[directed-newborn] for a directed vector. So -k
+selects test vectors by name, and a node ID runs one:
+    pytest examples/test_values_example.py --vector-mode=test -k one_week -v
+    pytest "examples/test_values_example.py::test_date_ranges[test-one_week]" --vector-mode=test -v
 """
 
 import pytest
@@ -21,7 +27,7 @@ from pytest_strategy import Parameter, RNGChoice, RNGInteger, RNGSequence, TestA
 # 1. Basic Test Vectors
 # This strategy defines specific test cases that should always be verified.
 @register("api_test_cases")
-def api_test_cases_strategy(nsamples):
+def api_test_cases_strategy():
     return Parameter(
         TestArg("endpoint", rng_type=RNGChoice(["/users", "/products", "/orders"])),
         TestArg("status_code", rng_type=RNGInteger(200, 500)),
@@ -51,7 +57,7 @@ def test_api_responses(endpoint, status_code):
 # 2. Test Vectors with Directed Vectors
 # You can combine test vectors with directed vectors for different testing modes.
 @register("user_validation")
-def user_validation_strategy(nsamples):
+def user_validation_strategy():
     return Parameter(
         TestArg("age", rng_type=RNGInteger(0, 120)),
         TestArg("role", rng_type=RNGChoice(["admin", "user", "guest"])),
@@ -87,7 +93,7 @@ def test_user_permissions(age, role):
 # Directed vectors run in the default mode, test vectors only with
 # --vector-mode=test.
 @register("payment_test")
-def payment_test_strategy(nsamples):
+def payment_test_strategy():
     return Parameter(
         TestArg("amount", rng_type=RNGInteger(1, 10000)),
         TestArg("currency", rng_type=RNGChoice(["USD", "EUR", "GBP"])),
@@ -118,7 +124,7 @@ def test_payment_processing(amount, currency):
 # constraint has a name, so a run can turn it off to also draw ranges that end
 # before they start, which the code under test must reject.
 @register("date_range_test")
-def date_range_test_strategy(nsamples):
+def date_range_test_strategy():
     return Parameter(
         TestArg("start_day", rng_type=RNGInteger(1, 31)),
         TestArg("end_day", rng_type=RNGInteger(1, 31)),
