@@ -944,44 +944,41 @@ holds (`_registry._imported_by_path()`):
    `SessionState.imported_files` as they are imported; outside a session the set
    is empty. A key reads the set when it is built: a fixture's when it first
    draws, after collection; an export's when `export_strategies()` runs, which
-   during collection sees only the files imported so far. Rule 3 does not apply to
-   a module of a regular package that `sys.modules` holds under its package name
-   (`_registry._held_under_package_name()`): its folder has an `__init__.py`, and
-   the name is the dotted name of the chain of folders with an `__init__.py` above
-   it, ending at the module (`acme.test_utils` for `acme/test_utils.py`; the chain
-   stops where `_pytest.pathlib.resolve_package_path()` stops it, at a folder
-   without one or whose name is not an identifier). pytest 8.4 and 9 import such a
-   module under that name in the prepend, append and importlib modes (importlib
-   tries the package name first, and returns the module `sys.modules` already has
-   under it), which is also the name another module's `import acme.test_utils`
-   gives it, so the rules below key it alike whether or not the run collects its
-   folder. Rule 3 thus covers the files whose module name pytest derives from the
-   path: a file outside a regular package, which prepend and append import under
-   its basename (`test_b`, `conftest`) and importlib under a name it makes from
-   the path (`module_name_from_path()`), and a regular package's module that
-   `sys.modules` holds only under another name, such as a namespace package's name
-   above the chain (`ns.acme.strategies`, which pytest gives it with
-   `consider_namespace_packages = true` when the package name does not import, and
-   under which the plugin reuses a strategy file that a `conftest.py` imported
-   first).
+   during collection sees only the files imported so far. When the session's
+   `consider_namespace_packages` is false (pytest's default), rule 3 leaves out a
+   module of a regular package that `sys.modules` holds under its package name
+   (`_registry._held_under_package_name()`): the dotted name of the chain of
+   folders with an `__init__.py` above it, ending at the module
+   (`acme.test_utils` for `acme/test_utils.py`; the chain stops where
+   `_pytest.pathlib.resolve_package_path()` stops it, at a folder without one or
+   whose name is not an identifier). Without the option, pytest 8.4 and 9 import
+   such a module under that name in every import mode, the name another module's
+   `import acme.test_utils` gives it, so the rules below key it alike whether or
+   not the run collects its folder. With `consider_namespace_packages = true`,
+   pytest names it from `sys.path` instead (`ns.acme.test_utils` where the folder
+   above a namespace folder `ns/` is on `sys.path`, `acme.test_utils` elsewhere,
+   or a name importlib makes from the path), which depends on the launcher (the
+   `pytest` script puts its own folder on `sys.path`, `python -m pytest` the
+   working directory), the working directory and `--import-mode`, so rule 3
+   applies to every file it recorded. `plugin.definition_part()` reads the option
+   (`True` without a config) and passes it to `source_part()`.
 
-Every run of one checkout therefore keys these files alike: a full run, the run of
-a folder outside the testpaths (`pytest tests/integration` with `testpaths =
-tests/unit`, `pytest examples/` here, or a folder outside the rootdir with `-c` or
-`--rootdir`), the run of one node ID, every `--import-mode`, pytest 8 and 9. (That
-is the file's part of a key. pytest names a test outside the rootdir from the path
-named on the command line, `test_a.py::test_a` in the run of its folder and
-`::test_a` in the run of its node ID, so the keys that hold node IDs, a fixture's
-`scope` and `base` and a test's `T` and body streams, differ between those two
-runs whatever the file's part.) A file with such a name for which none of them
-holds is a module of a library on `sys.path` (an editable install's `.pth` entry,
-`PYTHONPATH`, a `pip install` target folder), such as `extacme/strategies.py` or
-`extacme/test_helpers.py`: its path relative to the rootdir would change with the
-folder the checkout is in (`../../libs/extacme` in one, `../../../../libs/extacme`
-in another), so the rules for any other module apply to it. They apply as well to
-a package module next to a rootdir in `tests/` (`acme/test_utils.py` in a flat
-layout) and to a regular package's module that rule 3 leaves out, which so keeps
-its package name in every run.
+Every run of one checkout therefore keys the files of rules 1 and 2 alike: a full
+run, the run of a folder outside the testpaths (`pytest tests/integration` with
+`testpaths = tests/unit`, `pytest examples/` here, or a folder outside the rootdir
+with `-c` or `--rootdir`), the run of one node ID, every `--import-mode`, pytest 8
+and 9. (That is the file's part of a key. pytest names a test outside the rootdir
+from the path named on the command line, `test_a.py::test_a` in the run of its
+folder and `::test_a` in the run of its node ID, so the keys that hold node IDs, a
+fixture's `scope` and `base` and a test's `T` and body streams, differ between
+those two runs whatever the file's part.) A file with such a name for which none
+of them holds is a module of a library on `sys.path` (an editable install's `.pth`
+entry, `PYTHONPATH`, a `pip install` target folder), such as
+`extacme/strategies.py` or `extacme/test_helpers.py`: its path relative to the
+rootdir would change with the folder the checkout is in (`../../libs/extacme` in
+one, `../../../../libs/extacme` in another), so the rules for any other module
+apply to it. They apply as well to a regular package's module that rule 3 leaves
+out, such as `acme/test_utils.py` next to a rootdir in `tests/` (a flat layout).
 
 They are the module's name for a module imported by its name: an installed
 package's (in a `site-packages` or `dist-packages` folder, also when it is named
@@ -995,7 +992,7 @@ folder or a folder above it (a rootdir with an `__init__.py`, or `proj.util` for
 the tests of a package checkout in `proj/tests`), whose name depends on the
 folders the checkout is in.
 
-Two limitations remain. A package module inside the rootdir whose file name
+These limitations remain. A package module inside the rootdir whose file name
 matches `python_files` or a strategy file pattern (`src/acme/test_utils.py`,
 `src/acme/strategies.py`) keeps its path there and has its module's name
 installed, so its fixtures and exported factories draw other values from the
@@ -1004,24 +1001,28 @@ the module (`src/acme/testing.py`) avoids that. Telling such a module from a tes
 module by what the session collects would make the key depend on the run: pytest
 collects the same file in one run and not in another (a bare `pytest` without
 testpaths collects `src/acme/test_utils.py`), and a file it collects has a module
-name that depends on `--import-mode`. Next to a rootdir in `tests/`, such a module
-is outside the rootdir and has its module's name in both, also in a run that
-collects its folder (`pytest -c tests/pytest.ini` from the project, or `pytest .
-../acme` in `tests/`), which imports it under its package name. The other
-limitation is rule 3's: a helper module that is not in a regular package (its
-folder has no `__init__.py`), named like a test module or a strategy file,
-outside the rootdir and the testpaths, and imported by its name, is keyed by its
-path in a run that collects its folder and by its module's name in a run that
-does not, which draws other values. `pytest -c pytest.ini ../other`, run in
-`proj/`, collects `../other/test_b.py` and keys it by its path; the run of one
-node ID in `../other/test_a.py`, which does `from test_b import port`, does not
-collect it, and keys it by its module's name, so `port` draws other values in the
-two runs. The same holds for a regular package's module that `sys.modules` holds
-only under another name than its package name (above: a strategy file
-`ns/acme/strategies.py` that a `conftest.py` imports as `ns.acme.strategies`).
-Add such a folder to `testpaths`, move it into the rootdir, or make it a regular
-package (`../other/__init__.py`, imported as `other.test_b`) to key its files
-alike in every run.
+name that depends on `--import-mode`.
+
+And rule 3 keys these files by their paths in a run that collects their folder
+and by their module's names in a run that does not, so the two runs draw other
+values:
+
+- (a) a helper named like a test module or a strategy file, outside the rootdir
+  and the testpaths, not in a regular package (its folder has no `__init__.py`),
+  imported by its name: `pytest -c pytest.ini ../other`, run in `proj/`, collects
+  `../other/test_b.py` and keys it by its path; the run of one node ID in
+  `../other/test_a.py`, which does `from test_b import port`, does not collect it
+  and keys it by its module's name;
+- (b) a regular package's module that `sys.modules` holds only under a longer
+  namespace-package name, such as a strategy file `ns/acme/strategies.py` that a
+  `conftest.py` imports as `ns.acme.strategies`;
+- (c) with `consider_namespace_packages = true`, (a) also holds for a regular
+  package's module outside the rootdir and the testpaths: `acme/test_utils.py`
+  next to a rootdir in `tests/` is keyed by its path in `pytest -c
+  tests/pytest.ini` from the project, which collects `acme/`, and by its name in
+  `pytest` from `tests/`.
+
+Listing such a folder in `testpaths` keys its files by their paths in every run.
 
 A fixture's definition and base are in its key because pytest sets up several
 fixtures of one name for the same scope node: an override that requests the

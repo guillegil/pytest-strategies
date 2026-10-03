@@ -115,22 +115,28 @@ def export_strategies(*, format: str = "json") -> str:
     the plugin imports by its path, the file's folder relative to the rootdir.
     Such a file is one inside the rootdir or below a ``testpaths`` entry, whatever
     the command line names, or one the session imported by its path (a test
-    module collected from a folder named on the command line), unless it is a
-    module of a regular package that ``sys.modules`` holds under its package name
-    (``acme.strategies``, the name pytest imports it under in every import mode).
+    module collected from a folder named on the command line), unless, with
+    ``consider_namespace_packages`` false (pytest's default), it is a module of a
+    regular package that ``sys.modules`` holds under its package name
+    (``acme.strategies``, the name pytest then imports it under in every import
+    mode).
     A module named like one elsewhere (a library's ``extacme/strategies.py`` on
     ``sys.path``) is keyed by its module's name, and so is every module outside a
     session, unless ``sys.modules`` does not have it under that name (then its
     folder's absolute path). ``""`` when the factory's code has neither a file nor
     a module.
 
-    Two limitations follow (docs/dev.md): a package module named like a strategy
-    file or a test module inside the rootdir (``src/acme/strategies.py``) is keyed
-    by its folder in a checkout and by its module's name installed, so the two
-    draw other values (renaming it avoids that); and a helper module named like
-    one outside the rootdir and the testpaths, not in a regular package and
-    imported by its name, is keyed by its folder in a run that collects its folder
-    and by its module's name in a run that does not.
+    Limitations follow (docs/dev.md): a package module named like a strategy file
+    or a test module inside the rootdir (``src/acme/strategies.py``) is keyed by
+    its folder in a checkout and by its module's name installed, so the two draw
+    other values (renaming it avoids that). And outside the rootdir and the
+    testpaths, these are keyed by their folder in a run that collects it and by
+    their module's name in a run that does not: (a) a helper named like one, not
+    in a regular package, imported by its name; (b) a regular package's module
+    that ``sys.modules`` holds only under a longer namespace-package name
+    (``ns.acme.strategies``); (c) with ``consider_namespace_packages = true``,
+    also a regular package's module imported by its name. Listing the folder in
+    ``testpaths`` keys them by their folder in every run.
 
     Args:
         format: Export format (currently only "json" is supported), keyword-only

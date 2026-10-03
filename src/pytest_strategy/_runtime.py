@@ -90,8 +90,9 @@ class SessionState:
         # normalized real path: the test modules pytest collected, the conftest.py
         # files it loaded and the strategy files the plugin loaded. A file named like
         # one outside the rootdir and the testpaths is keyed by its path in a fixture's
-        # or an export's stream only when it is here and is not a regular package's
-        # module held under its package name (_registry.source_part).
+        # or an export's stream only when it is here and is not, without
+        # consider_namespace_packages, a regular package's module held under its
+        # package name (_registry.source_part).
         self.imported_files: set[str] = set()
         # Where a lookup stops going up: the rootdir and the search paths
         self.ceilings: set[str] | None = None

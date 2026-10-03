@@ -1456,10 +1456,11 @@ def _fixture_definition(func: Callable[..., Any], config: Config | None) -> tupl
     mode or checked out next to the tests, unless the module's file is named like
     a test module or a strategy file (``test_utils.py``) and is inside the rootdir,
     below a testpaths entry or imported by its path in the session, which keys it
-    by its path (``definition_part``); a regular package's module that pytest
-    imported under its package name (``acme.test_utils``) keeps that name. One
-    whose code has no file (``exec``'d code) is named by its module too: its file
-    would resolve against the working directory.
+    by its path (``definition_part``); without ``consider_namespace_packages``, a
+    regular package's module that pytest imported under its package name
+    (``acme.test_utils``) keeps that name. One whose code has no file (``exec``'d
+    code) is named by its module too: its file would resolve against the working
+    directory.
     """
     return (definition_part(func, config), factory_source(func)[1] or "")
 
@@ -1467,15 +1468,17 @@ def _fixture_definition(func: Callable[..., Any], config: Config | None) -> tupl
 def definition_part(fn: Callable[..., Any], config: Config | None, *, folder: bool = False) -> str:
     """
     Return ``source_part()`` of a fixture or a factory for the session of ``config``:
-    relative to its rootdir, with its ``python_files`` patterns, its testpaths and,
-    for the active session's config, the files pytest and the plugin imported by
-    their paths in it (``SessionState.imported_files``). A ``conftest.py``, a test
-    module or a strategy file is keyed by its path inside the rootdir, below a
-    testpaths entry, or when this session imported it by its path and it is not a
-    regular package's module that ``sys.modules`` holds under its package name;
-    elsewhere (a library on ``sys.path`` with ``acme/strategies.py``) by the rules
-    of any other module, which give its module's name when ``sys.modules`` has it
-    under that name.
+    relative to its rootdir, with its ``python_files`` patterns, its testpaths, its
+    ``consider_namespace_packages`` value (True without a config) and, for the
+    active session's config, the files pytest and the plugin imported by their
+    paths in it (``SessionState.imported_files``). A ``conftest.py``, a test module
+    or a strategy file is keyed by its path inside the rootdir, below a testpaths
+    entry, or when this session imported it by its path, unless, with
+    ``consider_namespace_packages`` false, it is a regular package's module that
+    ``sys.modules`` holds under its package name; elsewhere (a library on
+    ``sys.path`` with ``acme/strategies.py``) by the rules of any other module,
+    which give its module's name when ``sys.modules`` has it under that name. The
+    limitations this leaves are in ``source_part()``.
     """
     state = runtime.current
     imported = (
@@ -1490,7 +1493,20 @@ def definition_part(fn: Callable[..., Any], config: Config | None, *, folder: bo
         test_files=test_file_patterns(config),
         testpaths=_ini_testpaths(config),
         imported=imported,
+        namespace_packages=_namespace_packages(config),
     )
+
+
+def _namespace_packages(config: Config | None) -> bool:
+    """
+    The ``consider_namespace_packages`` ini value of ``config``, or True without a
+    config, or for one that does not have it (a unit test's stand-in).
+    """
+    try:
+        value = config.getini("consider_namespace_packages") if config is not None else True
+    except (AttributeError, ValueError):
+        return True
+    return value if isinstance(value, bool) else True
 
 
 def _testpaths(config: Config) -> list[Path]:

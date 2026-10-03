@@ -1002,6 +1002,7 @@ def _ini_config(rootpath, **ini):
         "python_files": ["test_*.py", "*_test.py"],
         "testpaths": [],
         "norecursedirs": ["*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules", "venv"],
+        "consider_namespace_packages": False,
         **ini,
     }
     return SimpleNamespace(rootpath=rootpath, getini=values.__getitem__)
@@ -1352,10 +1353,11 @@ class TestFixtureDefinition:
         """
         A module of a regular package outside the rootdir and the testpaths that the
         session imported by its path (pytest collected its folder, as pytest .
-        ../acme does from a rootdir in tests/): pytest 8 and 9 import it under its
-        package name, the dotted name of the folders with an __init__.py above it,
-        in every import mode, the name another module's import gives it, so it
-        keeps that name in the runs that collect it and in those that do not.
+        ../acme does from a rootdir in tests/): without consider_namespace_packages
+        (source_part's default), pytest 8 and 9 import it under its package name,
+        the dotted name of the folders with an __init__.py above it, in every import
+        mode, the name another module's import gives it, so it keeps that name in
+        the runs that collect it and in those that do not.
         """
         for folder in folders:
             (tmp_path / folder).mkdir(parents=True, exist_ok=True)

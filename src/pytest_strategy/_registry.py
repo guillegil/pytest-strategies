@@ -97,6 +97,7 @@ def source_part(
     test_files: Sequence[str] = TEST_FILE_PATTERNS,
     testpaths: Iterable[str | os.PathLike[str]] = (),
     imported: Collection[str] = frozenset(),
+    namespace_packages: bool = False,
 ) -> str:
     """
     Return where a function or a factory is defined, as a part of a random stream's
@@ -114,14 +115,17 @@ def source_part(
       real path is in ``imported``, the files that pytest or the plugin imported
       by their paths in this session (the test modules pytest collected, the
       ``conftest.py`` files it loaded and the strategy files the plugin loaded;
-      empty outside a session), unless it is a module of a regular package that
-      ``sys.modules`` holds under its package name, the dotted name of the folders
-      with an ``__init__.py`` above it (``acme.test_utils``), which is the name
-      pytest imports it under in every import mode and another module's import
-      gives it. Elsewhere a file with such a name is a module of a library on
-      ``sys.path`` (an editable install's, ``PYTHONPATH``'s, a ``pip install``
-      target folder's) or of a package, and the rules below apply to it as to any
-      module.
+      empty outside a session). Without ``namespace_packages`` (the session's
+      ``consider_namespace_packages``, false by default), the last condition does
+      not hold for a module of a regular package that ``sys.modules`` holds under
+      its package name, the dotted name of the folders with an ``__init__.py``
+      above it (``acme.test_utils``), which pytest then imports it under in every
+      import mode and another module's import gives it; with it, pytest names such
+      a module from ``sys.path``, which depends on the launcher, the working
+      directory and ``--import-mode``, so the condition holds. Elsewhere a file
+      with such a name is a module of a library on ``sys.path`` (an editable
+      install's, ``PYTHONPATH``'s, a ``pip install`` target folder's) or of a
+      package, and the rules below apply to it as to any module.
     - The name of its module, for a module imported by that name: an installed
       package's (in a site-packages or dist-packages folder, also when it is named
       like a test module), an editable install's (whose file is in a source tree,
@@ -135,17 +139,17 @@ def source_part(
       ``exec``'d code, which would resolve against the working directory); ``""``
       without a module either.
 
-    Two limitations remain. A package module named like a test module or a
+    Limitations (docs/dev.md): a package module named like a test module or a
     strategy file inside the rootdir (``src/acme/test_utils.py``) keeps its path
     in a checkout and has its module's name installed, so the two draw different
-    values; renaming it avoids that. And a helper module named like one outside
-    the rootdir and the testpaths that is not in a regular package (its folder has
-    no ``__init__.py``) and is imported by its name (``from test_b import port``)
-    is keyed by its path in a run that collects its folder, where pytest imports it
-    by its path under a name derived from the path, and by its module's name in a
-    run that does not. So is a regular package's module that ``sys.modules`` holds
-    only under another name than its package name (a namespace package's name
-    above it).
+    values; renaming it avoids that. And outside the rootdir and the testpaths,
+    these are keyed by their paths in a run that collects their folder and by
+    their module's names in a run that does not: (a) a helper named like one, not
+    in a regular package, imported by its name (``from test_b import port``); (b)
+    a regular package's module that ``sys.modules`` holds only under a longer
+    namespace-package name (``ns.acme.strategies``); (c) with
+    ``namespace_packages``, also a regular package's module imported by its name.
+    Listing the folder in testpaths keys them by their paths in every run.
 
     Args:
         fn: The function, factory, partial or callable object
@@ -155,6 +159,7 @@ def source_part(
         testpaths: The session's ``testpaths`` entries, as folders
         imported: The normalized real paths (``os.path.normcase(os.path.realpath())``)
             of the files pytest or the plugin imported by their paths in this session
+        namespace_packages: The session's ``consider_namespace_packages`` value
     """
     source = factory_source(fn)[0]
     # The module of what factory_source() read, through wrappers and partials (a
@@ -167,7 +172,9 @@ def source_part(
         source
         and os.path.isfile(source)
         and INSTALLED_FOLDERS.isdisjoint(PurePath(source).parts)
-        and not _imported_by_name(source, module, rootpath, test_files, testpaths, imported)
+        and not _imported_by_name(
+            source, module, rootpath, test_files, testpaths, imported, namespace_packages
+        )
     ):
         return path_part(os.path.dirname(source) if folder else source, rootpath)
     return module
@@ -180,6 +187,7 @@ def _imported_by_name(
     test_files: Sequence[str],
     testpaths: Iterable[str | os.PathLike[str]],
     imported: Collection[str],
+    namespace_packages: bool,
 ) -> bool:
     """
     Whether the module ``module`` of the file ``source`` is keyed by its name (see
@@ -191,7 +199,7 @@ def _imported_by_name(
         or any(
             matches_pattern(pattern, source) for pattern in (*STRATEGY_FILE_PATTERNS, *test_files)
         )
-    ) and _imported_by_path(source, rootpath, testpaths, imported):
+    ) and _imported_by_path(source, rootpath, testpaths, imported, namespace_packages):
         return False
     loaded = sys.modules.get(module) if module else None
     file = getattr(loaded, "__file__", None)
@@ -219,12 +227,14 @@ def _imported_by_path(
     rootpath: str | os.PathLike[str] | None,
     testpaths: Iterable[str | os.PathLike[str]],
     imported: Collection[str],
+    namespace_packages: bool,
 ) -> bool:
     """
     Whether a file named like a ``conftest.py``, a test module or a strategy file
     is one that pytest or the plugin imports by its path (see :func:`source_part`):
     inside the rootdir or below a testpaths entry, by its real path or as it is
-    spelled, or imported by its path in this session, unless it is a module of a
+    spelled, or imported by its path in this session, unless, without
+    ``namespace_packages`` (``consider_namespace_packages``), it is a module of a
     regular package that ``sys.modules`` holds under its package name
     (:func:`_held_under_package_name`).
     """
@@ -237,10 +247,12 @@ def _imported_by_path(
         }:
             if _contains(folder, real) or _contains(folder, spelled):
                 return True
-    # pytest imports a regular package's module under its package name in every
-    # import mode, the name another module's import gives it: keyed by that name, it
-    # draws the same in a run that collects its folder and in one that does not
-    return real in imported and not _held_under_package_name(source)
+    # Without consider_namespace_packages, pytest imports a regular package's module
+    # under its package name in every import mode, the name another module's import
+    # gives it: keyed by that name, it draws the same in a run that collects its
+    # folder and in one that does not. With it, pytest names the module from
+    # sys.path, which depends on the run, so its path keys it
+    return real in imported and (namespace_packages or not _held_under_package_name(source))
 
 
 def _held_under_package_name(source: str) -> bool:
@@ -252,12 +264,16 @@ def _held_under_package_name(source: str) -> bool:
     ``acme/__init__.py``), the chain ``_pytest.pathlib.resolve_package_path()``
     finds. The chain is read from the path as it is spelled and from the real path.
 
-    pytest 8.4 and 9 import such a module under that name in the prepend, append
-    and importlib import modes, so the name does not depend on the mode or the
-    run. A module that pytest imports under another name (a namespace package's
-    name above the chain, with ``consider_namespace_packages``) and a module
-    outside a regular package (a rootless basename under prepend and append, a
-    name importlib makes from its path) are not held under it.
+    With ``consider_namespace_packages`` false (pytest's default), pytest 8.4 and
+    9 import such a module under that name in the prepend, append and importlib
+    import modes, so the name does not depend on the mode or the run. With it
+    true, pytest names the module from ``sys.path`` (a namespace package's name
+    above the chain, or one importlib makes from its path), which depends on the
+    launcher, the working directory and the mode, so :func:`_imported_by_path`
+    does not use this check then. A module that ``sys.modules`` holds under
+    another name and a module outside a regular package (a rootless basename
+    under prepend and append, a name importlib makes from its path) are not held
+    under it.
     """
     real = _normalize(source)
     for path in {os.path.abspath(source), os.path.realpath(source)}:

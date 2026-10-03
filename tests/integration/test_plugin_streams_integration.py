@@ -17,6 +17,8 @@ import json
 import os
 import random
 import shutil
+import subprocess
+import sys
 from textwrap import dedent
 
 import pytest
@@ -1018,8 +1020,8 @@ def test_a_packages_fixture_draws_the_same_installed_or_next_to_the_rootdir(pyte
     name begins next to the rootdir, not with its folder or one above it. A module
     there named like a test module or a strategy file is outside the rootdir and
     the testpaths, so it has its module's name too: these runs do not collect its
-    folder, and a run that does imports it under that same package name (see the
-    next test).
+    folder, and a run that does imports it under that same package name without
+    consider_namespace_packages (see the next tests).
     """
     draws = run_package_project(pytester, "flat", name)
 
@@ -1058,9 +1060,10 @@ def test_a_package_module_next_to_a_rootdir_in_tests_draws_the_same_in_every_run
     whose tests/conftest.py imports acme_ps/test_utils.py and acme_ps/strategies.py:
     the runs that do not collect acme_ps/ and those that do (-c tests/pytest.ini
     from the project, which collects the project, and pytest . ../acme_ps with or
-    without --doctest-modules) draw the same, because pytest imports a regular
-    package's module under its package name, acme_ps.test_utils, in every import
-    mode, and the session's recording of it does not replace that name with its path.
+    without --doctest-modules) draw the same, because without
+    consider_namespace_packages pytest imports a regular package's module under
+    its package name, acme_ps.test_utils, in every import mode, and the session's
+    recording of it does not replace that name with its path.
     """
     proj = pytester.path
     (proj / "ps_draws.py").write_text(dedent(DRAWS))
@@ -1100,6 +1103,136 @@ def test_a_package_module_next_to_a_rootdir_in_tests_draws_the_same_in_every_run
         "export": str(randint(export)),
         "strategies": str(randint(strategies)),
     }
+    assert draws == [expected] * len(runs)
+
+
+NAMESPACE_STRATEGIES = """
+    from pytest_strategy import Parameter, TestArg, register
+
+    @register("ps_ns_acme")
+    def acme_rows(rng):
+        return Parameter(TestArg("e", value=rng.randint(0, 10**9)), nsamples=1)
+"""
+
+NAMESPACE_TESTS = """
+    import json
+    import pathlib
+
+    import pytest
+
+    from pytest_strategy import RNG, export_strategies
+
+    @pytest.fixture(scope="session")
+    def drawn():
+        return RNG.integer(0, 10**9)
+
+    def test_ns(request, drawn):
+        exported = json.loads(export_strategies())
+        found = {
+            "test": request.node.nodeid,
+            "fixture": drawn,
+            "export": exported["ps_ns_acme"]["arguments"][0]["static_value"],
+        }
+        with open(pathlib.Path.cwd() / "draws.jsonl", "a") as out:
+            for label, value in found.items():
+                out.write(json.dumps([label, value]) + "\\n")
+"""
+
+# What the pytest console script runs, from a folder of its own (sys.path[0])
+CONSOLE_SCRIPT = """
+    import sys
+
+    from pytest import console_main
+
+    sys.exit(console_main())
+"""
+
+
+def run_launched(launcher, cwd, *args):
+    """
+    Run pytest with the command ``launcher`` in ``cwd`` and return what it drew.
+
+    pytester's runs put their working directory on PYTHONPATH, which would hide
+    the difference between the console script (its own folder on sys.path) and
+    python -m pytest (the working directory on sys.path), so this runs pytest in
+    this process's environment.
+    """
+    done = subprocess.run(
+        [*launcher, "-p", "no:cacheprovider", f"--rng-seed={SEED}", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    return read_draws(cwd)
+
+
+@pytest.mark.parametrize("pair", ["launcher", "cwd", "import-mode"])
+def test_with_namespace_packages_a_recorded_package_module_keeps_its_path(pytester, pair):
+    """
+    With consider_namespace_packages = true, pytest names a regular package's
+    module after the folders on sys.path: ns/acme_ns/test_ns.py (ns/ has no
+    __init__.py), next to a rootdir in tests/, is ns.acme_ns.test_ns when python
+    -m pytest runs in the project folder, which it puts on sys.path, and
+    acme_ns.test_ns from the console script or from tests/; with a conftest.py in
+    ns/, --import-mode=importlib names it from its whole path. With that option,
+    rule 3 keys a module the session imported by its path by its path also in a
+    regular package, so each pair draws one value: the launcher (the console
+    script or python -m pytest, -c tests/pytest.ini from the project), the working
+    directory (python -m pytest . ../ns from tests/, or -c tests/pytest.ini tests
+    ns from the project) and --import-mode (. ../ns from tests/, with a
+    conftest.py in ns/).
+    """
+    proj = pytester.mkdir("proj")
+    tests = proj / "tests"
+    tests.mkdir()
+    (tests / "pytest.ini").write_text("[pytest]\nconsider_namespace_packages = true\n")
+    (tests / "test_inside.py").write_text("def test_inside():\n    pass\n")
+    package = proj / "ns" / "acme_ns"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "strategies.py").write_text(dedent(NAMESPACE_STRATEGIES))
+    (package / "test_ns.py").write_text(dedent(NAMESPACE_TESTS))
+    script = pytester.mkdir("bin") / "pytest_script.py"
+    script.write_text(dedent(CONSOLE_SCRIPT))
+    console, module = [sys.executable, str(script)], [sys.executable, "-m", "pytest"]
+    modes = ["prepend", "append", "importlib"]
+    if pair == "launcher":
+        runs = [
+            (launcher, proj, [f"--import-mode={mode}", "-c", "tests/pytest.ini"])
+            for mode in modes
+            for launcher in (console, module)
+        ]
+    elif pair == "cwd":
+        runs = [
+            run
+            for mode in modes
+            for run in (
+                (module, tests, [f"--import-mode={mode}", ".", "../ns"]),
+                (module, proj, [f"--import-mode={mode}", "-c", "tests/pytest.ini", "tests", "ns"]),
+            )
+        ]
+    else:
+        (proj / "ns" / "conftest.py").write_text("")
+        runs = [(module, tests, [f"--import-mode={mode}", ".", "../ns"]) for mode in modes]
+
+    draws = [run_launched(launcher, cwd, *args) for launcher, cwd, args in runs]
+
+    test = draws[0]["test"]
+    fixture = StreamKey.root(
+        SEED,
+        "fixture",
+        "",
+        "drawn",
+        0,
+        "../ns/acme_ns/test_ns.py",
+        "drawn",
+        test.partition("::")[0],
+    )
+    export = StreamKey.root(SEED, "export", "ps_ns_acme", "../ns/acme_ns")
+    expected = {"test": test, "fixture": randint(fixture), "export": str(randint(export))}
     assert draws == [expected] * len(runs)
 
 
@@ -1345,8 +1478,9 @@ def test_a_helper_named_like_a_test_module_outside_the_rootdir(pytester, package
     the rootdir and the testpaths, which the folder's conftest.py imports by its
     module's name: the run of the folder collects it, and the run of a node ID does
     not. In a regular package (other/__init__.py), pytest imports it under its
-    package name, other.test_helpers, in every import mode, so both runs key it by
-    that name, as they do the package's conftest.py, test module and strategy file.
+    package name, other.test_helpers, in every import mode (without
+    consider_namespace_packages), so both runs key it by that name, as they do the
+    package's conftest.py, test module and strategy file.
     In a folder that is not a package, pytest imports a collected file under a name
     it derives from the path (its basename, or importlib's name), so the session's
     recording keys it by its path: the run of the folder keys it by its path and
