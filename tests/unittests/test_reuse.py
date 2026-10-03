@@ -18,6 +18,7 @@ from pytest_strategy._reuse import (
     LASTFAILED,
     STEPWISE,
     Entry,
+    Outside,
     Reuse,
     cache_of,
     commands,
@@ -35,6 +36,7 @@ from pytest_strategy.plugin import (
     _plugin_instance,
     _read_failed_seeds,
     _record_failed_seeds,
+    _uncollected_lines,
 )
 
 NODE_A = "tests/a/test_w.py::test_w[rand-1]"
@@ -482,6 +484,101 @@ class TestPlan:
         assert self.lf(tmp_path, values, "other") is None
 
 
+class TestPlanOutsideTheRootdir:
+    """
+    ``-c ci/pytest.ini`` makes ``ci`` the rootdir: pytest names a test file outside
+    it from the path the run started from that contains it.
+    """
+
+    OUT_A = "tests/a/test_w.py::test_w[rand-1]"
+    OUT_B = "tests/b/test_w.py::test_w[rand-2]"
+    IN = "test_in.py::test_in[rand-3]"
+    CI = ("-c", "ci/pytest.ini")
+
+    def lf(self, root, values, *args):
+        """The plan of a --lf run started in ``root`` with ``root/ci`` as the rootdir."""
+        (root / "ci").mkdir(exist_ok=True)
+        return plan(config(root / "ci", Cache(values), args, invocation=root, lf=True))
+
+    def test_a_file_named_from_the_folder_pytest_runs_in(self, tmp_path):
+        files(tmp_path, self.OUT_A)
+        values = {KEY: entries((self.OUT_A, 1, self.CI)), LASTFAILED: {self.OUT_A: True}}
+
+        assert self.lf(tmp_path, values) == Reuse(
+            flag="--lf",
+            seed=1,
+            rows={self.OUT_A: Entry(1, self.CI)},
+            others={},
+            failed=frozenset({self.OUT_A}),
+            outside={self.OUT_A: Outside(".", frozenset({self.OUT_A}))},
+        )
+
+    def test_a_file_named_from_a_folder_on_the_command_line(self, tmp_path):
+        files(tmp_path, self.OUT_A)
+        nodeid = "a/test_w.py::test_w[rand-1]"
+        values = {KEY: entries((nodeid, 1, self.CI)), LASTFAILED: {nodeid: True}}
+
+        reuse = self.lf(tmp_path, values, "tests")
+
+        assert (reuse.seed, list(reuse.rows)) == (1, [nodeid])
+        assert reuse.outside == {nodeid: Outside("tests", frozenset({nodeid}))}
+
+    @pytest.mark.parametrize("names", ["", "::test_w"], ids=["file", "test"])
+    def test_a_file_on_the_command_line(self, tmp_path, names):
+        files(tmp_path, self.OUT_A)
+        # pytest names the file itself by nothing
+        nodeid = "::test_w[rand-1]"
+        other = "::test_other[rand-1]"
+        values = {
+            KEY: entries((nodeid, 1, self.CI), (other, 2, self.CI)),
+            LASTFAILED: {nodeid: True, other: True},
+        }
+        arg = str(Path("tests", "a", "test_w.py")) + names
+
+        reuse = self.lf(tmp_path, values, arg)
+
+        # test_w selects only its own rows
+        assert (reuse.seed, list(reuse.rows)) == ((2, [other]) if not names else (1, [nodeid]))
+        assert reuse.outside[nodeid].start == arg
+
+    def test_an_entry_whose_file_was_deleted_is_ignored(self, tmp_path):
+        files(tmp_path, self.OUT_A)
+        values = {
+            KEY: entries((self.OUT_A, 1, self.CI), (self.OUT_B, 2, self.CI)),
+            LASTFAILED: {self.OUT_A: True, self.OUT_B: True},
+        }
+
+        reuse = self.lf(tmp_path, values)
+
+        assert (reuse.seed, list(reuse.rows), reuse.others) == (1, [self.OUT_A], {})
+
+    def test_a_node_id_named_from_another_start_is_not_kept(self, tmp_path):
+        files(tmp_path, self.OUT_A)
+        values = {KEY: entries((self.OUT_A, 1, self.CI)), LASTFAILED: {self.OUT_A: True}}
+
+        # Started from tests/a, pytest names the file test_w.py
+        assert self.lf(tmp_path, values, str(Path("tests", "a"))) is None
+
+    def test_rows_inside_and_outside_under_two_seeds(self, tmp_path):
+        files(tmp_path, self.OUT_A, self.OUT_B, "ci/" + self.IN)
+        plain = "tests/b/test_w.py::test_plain"
+        values = {
+            KEY: entries((self.OUT_A, 1, self.CI), (self.OUT_B, 1, self.CI), (self.IN, 2, self.CI)),
+            LASTFAILED: {self.OUT_A: True, self.OUT_B: True, self.IN: True, plain: True},
+        }
+
+        reuse = self.lf(tmp_path, values)
+
+        assert (reuse.seed, list(reuse.rows), list(reuse.others)) == (
+            2,
+            [self.IN],
+            [self.OUT_A, self.OUT_B],
+        )
+        # The test in ci is the rootdir's: named from the rootdir
+        start = Outside(".", frozenset({self.OUT_A, self.OUT_B, plain}), frozenset({self.IN}))
+        assert reuse.outside == {self.OUT_A: start, self.OUT_B: start}
+
+
 class TestDifferences:
     def rows(self, *options):
         return [Entry(1, tuple(o)) for o in options]
@@ -630,6 +727,108 @@ class TestCommands:
         )
 
 
+class TestCommandsOutsideTheRootdir:
+    OUT_A = TestPlanOutsideTheRootdir.OUT_A
+    OUT_B = TestPlanOutsideTheRootdir.OUT_B
+    IN = TestPlanOutsideTheRootdir.IN
+
+    def test_they_start_from_the_run_s_path_and_leave_out_the_other_failed_tests(self):
+        found = Outside(".", frozenset({self.OUT_A, self.OUT_B}), frozenset({self.IN}))
+
+        (command,) = commands(
+            "--lf",
+            [(self.OUT_A, Entry(1, ("-c", "ci/pytest.ini")))],
+            {self.OUT_A, self.OUT_B, self.IN},
+            lambda path: f"ci/{path}",
+            {self.OUT_A: found},
+        )
+
+        # pytest's --lf would skip the files outside the rootdir once it collected
+        # the one inside it that holds a failed test: that file is ignored
+        assert command == (
+            "pytest --lf --rng-seed=1 -c ci/pytest.ini . --ignore ci/test_in.py "
+            f"--deselect {quote(self.OUT_B)}",
+            1,
+        )
+
+    def test_a_failed_test_whose_node_id_starts_one_of_theirs_is_not_deselected(self):
+        plain = "tests/a/test_w.py::test_w"
+        found = Outside(".", frozenset({self.OUT_A, plain}))
+
+        (command,) = commands("--lf", [(self.OUT_A, Entry(1, ()))], (), str, {self.OUT_A: found})
+
+        assert command == ("pytest --lf --rng-seed=1 .", 1)
+
+    def test_rows_inside_and_outside_of_one_seed_get_a_command_each(self):
+        found = Outside(".", frozenset({self.OUT_A}), frozenset({self.IN}))
+        rows = [(self.OUT_A, Entry(1, ())), (self.IN, Entry(1, ())), (self.OUT_B, Entry(1, ()))]
+        outside = {self.OUT_A: found, self.OUT_B: Outside("tests", frozenset({self.OUT_B}))}
+
+        assert commands("--lf", rows, (), str, outside) == [
+            ("pytest --lf --rng-seed=1 . tests --ignore test_in.py", 2),
+            ("pytest --lf --rng-seed=1 test_in.py", 1),
+        ]
+
+
+class TestUncollectedLines:
+    def state(self, collected=()):
+        state = SessionState()
+        state.reuse = Reuse(
+            flag="--lf",
+            seed=3,
+            rows={NODE_A: Entry(3, ()), NODE_B: Entry(3, ("--nsamples=13",))},
+            others={NODE_C: Entry(1, ())},
+            failed=frozenset({NODE_A, NODE_B, NODE_C}),
+        )
+        state.reused = set(state.reuse.rows)
+        state.reused_collected = set(collected)
+        return state
+
+    def config(self, dist="no"):
+        root = Path("/project")
+        stand_in = Namespace(
+            rootpath=root, invocation_params=Namespace(dir=root), option=Namespace(dist=dist)
+        )
+        stand_in.cwd_relative_nodeid = partial(pytest.Config.cwd_relative_nodeid, stand_in)
+        return stand_in
+
+    def test_the_command_of_each_reused_row_not_collected(self):
+        lines = _uncollected_lines(self.state([NODE_A]), self.config())
+
+        assert lines == [
+            "pytest-strategies: 1 failed row recorded under the reused seed was not collected; "
+            "unless deleted or renamed, run it with:",
+            f"  pytest --lf --rng-seed=3 --nsamples=13 {quote(NODE_B)}  # 1 row",
+        ]
+
+    def test_none_collected(self):
+        lines = _uncollected_lines(self.state(), self.config())
+
+        assert lines == [
+            "pytest-strategies: 2 failed rows recorded under the reused seed were not "
+            "collected; unless deleted or renamed, run them with:",
+            "  pytest --lf --rng-seed=3 tests/a/test_w.py  # 1 row",
+            f"  pytest --lf --rng-seed=3 --nsamples=13 {quote(NODE_B)}  # 1 row",
+        ]
+
+    def test_nothing_when_all_were_collected(self):
+        assert _uncollected_lines(self.state([NODE_A, NODE_B]), self.config()) == []
+
+    def test_nothing_without_reuse(self):
+        assert _uncollected_lines(SessionState(), self.config()) == []
+
+    def test_under_xdist_the_rows_the_workers_collected(self):
+        state = self.state()
+        state.worker_reuse = {"gw0": {"collected": [NODE_A]}, "gw1": {"collected": ["x", 3]}}
+
+        lines = _uncollected_lines(state, self.config("load"))
+
+        assert lines[1:] == [f"  pytest --lf --rng-seed=3 --nsamples=13 {quote(NODE_B)}  # 1 row"]
+
+    def test_under_xdist_nothing_when_no_worker_said(self):
+        assert _uncollected_lines(self.state(), self.config("load")) == []
+
+
 class TestDeselectedLines:
     def state(self):
         state = SessionState()
@@ -691,6 +890,7 @@ class TestPluginState:
         stand_in = config(tmp_path, Cache({KEY: entries((NODE_A, 7, []))}))
         stand_in.workerinput = {
             "pytest_strategies_deselect": [NODE_B],
+            "pytest_strategies_reused": [NODE_A],
             "pytest_strategies_recorded": [NODE_C],
         }
         state = SessionState()
@@ -698,17 +898,48 @@ class TestPluginState:
 
         _read_failed_seeds(stand_in, state)
 
-        assert (state.deselect, state.recorded) == ({NODE_B}, {NODE_C})
+        assert (state.deselect, state.reused, state.recorded) == ({NODE_B}, {NODE_A}, {NODE_C})
 
     def test_the_rows_recorded_under_the_run_s_seed(self, tmp_path):
         cache = Cache({KEY: entries((NODE_A, 7, []), (NODE_B, 8, []), (NODE_C, 7, ["-x"]))})
         state = SessionState()
         state.run_seed = 7
-        state.reuse = Reuse("--lf", 7, {}, {NODE_B: Entry(8, ())})
+        state.reuse = Reuse("--lf", 7, {NODE_A: Entry(7, ())}, {NODE_B: Entry(8, ())})
 
         _read_failed_seeds(config(tmp_path, cache), state)
 
-        assert (state.deselect, state.recorded) == ({NODE_B}, {NODE_A, NODE_C})
+        assert (state.deselect, state.reused, state.recorded) == (
+            {NODE_B},
+            {NODE_A},
+            {NODE_A, NODE_C},
+        )
+
+    def test_without_reuse_the_rows_recorded_under_the_run_s_seed(self, tmp_path):
+        # A run with --rng-seed, such as the printed pytest --lf --rng-seed=S1 ...:
+        # its rows leave the map when they pass too
+        cache = Cache({KEY: entries((NODE_A, 7, []), (NODE_B, 8, []), (NODE_C, 7, ["-x"]))})
+        state = SessionState()
+        state.run_seed = 7
+
+        _read_failed_seeds(config(tmp_path, cache), state)
+
+        assert (state.deselect, state.reused, state.recorded) == (set(), set(), {NODE_A, NODE_C})
+
+    def test_collection_notes_the_reused_rows_it_collected(self, tmp_path):
+        stand_in = config(tmp_path)
+        stand_in.hook = Namespace(pytest_deselected=lambda items: None)
+        items = [Namespace(nodeid=nodeid) for nodeid in (NODE_A, NODE_B, "other")]
+        state = runtime.push(stand_in)
+        try:
+            state.reused = {NODE_A, NODE_C}
+            state.deselect = {NODE_B}
+
+            _plugin_instance.pytest_collection_modifyitems_reuse(stand_in, items)
+        finally:
+            runtime.pop()
+
+        assert state.reused_collected == {NODE_A}
+        assert [item.nodeid for item in items] == [NODE_A, "other"]
 
     def test_nothing_without_a_cache(self, tmp_path):
         state = SessionState()
@@ -768,6 +999,7 @@ class TestPluginState:
             state.run_seed = 7
             state.failed_rows = {NODE_A: row(7)}
             state.passed_rows = {NODE_B: ()}
+            state.reused_collected = {NODE_C}
 
             _plugin_instance.pytest_sessionfinish(
                 Namespace(config=stand_in, items=[], exitstatus=0)
@@ -775,5 +1007,8 @@ class TestPluginState:
         finally:
             runtime.pop()
 
-        assert stand_in.workeroutput["pytest_strategies_reuse"] == {"passed": {NODE_B: []}}
+        assert stand_in.workeroutput["pytest_strategies_reuse"] == {
+            "passed": {NODE_B: []},
+            "collected": [NODE_C],
+        }
         assert (cache.writes, json.loads(cache.values[KEY])) == (0, entries((NODE_B, 7, [])))

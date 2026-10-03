@@ -19,12 +19,15 @@ pytest's own last-failed set (``cache/lastfailed``) or the test ``--sw`` resumes
 from (``cache/stepwise``), keeps the entries of those node IDs whose file still
 exists and that the run collects (the paths and node IDs on the command line, or
 else the testpaths or the folder pytest was started in), and seeds from the newest
-one: its rows run with the values they failed with. ``-k`` and ``-m`` are applied
-only once the tests are collected, after the seed is chosen. The rows recorded
-under another seed are deselected, which leaves them in pytest's last-failed set,
-and the terminal summary gives a ``pytest --lf --rng-seed=S ...`` command that
-reruns only them. The options are not applied: the header line that says the seed
-was reused names the recorded ones that differ from the run's.
+one: its rows run with the values they failed with. A node ID names its file as
+pytest does: from the rootdir, or for a file outside the rootdir (``-c
+ci/pytest.ini`` makes ``ci`` the rootdir), from the path the run started from that
+contains it. ``-k`` and ``-m`` are applied only once the tests are collected, after
+the seed is chosen. The rows recorded under another seed are deselected, which
+leaves them in pytest's last-failed set, and the terminal summary gives a ``pytest
+--lf --rng-seed=S ...`` command that reruns only them. The options are not
+applied: the header line that says the seed was reused names the recorded ones
+that differ from the run's.
 """
 
 from __future__ import annotations
@@ -39,7 +42,7 @@ from typing import Any
 import pytest
 
 from ._options import constraint_off_item, parse_constraint_off
-from ._repro import quote
+from ._repro import quote, start_args
 
 # The cache key of the map
 KEY = "pytest-strategies/failed-seeds"
@@ -53,6 +56,10 @@ _PAIRED = ("-o", "-c")
 
 # The --strategy-constraint-off option of a rerun command, as one argument
 _OFF = "--strategy-constraint-off="
+
+# What gives failed rows a command of their own: their seed, the units of their
+# options but --strategy-constraint-off, and whether they are outside the rootdir
+_Group = tuple[int, tuple[tuple[str, ...], ...], bool]
 
 
 @dataclass(frozen=True)
@@ -68,6 +75,27 @@ class Entry:
 
 
 @dataclass(frozen=True)
+class Outside:
+    """
+    Where a failed row in a file outside the rootdir is collected from: pytest names
+    such a file from the path the run started from that contains it, so a command
+    that reruns the row starts from that path too, and leaves out the other failed
+    tests it collects.
+
+    Attributes:
+        start: That path, as a command run from the folder pytest was started in
+            gives it
+        outside: The node IDs of the failed tests in files outside the rootdir
+            that it collects
+        inside: The node IDs of those in files inside the rootdir
+    """
+
+    start: str
+    outside: frozenset[str] = frozenset()
+    inside: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
 class Reuse:
     """
     What a ``--lf`` or ``--sw`` run reuses.
@@ -79,6 +107,8 @@ class Reuse:
         others: The failed rows recorded under other seeds, which the run deselects
         failed: The node IDs of the failed tests the run reruns: pytest's
             last-failed set, or the test ``--sw`` resumes from
+        outside: Where the rows of ``rows`` and ``others`` that are in a file
+            outside the rootdir are collected from, by node ID
     """
 
     flag: str
@@ -86,6 +116,7 @@ class Reuse:
     rows: dict[str, Entry]
     others: dict[str, Entry]
     failed: frozenset[str] = field(default_factory=frozenset)
+    outside: dict[str, Outside] = field(default_factory=dict)
 
 
 def _entry(value: object) -> Entry | None:
@@ -225,42 +256,98 @@ def _exists(rootpath: Path, nodeid: str) -> bool:
     return (rootpath / nodeid.partition("::")[0]).exists()
 
 
-def _selection(config: pytest.Config) -> Callable[[str], bool] | None:
+@dataclass(frozen=True)
+class _Start:
     """
-    Return a test of whether the run collects a node ID: whether one of the paths
-    and node IDs it starts from (``config.args``: those on the command line, or
-    else the testpaths or the folder pytest was started in) selects it. None when
-    one of them is not a path (``--pyargs``).
+    A path or node ID the run starts from (``config.args``).
+
+    Attributes:
+        path: Its path, absolute
+        names: Its test names (``test_w`` of ``tests/test_w.py::test_w``), or ""
+        arg: The argument, as a command run from the folder pytest was started
+            in gives it
     """
-    targets: list[tuple[str, str]] = []
-    for arg in config.args:
-        text, _, names = arg.partition("::")
-        path = os.path.abspath(config.invocation_params.dir / text)
-        if not os.path.exists(path):
-            return None
-        targets.append((os.path.normcase(path), names))
-    rootpath = config.rootpath
 
-    def selects(nodeid: str) -> bool:
-        text, _, own = nodeid.partition("::")
-        file = os.path.normcase(os.path.abspath(rootpath / text))
-        for path, names in targets:
-            if file != path and not file.startswith(path.rstrip(os.sep) + os.sep):
-                continue
-            if not names or own == names or own.startswith((names + "::", names + "[")):
-                return True
-        return False
+    path: Path
+    names: str
+    arg: str
 
-    return selects
+
+def _starts(config: pytest.Config) -> list[_Start] | None:
+    """
+    Return the paths and node IDs the run starts from (``config.args``: those on
+    the command line, or else the testpaths or the folder pytest was started in).
+    None when one of them is not a path (``--pyargs``).
+    """
+    args = start_args(config, config.invocation_params.dir)
+    if args is None:
+        return None
+    starts = []
+    for given, arg in zip(config.args, args):
+        text, _, names = given.partition("::")
+        path = Path(os.path.abspath(config.invocation_params.dir / text))
+        starts.append(_Start(path, names, arg))
+    return starts
+
+
+def _below(path: Path, folder: Path) -> bool:
+    """Whether ``path`` is ``folder`` or below it."""
+    path_text, folder_text = os.path.normcase(path), os.path.normcase(folder)
+    return path_text == folder_text or path_text.startswith(folder_text.rstrip(os.sep) + os.sep)
+
+
+def _names_select(names: str, own: str) -> bool:
+    """Whether a start's test names select those of a node ID (``test_w[rand-1]``)."""
+    return not names or own == names or own.startswith((names + "::", names + "["))
+
+
+def _collecting(config: pytest.Config, starts: Sequence[_Start], nodeid: str) -> dict[int, bool]:
+    """
+    Return the starts that collect the file of a node ID, when it exists, by their
+    index in ``starts``, with True for the one pytest names the file from. pytest
+    names a file in the rootdir by its path from the rootdir, and a file outside it
+    by its path from the start that contains it (``tests/test_dma.py`` from ``.``
+    under ``-c ci/pytest.ini``), or by nothing when it is a start itself
+    (``::test_write[rand-3]``).
+    """
+    text, _, own = nodeid.partition("::")
+    rootpath = Path(os.path.abspath(config.rootpath))
+    found: dict[int, bool] = {}
+    if text:
+        file = Path(os.path.abspath(rootpath / text))
+        if file.exists():
+            for index, start in enumerate(starts):
+                if _below(file, start.path) and _names_select(start.names, own):
+                    found[index] = False
+    for index, start in enumerate(starts):
+        file = Path(os.path.abspath(start.path / text)) if text else start.path
+        if _below(file, rootpath) or not _names_select(start.names, own):
+            continue
+        if file.exists():
+            found[index] = True
+    return found
+
+
+def _outside(
+    config: pytest.Config, starts: Sequence[_Start], index: int, failed: Iterable[str]
+) -> Outside:
+    """Return the start ``starts[index]`` with the failed tests it collects."""
+    outside: set[str] = set()
+    inside: set[str] = set()
+    for nodeid in failed:
+        names = _collecting(config, starts, nodeid).get(index)
+        if names is not None:
+            (outside if names else inside).add(nodeid)
+    return Outside(starts[index].arg, frozenset(outside), frozenset(inside))
 
 
 def plan(config: pytest.Config) -> Reuse | None:
     """
     Return what a run with ``--lf`` or ``--sw`` and no seed of its own reuses: the
     seed of the newest entry of the map among the failed tests it reruns whose file
-    still exists and that the command line selects, the rows recorded under it, and
-    those recorded under other seeds. None without such an entry, or without the
-    option or the cache.
+    still exists and that the run collects (``_collecting``), the rows recorded
+    under it, and those recorded under other seeds. None without such an entry, or
+    without the option or the cache.
     """
     option = flag(config)
     if option is None:
@@ -271,14 +358,28 @@ def plan(config: pytest.Config) -> Reuse | None:
     failed = _failed_ids(cache, option)
     if not failed:
         return None
-    selects = _selection(config)
-    kept = {
-        nodeid: entry
-        for nodeid, entry in read(cache).items()
-        if nodeid in failed
-        and _exists(config.rootpath, nodeid)
-        and (selects is None or selects(nodeid))
-    }
+    starts = _starts(config)
+    kept: dict[str, Entry] = {}
+    outside: dict[str, Outside] = {}
+    collected: dict[int, Outside] = {}
+    for nodeid, entry in read(cache).items():
+        if nodeid not in failed:
+            continue
+        if starts is None:
+            # A --pyargs run: whatever it collects, the file must exist
+            if _exists(config.rootpath, nodeid):
+                kept[nodeid] = entry
+            continue
+        found = _collecting(config, starts, nodeid)
+        if not found:
+            continue
+        kept[nodeid] = entry
+        named = [index for index, names in found.items() if names]
+        if named:
+            index = named[0]
+            if index not in collected:
+                collected[index] = _outside(config, starts, index, failed)
+            outside[nodeid] = collected[index]
     if not kept:
         return None
     seed = list(kept.values())[-1].seed
@@ -288,6 +389,7 @@ def plan(config: pytest.Config) -> Reuse | None:
         rows={nodeid: entry for nodeid, entry in kept.items() if entry.seed == seed},
         others={nodeid: entry for nodeid, entry in kept.items() if entry.seed != seed},
         failed=frozenset(failed),
+        outside=outside,
     )
 
 
@@ -388,11 +490,47 @@ def _targets(nodeids: Sequence[str], failed: Collection[str]) -> list[str]:
     return list(targets)
 
 
+def _outside_targets(
+    nodeids: Sequence[str], outside: Mapping[str, Outside], where: Callable[[str], str]
+) -> list[str]:
+    """
+    Return what selects the rows ``nodeids`` of files outside the rootdir on a
+    command line: the paths the run started from that pytest named their files
+    from, so that the rows keep their node IDs, and what leaves out the other
+    failed tests those paths collect: ``--ignore`` for each file inside the rootdir
+    that holds one, as pytest's ``--lf`` collects no file outside the rootdir once
+    it collected such a file (it finds the failed tests' files from the rootdir),
+    and ``--deselect`` for each one outside it. A failed test whose node ID begins
+    one of the rows' (``tests/test_w.py::test_w`` begins
+    ``tests/test_w.py::test_w[rand-1]``) is not deselected: ``--deselect`` matches
+    the start of a node ID, and would leave the row out too. All quoted.
+    """
+    mine = set(nodeids)
+    starts: dict[str, None] = {}
+    ignore: dict[str, None] = {}
+    deselect: set[str] = set()
+    for nodeid in nodeids:
+        found = outside[nodeid]
+        starts[found.start] = None
+        ignore.update(dict.fromkeys(sorted(n.partition("::")[0] for n in found.inside)))
+        deselect.update(other for other in found.outside if other not in mine)
+    return [
+        *(quote(start) for start in starts),
+        *(f"--ignore {quote(where(file))}" for file in ignore),
+        *(
+            f"--deselect {quote(other)}"
+            for other in sorted(deselect)
+            if not any(row.startswith(other) for row in mine)
+        ),
+    ]
+
+
 def commands(
     flag: str,
     rows: Iterable[tuple[str, Entry]],
     failed: Collection[str] = (),
     where: Callable[[str], str] = str,
+    outside: Mapping[str, Outside] | None = None,
 ) -> list[tuple[str, int]]:
     """
     Return the commands that rerun failed rows recorded under other seeds, each
@@ -406,7 +544,11 @@ def commands(
     A command names a row's file when every failed test of that file is one of its
     rows, and the row's node ID otherwise, so it reruns no failed test under a seed
     that test was not recorded under: one that passed with those other values would
-    leave pytest's last-failed set, and its failure would be lost.
+    leave pytest's last-failed set, and its failure would be lost. Rows in files
+    outside the rootdir get a command of their own, which names neither, as either
+    would give them other node IDs: it starts from the paths the run started from
+    that pytest named them from, and leaves out the other failed tests those paths
+    collect (``_outside_targets``).
 
     Args:
         flag: The option that reruns failed tests, ``--lf``, ``--sw`` or ``--sw-skip``
@@ -415,18 +557,26 @@ def commands(
         failed: The node IDs of the failed tests the run reruns (``Reuse.failed``)
         where: Write a node ID or a file relative to the rootdir as the command
             gives it (relative to the folder pytest was started in)
+        outside: Where the rows in files outside the rootdir are collected from
+            (``Reuse.outside``)
     """
-    groups: dict[tuple[int, tuple[tuple[str, ...], ...]], dict[tuple[str | None, str], None]] = {}
-    nodeids: dict[tuple[int, tuple[tuple[str, ...], ...]], list[str]] = {}
+    outside = outside or {}
+    groups: dict[_Group, dict[tuple[str | None, str], None]] = {}
+    nodeids: dict[_Group, list[str]] = {}
     for nodeid, row in rows:
         row_units, row_off = _split(row.options)
-        key = (row.seed, tuple(row_units))
+        key = (row.seed, tuple(row_units), nodeid in outside)
         groups.setdefault(key, {}).update(dict.fromkeys(row_off))
         nodeids.setdefault(key, []).append(nodeid)
     found = []
-    for (seed, units), off in groups.items():
+    for key, off in groups.items():
+        seed, units, beyond = key
         options = list(units) + ([_off_unit(off)] if off else [])
-        targets = [quote(where(target)) for target in _targets(nodeids[(seed, units)], failed)]
+        group = nodeids[key]
+        if beyond:
+            targets = _outside_targets(group, outside, where)
+        else:
+            targets = [quote(where(target)) for target in _targets(group, failed)]
         parts = ["pytest", flag, f"--rng-seed={seed}", _text(options), *targets]
-        found.append((" ".join(part for part in parts if part), len(nodeids[(seed, units)])))
+        found.append((" ".join(part for part in parts if part), len(group)))
     return found

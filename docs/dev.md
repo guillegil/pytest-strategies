@@ -840,7 +840,8 @@ fixture to `_fixture_defs`). When its own folder's label is another one, a phase
 that passed or skipped fails with the message; for an error, the message is
 kept in `item.stash` and the plugin's `pytest_runtest_makereport` wrapper adds it
 to that phase's report, as a `pytest-strategies` section of the error's
-representation (`addsection()`, or of the report when it has none). The error
+representation (`addsection()`, after wrapping a report that takes no sections
+in `_repro.SectionedRepr`), or of the report for a plain-text one. The error
 is left as it is: a fixture's cached error is one object, which pytest raises
 again for every test that gets the fixture.
 `CtxFixture.requesters` maps each fixture whose setup reached the plugin's
@@ -1143,8 +1144,11 @@ dict of strings, `command`, `row` (`describe()`: `burst random 3`), `seed`, and
 `TestReport` keeps such an extra attribute when it is serialized, so
 pytest-xdist carries it to the controller. The section is added with
 `report.longrepr.addsection("pytest-strategies", ...)`, together with the
-`strategies_ctx` guard's message when there is one; a plain-string longrepr
-(XPASS(strict)) has no `addsection` and gets no section. `pytest_runtest_logreport`
+`strategies_ctx` guard's message when there is one. A `TerminalRepr` without
+`addsection`, such as pytest's `FixtureLookupErrorRepr` for a missing fixture, is
+wrapped first in `_repro.SectionedRepr`, which writes it and then its sections and
+passes its other attributes through (pytest-xdist sends it as its text, section
+included); a plain-string longrepr (XPASS(strict)) gets no section. `pytest_runtest_logreport`
 keeps each attribute in `SessionState.failed_rows` by node ID, and
 `pytest_terminal_summary` prints them after the reproduce line
 (`_failed_rows_lines()`: at most `_FAILED_ROWS_SHOWN` below `-v`, nothing under
@@ -1210,8 +1214,9 @@ passed in this run under the entry's seed and options, then adds each row of
 report's `pytest_strategies` attribute. The makereport wrapper takes a passing
 row's options (`generation_options()`) from a passing call report, only for the
 items in `SessionState.recorded`, the node IDs of the map's entries under the
-run's seed. A pytest-xdist worker gets `recorded` and `deselect` through
-`workerinput` and sends its passed rows' options through `workeroutput`, which
+run's seed. A pytest-xdist worker gets `recorded`, `deselect` and `reused`
+through `workerinput` and sends its passed rows' options and the reused rows it
+collected through `workeroutput`, which
 `pytest_testnodedown` keeps in `SessionState.worker_reuse`. The map is written only when it changed, so a run
 that never failed creates nothing. With `--lf`, `--sw` or `--sw-skip` (not
 `--sw-reset`) and no seed given, the tryfirst `pytest_configure` calls
@@ -1226,14 +1231,26 @@ map's entries among them whose file exists and that the run collects, by
 expanded testpaths or the folder pytest was started in, which pytest puts there
 too (a path is a prefix, and a node ID's `::` names match the test and its
 parametrizations; an argument that is not an existing path, such as a
-`--pyargs` module, selects everything). `-k` and `-m` cannot take part, since
+`--pyargs` module, selects everything). `_collecting()` finds a node ID's file
+as pytest names it: from the rootdir, or for a file outside the rootdir, from the
+start that contains it (pytest's `_check_initialpaths_for_relpath`; `-c
+ci/pytest.ini` with `tests/` and no paths names `tests/test_dma.py` from the
+invocation folder), with no path when the start is the file itself
+(`::test_write[rand-3]`). Such a row gets an `Outside` in `Reuse.outside`: the
+start, as a command gives it, and the failed tests it collects, outside the
+rootdir and inside it. `-k` and `-m` cannot take part, since
 they apply to collected items. The newest kept entry gives the seed. `Reuse.rows` are the kept entries of that seed, and
 `Reuse.others` the rest, which a second `pytest_collection_modifyitems`
 deselects through `pytest_deselected`: pytest's `LFPlugin` drops a test from
-`lastfailed` only on a report, so they stay there. When none of the failed tests
-it would rerun is collected (the run's options do not generate the reused rows),
-`--lf` says `N known failures not in selected tests` and runs every collected
-test, as pytest does. The instance's `pytest_configure` seeds from `Reuse.seed`,
+`lastfailed` only on a report, so they stay there. That hook also notes which
+rows of `Reuse.rows` (`SessionState.reused`) it collected, and after a session
+that ran its tests `_uncollected_lines()` prints the command of the others
+(`_reuse.commands()`, with their recorded options): a deleted or renamed test,
+a row the run's options do not generate, or one in a file outside the rootdir
+that pytest's `--lf` skipped. Without it, a run whose other rows were all
+deselected would end with no test and no word on why. When none of the failed
+tests it would rerun is collected, `--lf` says `N known failures not in selected
+tests` and runs every collected test, as pytest does. The instance's `pytest_configure` seeds from `Reuse.seed`,
 unless a conftest.py's `pytest_configure` set `config.option.rng_seed`, which
 drops the reuse as `--rng-seed` would; an `RNG.seed()` call there does not
 change the reused seed, as it does not change `--rng-seed`. `_reuse_line()` adds
@@ -1250,7 +1267,14 @@ folder pytest was started in: a row's file when every test of that file in
 `Reuse.failed` (the last-failed set read at configure time) is one of the
 command's rows, else the row's node ID. A command without them would rerun the
 newest seed's rows with other values, and pytest drops a passing test from
-`lastfailed`, losing its failure. test_lf_seed_reuse_integration.py runs pytest in subprocesses, with the
+`lastfailed`, losing its failure. Rows outside the rootdir get commands of their
+own (`_outside_targets()`): a file or node ID would give them other node IDs, so
+the command starts from their `Outside.start`, adds `--deselect` (which matches
+raw node IDs) for the other failed tests outside the rootdir that it collects,
+except a node ID that starts one of the rows', and `--ignore` for each file
+inside the rootdir with a failed test: pytest's `LFPluginCollSkipfiles`, which
+`--lf` registers once it collected such a file, finds the failed tests' files from
+the rootdir and so skips every file outside it. test_lf_seed_reuse_integration.py runs pytest in subprocesses, with the
 cache plugin, `-n 2` included.
 
 **One generator of the plugin's own:** every draw (the RNG types and the `RNG.*`

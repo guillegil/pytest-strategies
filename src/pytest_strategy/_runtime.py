@@ -195,6 +195,11 @@ class SessionState:
         # this run's seed (a pytest-xdist worker gets both from the controller)
         self.deselect: set[str] = set()
         self.recorded: set[str] = set()
+        # The node IDs of the failed rows a --lf or --sw run reuses the seed of (a
+        # pytest-xdist worker gets them from the controller), and of those it
+        # collected (on the controller, the workers send theirs)
+        self.reused: set[str] = set()
+        self.reused_collected: set[str] = set()
         # The tests the run deselected, and pytest's -k matcher of each test the run
         # collected, computed for the first failed row outside the rootdir: its rerun
         # command selects it with a -k expression that matches no other test

@@ -40,6 +40,7 @@ from typing import Any, get_args
 
 import _pytest.python
 import pytest
+from _pytest._code.code import TerminalRepr
 from _pytest.pathlib import ImportPathMismatchError, import_path
 from pytest import Config, Session
 
@@ -250,8 +251,9 @@ class PytestStrategyPlugin:
     def pytest_configure_node(self, node: Any) -> None:
         """
         Send the controller's RNG seed to a pytest-xdist worker, and the failed rows
-        it deselects (recorded under another seed than the one a --lf run reuses) and
-        those recorded under this run's seed (see ``_read_failed_seeds``).
+        it deselects (recorded under another seed than the one a --lf run reuses),
+        those a --lf run reuses the seed of, and those recorded under this run's seed
+        (see ``_read_failed_seeds``).
 
         Optional hook: only called when pytest-xdist is installed.
         """
@@ -259,6 +261,7 @@ class PytestStrategyPlugin:
         state = runtime.current
         if state is not None:
             node.workerinput[_DESELECT] = sorted(state.deselect)
+            node.workerinput[_REUSED] = sorted(state.reused)
             node.workerinput[_RECORDED] = sorted(state.recorded)
 
     @pytest.hookimpl
@@ -475,9 +478,18 @@ class PytestStrategyPlugin:
         last-failed set, and the terminal summary gives the command that reruns it
         (``_deselected_lines``). pytest's own --lf selection, a wrapper, runs after
         this.
+
+        Also note which of the rows the run reuses the seed of it collected: the
+        terminal summary gives the command that reruns the others, which were
+        deleted or renamed, are not generated with the run's options, or are in a
+        file pytest's --lf did not collect (``_uncollected_lines``).
         """
         state = runtime.session_of(config)
-        if state is None or not state.deselect:
+        if state is None:
+            return
+        if state.reused:
+            state.reused_collected.update(i.nodeid for i in items if i.nodeid in state.reused)
+        if not state.deselect:
             return
         kept: list[pytest.Item] = []
         deselected: list[pytest.Item] = []
@@ -715,8 +727,10 @@ class PytestStrategyPlugin:
         that runs it again (``_repro``). The report gets the command too, in its
         ``pytest_strategies`` attribute (strings only, which pytest-xdist carries to
         the controller), for the list of failed rows in the terminal summary and the
-        JUnit XML report's suite properties. A failure without a traceback (an
-        XPASS(strict)) gets no section, and a teardown error gets nothing.
+        JUnit XML report's suite properties. A report that takes no section, such as
+        a missing fixture's, is wrapped in one that does (``_repro.SectionedRepr``).
+        A failure reported as plain text (an XPASS(strict)) gets no section, and a
+        teardown error gets nothing.
 
         For a ``--junitxml`` report of the ``xunit1`` or ``legacy`` family, the row's
         JUnit properties (``_repro.testcase_properties``) go to the item's
@@ -727,8 +741,8 @@ class PytestStrategyPlugin:
         them whatever the family, so they are left out there.
 
         The guard's message that ``_check_ctx`` kept for a test's setup or call that
-        raised an error goes into the same section, before the row. A report whose
-        error has no sections gets it as a section of its own.
+        raised an error goes into the same section, before the row. A failure
+        reported as plain text gets it as a section of the report's own.
 
         A passing call of a row the failed-seeds map holds under this run's seed
         (``SessionState.recorded``) notes the options of its rerun command, so the
@@ -762,11 +776,16 @@ class PytestStrategyPlugin:
                             item.user_properties.append(prop)
                         if prop not in report.user_properties:
                             report.user_properties.append(prop)
+        text = "\n\n".join(part for part in (message, repro) if part is not None)
+        if not text:
+            return report
         add = getattr(report.longrepr, "addsection", None)
+        if not callable(add) and isinstance(report.longrepr, TerminalRepr):
+            # A report without sections, such as a missing fixture's
+            report.longrepr = _repro.SectionedRepr(report.longrepr)
+            add = report.longrepr.addsection
         if callable(add):
-            text = "\n\n".join(part for part in (message, repro) if part is not None)
-            if text:
-                add(_SECTION, text)
+            add(_SECTION, text)
         elif message is not None:
             report.sections.append((_SECTION, message))
         return report
@@ -1020,8 +1039,10 @@ class PytestStrategyPlugin:
         Say how to reproduce a failed run, with the contexts the failed tests'
         factories received, list the failed strategy rows' rerun commands
         (``_failed_rows_lines``), give the commands that rerun the failed rows a
-        --lf run set aside (``_deselected_lines``), and summarize the strategies
-        and the contexts with -v.
+        --lf run reused the seed of but did not collect (``_uncollected_lines``,
+        unless the session stopped before its tests ran) and those it set aside
+        (``_deselected_lines``), and summarize the strategies and the contexts
+        with -v.
 
         On the pytest-xdist controller, which collects nothing, first print what the
         workers printed after their collection (the contexts, the unmatched
@@ -1056,6 +1077,9 @@ class PytestStrategyPlugin:
             for line in _failed_rows_lines(state.failed_rows, self._verbosity(config)):
                 terminalreporter.write_line(line)
         if state is not None:
+            if exitstatus in _FINISHED:
+                for line in _uncollected_lines(state, config):
+                    terminalreporter.write_line(line)
             for line in _deselected_lines(state, config):
                 terminalreporter.write_line(line)
 
@@ -1118,8 +1142,9 @@ class PytestStrategyPlugin:
         collects every test, so their contexts and values must be the same; names
         in the test IDs no longer make pytest-xdist notice different values.
 
-        A worker also sends the failed rows that passed under their recorded seed;
-        only the controller writes the map.
+        A worker also sends the failed rows that passed under their recorded seed,
+        and those of the reused seed it collected; only the controller writes the
+        map.
         """
         state = runtime.current
         if state is not None and state.worker_summaries:
@@ -1137,6 +1162,7 @@ class PytestStrategyPlugin:
             if state is not None:
                 workeroutput[_REUSE] = {
                     "passed": {nodeid: list(o) for nodeid, o in state.passed_rows.items()},
+                    "collected": sorted(state.reused_collected),
                 }
         if state is None:
             return
@@ -1155,8 +1181,9 @@ class PytestStrategyPlugin:
         Keep what a pytest-xdist worker sent when its session finished, by worker ID:
         its summary (the -v summary shown is the first worker's that finished, with
         the Contexts of every worker), its part of the check that the workers
-        generated the same vectors, and the failed rows it saw pass under their
-        recorded seed. A worker that crashed sent nothing.
+        generated the same vectors, the failed rows it saw pass under their recorded
+        seed and those of the reused seed it collected. A worker that crashed sent
+        nothing.
 
         The controller collects nothing, and every worker collects all the tests.
         Optional hook: only called when pytest-xdist is installed.
@@ -1997,33 +2024,41 @@ def _failed_rows_lines(rows: Mapping[str, Mapping[str, str]], verbosity: int) ->
 
 
 # What the pytest-xdist controller sends each worker (workerinput): the node IDs of
-# the failed rows the worker deselects, and of those recorded under the run's seed
+# the failed rows the worker deselects, of those a --lf run reuses the seed of, and
+# of those recorded under the run's seed
 _DESELECT = "pytest_strategies_deselect"
+_REUSED = "pytest_strategies_reused"
 _RECORDED = "pytest_strategies_recorded"
 
 # What a worker sends back (workeroutput): the options of the recorded rows whose
-# call passed
+# call passed, and the reused rows it collected
 _REUSE = "pytest_strategies_reuse"
+
+# The exit statuses of a session that ran its tests: the rows a --lf run reused the
+# seed of and did not collect are listed only then
+_FINISHED = (pytest.ExitCode.OK, pytest.ExitCode.TESTS_FAILED, pytest.ExitCode.NO_TESTS_COLLECTED)
 
 
 def _read_failed_seeds(config: Config, state: Any) -> None:
     """
     Note, once the run's seed is set, which failed rows the run deselects (those a
-    --lf or --sw run did not reuse the seed of; ``_reuse.plan``) and which rows the
-    failed-seeds map holds under the run's seed, whose entries leave the map when
-    they pass (see ``pytest_runtest_makereport``).
+    --lf or --sw run did not reuse the seed of; ``_reuse.plan``), which it reuses
+    the seed of, and which rows the failed-seeds map holds under the run's seed,
+    whose entries leave the map when they pass (see ``pytest_runtest_makereport``).
 
-    A pytest-xdist worker gets both from the controller (``pytest_configure_node``)
+    A pytest-xdist worker gets them from the controller (``pytest_configure_node``)
     and reads nothing from the cache. Without pytest's cache plugin there is no
     ``config.cache``, and nothing is read.
     """
     workerinput = getattr(config, "workerinput", None)
     if workerinput is not None:
         state.deselect = set(workerinput.get(_DESELECT, ()))
+        state.reused = set(workerinput.get(_REUSED, ()))
         state.recorded = set(workerinput.get(_RECORDED, ()))
         return
     if state.reuse is not None:
         state.deselect = set(state.reuse.others)
+        state.reused = set(state.reuse.rows)
     cache = getattr(config, "cache", None)
     if cache is not None:
         seed = state.seed()
@@ -2078,6 +2113,44 @@ def _reuse_line(config: Config, reuse: _reuse.Reuse) -> str:
     return text if differences is None else f"{text}; recorded {differences}"
 
 
+def _uncollected_lines(state: Any, config: Config) -> list[str]:
+    """
+    Return the lines that give the commands rerunning the failed rows a --lf or --sw
+    run reused the seed of but did not collect (``_reuse.commands``): rows deleted
+    or renamed, not generated with the run's options (``--nsamples``), or in a file
+    pytest's --lf did not collect. Without them, a run whose rows of the other
+    seeds were all deselected would end with no test run, and no word on why.
+    Nothing when it collected them all, or under pytest-xdist when no worker said
+    which it collected.
+    """
+    reuse = state.reuse
+    if reuse is None:
+        return []
+    collected = set(state.reused_collected)
+    outputs = list(_by_worker(state.worker_reuse))
+    if getattr(config.option, "dist", "no") != "no" and not outputs:
+        return []
+    for output in outputs:
+        rows = output.get("collected")
+        if isinstance(rows, list):
+            collected.update(row for row in rows if isinstance(row, str))
+    rows = [(nodeid, entry) for nodeid, entry in reuse.rows.items() if nodeid not in collected]
+    if not rows:
+        return []
+    if len(rows) == 1:
+        first = "1 failed row recorded under the reused seed was not collected"
+        them = "it"
+    else:
+        first = f"{len(rows)} failed rows recorded under the reused seed were not collected"
+        them = "them"
+    lines = [f"pytest-strategies: {first}; unless deleted or renamed, run {them} with:"]
+    for command, n in _reuse.commands(
+        reuse.flag, rows, reuse.failed, config.cwd_relative_nodeid, reuse.outside
+    ):
+        lines.append(f"  {command}  # {n} row{'' if n == 1 else 's'}")
+    return lines
+
+
 def _deselected_lines(state: Any, config: Config) -> list[str]:
     """
     Return the lines that give the commands rerunning the failed rows a --lf or --sw
@@ -2099,7 +2172,9 @@ def _deselected_lines(state: Any, config: Config) -> list[str]:
     rows_text = "1 failed row" if len(rows) == 1 else f"{len(rows)} failed rows"
     them = "it" if len(rows) == 1 else "them"
     lines = [f"pytest-strategies: deselected {rows_text} recorded under {seeds}; run {them} with:"]
-    for command, n in _reuse.commands(reuse.flag, rows, reuse.failed, config.cwd_relative_nodeid):
+    for command, n in _reuse.commands(
+        reuse.flag, rows, reuse.failed, config.cwd_relative_nodeid, reuse.outside
+    ):
         lines.append(f"  {command}  # {n} row{'' if n == 1 else 's'}")
     return lines
 

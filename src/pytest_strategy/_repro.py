@@ -50,6 +50,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from _pytest._code.code import TerminalRepr
+from _pytest._io import TerminalWriter
 from _pytest.pathlib import bestrelpath
 
 from ._ids import _value_repr
@@ -79,6 +81,36 @@ _KEYWORD_OPERATORS = frozenset({"and", "or", "not"})
 # The arguments cmd.exe and PowerShell leave as they are (no ",", which PowerShell
 # reads as an array, no "%", "@", "&", quotes or brackets)
 _WINDOWS_SAFE = re.compile(r"[A-Za-z0-9_+=:./\\-]+")
+
+
+class SectionedRepr(TerminalRepr):
+    """
+    A failure's report that takes no sections, such as a missing fixture's
+    (``FixtureLookupErrorRepr``), followed by sections, which pytest prints as it
+    prints those of a traceback (``ExceptionRepr.addsection``). Its other
+    attributes are the report's.
+    """
+
+    def __init__(self, inner: TerminalRepr) -> None:
+        self.inner = inner
+        self.sections: list[tuple[str, str, str]] = []
+
+    def addsection(self, name: str, content: str, sep: str = "-") -> None:
+        """Add a section below the report."""
+        self.sections.append((name, content, sep))
+
+    def toterminal(self, tw: TerminalWriter) -> None:
+        """Write the report, then its sections."""
+        self.inner.toterminal(tw)
+        for name, content, sep in self.sections:
+            tw.sep(sep, name)
+            tw.line(content)
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "inner":
+            # Not set yet (a copy being made)
+            raise AttributeError(name)
+        return getattr(self.inner, name)
 
 
 def quote(arg: str, *, windows: bool | None = None) -> str:

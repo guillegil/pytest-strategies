@@ -309,7 +309,9 @@ To reproduce a failure:
    `recorded with --nsamples=13` when the failed run had options this one lacks
    (add them). Failed rows recorded under another seed are deselected, and the run
    ends with the `pytest --lf --rng-seed=S <files>` command that reruns them. The
-   paths you give (not `-k`) choose which failed rows' seed is reused.
+   paths you give (not `-k`) choose which failed rows' seed is reused. When the
+   reused rows are not collected (renamed, or other options), the end of the run
+   gives their command too.
 5. Once fixed, add the failing values as a directed vector (`"bug_1234": (17, "EUR")`;
    one argument needs a trailing comma, `(-2,)`) so they run every time, not only
    under that seed. Run it with `--vector-name=bug_1234`, which needs no seed. Its ID

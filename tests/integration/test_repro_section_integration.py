@@ -15,6 +15,7 @@ import os
 import re
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from textwrap import dedent
 
@@ -129,6 +130,13 @@ def errors(lines, name):
         if line.startswith("E "):
             found.append(line)
     return found
+
+
+def error_section(path, name):
+    """The section lines in the failure or error text of the test case ``name`` of a JUnit XML report."""
+    (case,) = [c for c in ET.parse(path).getroot().iter("testcase") if c.get("name") == name]
+    (outcome,) = [child for child in case if child.tag in ("failure", "error")]
+    return sections((outcome.text or "").splitlines())
 
 
 def rerun_command(section):
@@ -733,6 +741,37 @@ def test_write(device, addr, len):
         assert section[1] == "vector    rand-1 (random row 1)"
         assert failed_rows(result.stdout.lines) == [f"{rerun_command(section)}  # burst random 1"]
 
+    @pytest.mark.parametrize("xdist", [False, True], ids=["one_process", "xdist"])
+    def test_a_missing_fixture_gives_a_section_and_a_row(self, pytester, xdist):
+        # pytest reports a missing fixture without a traceback, in a report that
+        # takes no sections: it is wrapped in one that does
+        project(
+            pytester.path,
+            """
+from pytest_strategy import strategy
+
+@strategy("burst")
+def test_write(not_a_fixture, addr, len):
+    pass
+""",
+        )
+        args = ["-n", "2"] if xdist else []
+        if xdist:
+            pytest.importorskip("xdist")
+        junit = pytester.path / "report.xml"
+
+        result = run(pytester, "-k", "rand-1", f"--junitxml={junit}", *args)
+
+        result.assert_outcomes(errors=1)
+        result.stdout.fnmatch_lines(["*fixture 'not_a_fixture' not found*"])
+        (section,) = sections(result.stdout.lines)
+        assert section[1] == "vector    rand-1 (random row 1)"
+        assert rerun_command(section) == (
+            f"pytest {quote('test_dma.py::test_write[rand-1]')} --rng-seed={SEED}"
+        )
+        assert failed_rows(result.stdout.lines) == [f"{rerun_command(section)}  # burst random 1"]
+        assert error_section(junit, "test_write[rand-1]") == [section]
+
     def test_a_teardown_error_gives_neither(self, pytester):
         project(
             pytester.path,
@@ -815,6 +854,53 @@ def pytest_runtest_makereport(item, call):
         assert failed_rows(result.stdout.lines) == [
             f"pytest {quote(nodeid)} --rng-seed={SEED}  # burst random 1"
         ]
+
+    def test_the_guard_s_message_and_the_row_share_one_section(self, pytester):
+        # test_b asks for strategies_ctx in another context than test_root, which
+        # requested it first: the guard's message goes into the row's section
+        write(
+            pytester.path,
+            {
+                "conftest.py": 'def pytest_strategies_context(config):\n    return {"name": "root"}\n',
+                "test_0root.py": "def test_root(strategies_ctx):\n    pass\n",
+                "tests/b/conftest.py": (
+                    'def pytest_strategies_context(config):\n    return {"name": "B"}\n'
+                ),
+                "tests/b/test_b.py": """
+from pytest_strategy import Parameter, RNGInteger, TestArg, strategy
+
+def burst(ctx):
+    return Parameter(TestArg("addr", rng_type=RNGInteger(0, 9)), nsamples=1)
+
+@strategy(burst)
+def test_b(request, addr):
+    assert request.getfixturevalue("strategies_ctx") == {"name": "B"}
+""",
+            },
+        )
+        junit = pytester.path / "report.xml"
+
+        result = run(pytester, f"--junitxml={junit}")
+
+        result.assert_outcomes(failed=1, passed=1)
+        (section,) = sections(result.stdout.lines)
+        nodeid = "tests/b/test_b.py::test_b[rand-0]"
+        assert section[:4] == [
+            "strategies_ctx is a session fixture, but the tests that use it have different "
+            f"contexts (conftest.py: test_0root.py::test_root; tests/b/conftest.py: {nodeid}). "
+            "In a folder with its own pytest_strategies_context, use "
+            "pytest_strategy.get_context(request.config, __file__) in that folder's conftest.py "
+            "fixtures.",
+            "",
+            "strategy  burst (tests/b/test_b.py:4)",
+            "vector    rand-0 (random row 0)",
+        ]
+        assert re.fullmatch(r"values    addr=\d", section[4])
+        assert section[5] == f"seed      {SEED}"
+        assert re.fullmatch(r"context   [0-9a-f]{8}", section[6])
+        assert section[7:] == [f"rerun     pytest {quote(nodeid)} --rng-seed={SEED}"]
+        assert failed_rows(result.stdout.lines) == [f"{rerun_command(section)}  # burst random 0"]
+        assert error_section(junit, "test_b[rand-0]") == [section]
 
     def test_the_report_carries_the_row_as_strings(self, pytester):
         project(pytester.path, module('"rand-12" in request.node.name'))

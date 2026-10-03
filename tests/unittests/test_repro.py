@@ -6,15 +6,18 @@ line that says how to reproduce the run, and the properties of a ``--junitxml``
 report.
 """
 
+import copy
 import shlex
 from argparse import Namespace
 from pathlib import Path
 
 import pytest
+from _pytest._code.code import TerminalRepr
 
 from pytest_strategy import VectorInfo
 from pytest_strategy._repro import (
     VALUE_LIMIT,
+    SectionedRepr,
     describe,
     generation_options,
     keyword_command,
@@ -258,6 +261,35 @@ class TestSection:
         lines = section([info()], "pytest x", 0, note="outside").splitlines()
 
         assert lines[-2:] == ["rerun     pytest x", "note      outside"]
+
+
+class TestSectionedRepr:
+    class Lookup(TerminalRepr):
+        """A report that takes no sections, as pytest's FixtureLookupErrorRepr."""
+
+        def __init__(self):
+            self.argname = "not_a_fixture"
+
+        def toterminal(self, tw):
+            tw.line("E       fixture 'not_a_fixture' not found")
+
+    def test_the_report_then_its_sections(self):
+        wrapped = SectionedRepr(self.Lookup())
+
+        wrapped.addsection("pytest-strategies", "strategy  burst\nseed      21")
+
+        lines = str(wrapped).splitlines()
+        assert lines[0] == "E       fixture 'not_a_fixture' not found"
+        assert lines[1].strip("-") == " pytest-strategies "
+        assert lines[2:] == ["strategy  burst", "seed      21"]
+
+    def test_the_report_s_other_attributes(self):
+        wrapped = SectionedRepr(self.Lookup())
+
+        assert wrapped.argname == "not_a_fixture"
+        assert not hasattr(wrapped, "reprcrash")
+        # A copy (as pytest-xdist or another plugin may make) works too
+        assert copy.copy(wrapped).argname == "not_a_fixture"
 
 
 class TestDescribe:
