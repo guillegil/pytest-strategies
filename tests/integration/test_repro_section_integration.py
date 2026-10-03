@@ -99,10 +99,17 @@ def run(pytester, *args):
 
 
 def sections(lines):
-    """The pytest-strategies sections in the output: each one's lines, up to its rerun line and note."""
+    """
+    The pytest-strategies sections in the output: each one's lines, up to its rerun
+    line and note. The short test summary is left out: with CI set, pytest does not
+    cut its lines, and under xdist an error without a crash line (a missing fixture)
+    repeats its whole report there.
+    """
     found = []
     current = None
     for line in lines:
+        if re.fullmatch(r"=+ short test summary info =+", line):
+            break
         if re.fullmatch(r"-+ pytest-strategies -+", line):
             current = []
             found.append(current)
