@@ -86,6 +86,11 @@ def _write(pytester, files):
 class TestTheListing:
     """--list-strategies keeps 3.0's text and calls no factory (D19)."""
 
+    @pytest.fixture(autouse=True)
+    def utf8_output(self, monkeypatch):
+        # Windows pipes default to cp1252, where pytest writes the check mark as \u2713
+        monkeypatch.setenv("PYTHONIOENCODING", "utf-8")
+
     def test_the_text_is_3_0_s(self, pytester):
         pytester.makeini("[pytest]\n")
         _write(pytester, LISTED_STRATEGIES)

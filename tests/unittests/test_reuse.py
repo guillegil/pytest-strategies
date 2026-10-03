@@ -542,8 +542,9 @@ class TestDifferences:
             ["--strategy-constraint-off=burst:aligned"], ["--strategy-constraint-off=chan:fast"]
         )
 
+        # quote(): Windows quotes the comma, which PowerShell reads as an array
         assert differences(rows, [], ()) == (
-            "with --strategy-constraint-off=burst:aligned,chan:fast"
+            "with " + quote("--strategy-constraint-off=burst:aligned,chan:fast")
         )
 
     def test_the_run_s_own_constraints_are_not_compared(self):
@@ -583,7 +584,8 @@ class TestCommands:
         assert commands("--lf", rows) == [
             (
                 "pytest --lf --rng-seed=1 --nsamples=13 "
-                "--strategy-constraint-off=burst:aligned,chan:fast tests/b/test_w.py",
+                + quote("--strategy-constraint-off=burst:aligned,chan:fast")
+                + " tests/b/test_w.py",
                 2,
             )
         ]
@@ -668,7 +670,9 @@ class TestDeselectedLines:
         lines = _deselected_lines(self.state(), self.config("tests/b"))
 
         assert lines[1:] == [
-            f"  pytest --lf --rng-seed=1 ../a/test_w.py {quote('test_w.py::test_w[rand-4]')}  # 2 rows",
+            # The path is the platform's, as pytest's own bestrelpath writes it
+            f"  pytest --lf --rng-seed=1 {quote(str(Path('..', 'a', 'test_w.py')))} "
+            f"{quote('test_w.py::test_w[rand-4]')}  # 2 rows",
             f"  pytest --lf --rng-seed=2 {quote('test_w.py::test_w[rand-2]')}  # 1 row",
         ]
 

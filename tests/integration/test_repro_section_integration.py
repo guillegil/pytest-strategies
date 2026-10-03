@@ -809,7 +809,8 @@ def pytest_runtest_makereport(item, call):
 
         result.assert_outcomes(failed=1, passed=4)
         (section,) = sections(result.stdout.lines)
-        nodeid = str(Path("sub", "test_dma.py")) + "::test_write[rand-1]"
+        # The run starts in the rootdir, so the command holds pytest's own node ID
+        nodeid = "sub/test_dma.py::test_write[rand-1]"
         assert rerun_command(section) == f"pytest {quote(nodeid)} --rng-seed={SEED}"
         assert failed_rows(result.stdout.lines) == [
             f"pytest {quote(nodeid)} --rng-seed={SEED}  # burst random 1"
