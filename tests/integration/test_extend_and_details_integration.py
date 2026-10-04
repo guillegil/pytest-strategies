@@ -7,9 +7,18 @@ Distinct module and strategy names are used per run on purpose (see
 test_session_isolation_integration.py for rationale).
 """
 
+import sys
+
 import pytest
 
 pytest_plugins = ["pytester"]
+
+# The node ID in a rerun command, quoted for the platform's shell
+ROW0 = (
+    '"test_xd.py::test_fails[rand-0]"'
+    if sys.platform == "win32"
+    else "'test_xd.py::test_fails[rand-0]'"
+)
 
 STRATEGIES = """
 import pytest
@@ -133,7 +142,7 @@ class TestDetails:
             [
                 "pytest-strategies: reproduce with --rng-seed=5",
                 "pytest-strategies: failed rows:",
-                "  pytest 'test_xd.py::test_fails[rand-0]' --rng-seed=5  # xd_many random 0",
+                f"  pytest {ROW0} --rng-seed=5  # xd_many random 0",
                 "  ... and 2 more",
                 "  (--strategy-details shows each row's values below its traceback)",
             ]
@@ -154,9 +163,7 @@ class TestDetails:
         out = result.stdout.str()
         assert _sections(out) == 12
         assert "--strategy-details shows" not in out
-        result.stdout.fnmatch_lines(
-            ["rerun     pytest 'test_xd.py::test_fails[rand-0]' --rng-seed=5"]
-        )
+        result.stdout.fnmatch_lines([f"rerun     pytest {ROW0} --rng-seed=5"])
 
     def test_the_details_option_is_not_part_of_the_rerun_command(self, pytester):
         pytester.makepyfile(test_xd=FAILING)
