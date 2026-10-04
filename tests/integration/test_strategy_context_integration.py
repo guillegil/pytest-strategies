@@ -174,8 +174,9 @@ import json
 from pytest_strategy import Strategy
 
 def test_export():
-    exported = json.loads(Strategy.export_strategies())
-    assert "error" not in exported["esm_rw"], exported["esm_rw"]
+    exported = json.loads(Strategy.export_strategies())["strategies"]
+    [esm_rw] = [entry for entry in exported if entry["name"] == "esm_rw"]
+    assert "parameter" in esm_rw, esm_rw
 """)
 
     result = project.runpytest(
@@ -185,14 +186,19 @@ def test_export():
     result.assert_outcomes(passed=1)
 
 
-def test_every_xdist_worker_builds_the_same_tests(project):
+def test_every_xdist_worker_builds_the_same_tests(project, values_dump):
     pytest.importorskip("xdist")
+    project.makeconftest(CONFTEST + values_dump.conftest)
 
-    result = project.runpytest_subprocess("-n", "2", "--tb-config=two_esm.json")
+    result = values_dump.run("-n", "2", "--tb-config=two_esm.json")
 
     result.assert_outcomes(passed=50)
     # Each worker collects, so each calls the hook once; the controller does not
     assert _hook_calls(project) == 2
+    # The node IDs do not show every value: the workers drew the same ones
+    gw0 = values_dump.read("values-gw0.json")
+    assert len(gw0) == 50
+    assert gw0 == values_dump.read("values-gw1.json")
 
 
 def test_hook_can_skip_the_modules_that_need_ctx(project):
@@ -209,7 +215,7 @@ def pytest_strategies_context(config):
     result.stdout.fnmatch_lines(["*no testbench configured*"])
 
 
-def test_random_draws_in_the_hook_do_not_change_the_vectors(project):
+def test_random_draws_in_the_hook_do_not_change_the_vectors(project, values_dump):
     project.makeconftest("""
 from pytest_strategy import RNG
 
@@ -217,17 +223,18 @@ def pytest_strategies_context(config):
     channels = [3, 5]
     RNG.generator().shuffle(channels)
     return {"peripherals": [{"type": "Esm", "channel": c} for c in channels]}
-""")
+""" + values_dump.conftest)
 
     def collected(*paths):
-        result = project.runpytest(
-            "-p", "no:cacheprovider", "--rng-seed=42", "--collect-only", "-q", *paths
-        )
-        return [line for line in result.outlines if "test_rw_again.py::" in line]
+        args = ("-p", "no:cacheprovider", "--rng-seed=42", "--collect-only", "-q", *paths)
+        rows = values_dump.collect(*args, subprocess=False)
+        return [row for row in rows if "test_rw_again.py::" in row[0]]
 
     # The first test that needs ctx triggers the hook: test_rw.py in the full run,
     # test_rw_again.py when it runs alone
-    assert collected() == collected("test_rw_again.py")
+    full = collected()
+    assert len(full) == 20
+    assert full == collected("test_rw_again.py")
 
 
 def test_optional_hook_conftest_works_without_the_plugin(pytester):

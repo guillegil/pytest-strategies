@@ -1,7 +1,6 @@
-"""Unit tests for the 3.0.0 public API, error messages and deprecations."""
+"""Unit tests for the 3.0.0 public API and error messages."""
 
-import warnings
-from types import SimpleNamespace
+import re
 
 import pytest
 
@@ -18,8 +17,6 @@ from pytest_strategy import (
     strategy,
 )
 from pytest_strategy._registry import registry
-from pytest_strategy._resolver import build_parametrization
-from pytest_strategy._runtime import runtime
 
 
 @pytest.fixture
@@ -29,13 +26,6 @@ def clean_registry():
         yield
     finally:
         registry.restore(saved)
-
-
-def _only_deprecation(record):
-    """Return the single DeprecationWarning recorded, failing if there is not exactly one."""
-    deprecations = [w for w in record if issubclass(w.category, DeprecationWarning)]
-    assert len(deprecations) == 1, [str(w.message) for w in record]
-    return deprecations[0]
 
 
 class TestPublicApi:
@@ -117,7 +107,7 @@ class TestScopedRegistry:
 
     def test_registry_view_behaves_like_the_2x_dict(self, clean_registry):
         def factory(nsamples):
-            return ("x",), [(1,)]
+            return Parameter(TestArg("x", value=1), nsamples=1)
 
         Strategy._registry["v3_view"] = factory
 
@@ -137,6 +127,8 @@ class TestErrorMessages:
             Parameter(TestArg("x", value=1), TestArg("x", value=2))
 
     def test_exhausted_retries_name_each_constraint(self):
+        """Since 4.0 the counts are by constraint name, with the first row each rejected."""
+
         def below_zero(vector):
             return vector[0] < 0
 
@@ -151,79 +143,21 @@ class TestErrorMessages:
             param.generate_vector()
 
         message = str(excinfo.value)
-        assert "Could not generate valid vector after 40 attempts" in message
-        lambda_count = int(message.split("constraint #0 (lambda) rejected ")[1].split(",")[0])
-        named_count = int(message.split("below_zero (constraint #1) rejected ")[1].rstrip("."))
+        line = param.vector_constraints["constraint_0"].__code__.co_firstlineno
+        parsed = re.fullmatch(
+            r"Could not generate a random row after max_retries=40 draws\. "
+            r"Rejected by \(first failing constraint per draw\): "
+            r"constraint_0=(\d+), below_zero=(\d+)\. "
+            rf"First rows rejected: constraint_0 \(lambda at test_v3_features\.py:{line}\): "
+            r"Vector\(x=[0-4]\); below_zero: Vector\(x=[5-9]\)\. "
+            r"Raise Parameter\(max_retries=\.\.\.\) or relax a constraint\.",
+            message,
+        )
+        assert parsed is not None, message
+        lambda_count, named_count = map(int, parsed.groups())
         assert lambda_count + named_count == 40
         assert lambda_count > 0 and named_count > 0
 
     def test_max_exhaustive_must_be_a_positive_int(self):
         with pytest.raises(ValueError, match="max_exhaustive must be None or an int >= 1"):
             Parameter(TestArg("x", value=1), max_exhaustive=0)
-
-
-class TestDeprecations:
-    def test_legacy_tuple_warns_at_the_factory(self, clean_registry):
-        def legacy(nsamples):
-            return ("x",), [(1,), (2,)]
-
-        def test_x(x):
-            pass
-
-        with warnings.catch_warnings(record=True) as record:
-            warnings.simplefilter("always")
-            parametrization = build_parametrization(
-                "v3_legacy", legacy, test_x, config=None, pytest_fixtures=set()
-            )
-
-        warning = _only_deprecation(record)
-        assert warning.filename == __file__
-        assert warning.lineno == legacy.__code__.co_firstlineno
-        assert "returns an (argnames, samples) tuple" in str(warning.message)
-        assert parametrization.values == [1, 2]
-
-    def test_set_max_retries(self, monkeypatch):
-        monkeypatch.setattr(RNG, "_max_retries", RNG._max_retries)
-        with warnings.catch_warnings(record=True) as record:
-            warnings.simplefilter("always")
-            RNG.set_max_retries(7)
-
-        assert _only_deprecation(record).filename == __file__
-        assert RNG._max_retries == 7
-
-    def test_configure(self):
-        with warnings.catch_warnings(record=True) as record:
-            warnings.simplefilter("always")
-            pytest_strategy.configure(validate_signatures=False)
-
-        assert _only_deprecation(record).filename == __file__
-
-    def test_set_config(self):
-        config = SimpleNamespace()
-        runtime.push()
-        try:
-            with warnings.catch_warnings(record=True) as record:
-                warnings.simplefilter("always")
-                Strategy.set_config(config)
-            assert runtime.config is config
-        finally:
-            runtime.pop()
-
-        assert _only_deprecation(record).filename == __file__
-
-    @pytest.mark.parametrize("option", ["directed_values", "test_values"])
-    def test_test_arg_values(self, option):
-        with warnings.catch_warnings(record=True) as record:
-            warnings.simplefilter("always")
-            arg = TestArg("x", rng_type=RNGInteger(0, 9), **{option: [1, 2]})
-
-        warning = _only_deprecation(record)
-        assert warning.filename == __file__
-        assert option in str(warning.message)
-        assert getattr(arg, option) == [1, 2]
-
-    def test_supported_calls_do_not_warn(self):
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            TestArg("x", rng_type=RNGInteger(0, 9))
-            Parameter(TestArg("x", value=1), directed_vectors={"one": (1,)})

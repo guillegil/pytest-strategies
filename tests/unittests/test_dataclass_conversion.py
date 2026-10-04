@@ -1,5 +1,5 @@
 """
-Unit tests for _dataclass module.
+Unit tests for building records (the _records module).
 
 Tests convert_to_dataclass as a pure function.
 """
@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from pytest_strategy._dataclass import convert_to_dataclass
+from pytest_strategy._records import convert_to_dataclass
 
 
 @dataclass

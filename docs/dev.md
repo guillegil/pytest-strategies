@@ -7,7 +7,9 @@ A pytest plugin for constrained-randomized test parametrization with directed te
 `pytest_strategy` enables you to write powerful parametrized tests that combine:
 - **Constrained random generation** - Generate test inputs with specific constraints
 - **Directed testing** - Define specific test cases (edge cases, known bugs, etc.)
-- **Reproducibility** - Seed-based random generation for consistent test runs
+- **Reproducibility** - Seed-based random generation for consistent test runs,
+  with row-stable random streams and a repro command for each failed row
+- **Stable test IDs** - Rows are named (`directed-zeros`, `rand-3`), the same for every seed
 - **CLI control** - Run specific test vectors via command-line arguments
 
 ## Project Goal
@@ -28,7 +30,7 @@ from pytest_strategy import Parameter, RNGInteger, TestArg, register, strategy
 
 # Define a strategy
 @register("test_addition_strategy")
-def create_addition_samples(nsamples):
+def create_addition_samples():
     # Return a Parameter; the plugin generates the vectors from it
     return Parameter(
         TestArg("a", rng_type=RNGInteger(0, 100)),
@@ -72,7 +74,19 @@ pytest test_example.py --vector-index 0
 
 # Set seed for reproducibility
 pytest test_example.py --rng-seed 42
+
+# Select rows by name: one directed vector, every directed row, no random rows
+pytest test_example.py -k zeros
+pytest test_example.py -k directed-
+pytest test_example.py -k "not rand-"
+
+# Run one random row again with the values it had in the run with seed 42
+pytest "test_example.py::test_addition[rand-3]" --rng-seed 42
 ```
+
+The test IDs name the rows (`test_addition[directed-zeros]`,
+`test_addition[rand-3]`), so they are the same for every seed; the README's
+"Test IDs and Selecting Rows" section has the grammar.
 
 ## Architecture
 
@@ -82,21 +96,38 @@ pytest test_example.py --rng-seed 42
 src/pytest_strategy/
 ├── __init__.py          # Package initialization and public names
 ├── __main__.py          # python -m pytest_strategy (the pytest-strategies command)
-├── plugin.py            # Pytest plugin hooks, CLI options, strategy file loading
-├── _api.py              # register(), strategy(), export_strategies() and the Strategy facade
+├── plugin.py            # Pytest plugin hooks, CLI and ini options, strategy file loading,
+│                        # the strategies_ctx fixture, the repro output, the xdist check
+├── hookspecs.py         # Hooks the plugin adds (pytest_strategies_context)
+├── _api.py              # register(), strategy(), export_strategies(), get_context() and
+│                        # the Strategy facade
 ├── _registry.py         # The folder-scoped strategy registry
 ├── _resolver.py         # Turns a strategy and a test into a parametrization
+├── _factory.py          # Calls a factory with the inputs it declares, by name
+├── _options.py          # StrategyOptions, and the --strategy-constraint-off items
+├── _context.py          # Each folder's pytest_strategies_context answer, in the plugin's order
+├── _fingerprint.py      # The fingerprint of a context, and the encoder of the value digests
+├── parameters.py        # Parameter class (arguments, vectors, constraints, row generation)
+├── _vector.py           # Vector (the class of the rows), VectorInfo and the stash keys
+├── _records.py          # Record mode: which test parameter takes the row as one object
+├── _ids.py              # Test IDs: the names format and the 3.0 values format
+├── _streams.py          # Random streams v1: the stream keys and the streams VERSION
+├── _encode.py           # The schema 1 value encoding (VectorInfo.to_dict(), the export)
+├── _export.py           # The schema 1 export and the to_dict() methods' fragments
+├── _repro.py            # A failed row's section, rerun command and JUnit properties
+├── _reuse.py            # The seeds --lf and --sw reuse (cache key pytest-strategies/failed-seeds)
+├── _runtime.py          # Per-session state, on a stack for nested pytester sessions
+├── _introspection.py    # Signature helpers for the named-mode check
+├── _warnings.py         # PytestStrategiesWarning
 ├── _cli.py              # pytest-strategies skill install
 ├── strategy.py          # 2.x compatibility module (Strategy, PytestStrategiesWarning)
-├── parameters.py        # Parameter class (vector container)
 ├── test_args.py         # TestArg class (single argument definition)
-├── rng.py               # Random number generation and RNG types
-├── hookspecs.py         # Hooks the plugin adds (pytest_strategies_context)
+├── rng.py               # Random number generation, RNG types and the plugin's generator
 ├── skill/               # The agent skill that pytest-strategies skill install copies
-├── py.typed             # PEP 561 marker: type checkers use the package's annotations
-└── _*.py                # Other internal helpers (introspection, test IDs, dataclasses,
-                         # runtime state, warning categories)
+└── py.typed             # PEP 561 marker: type checkers use the package's annotations
 ```
+
+Section 6 below describes the modules 4.0 added.
 
 ## Core Components
 
@@ -219,7 +250,7 @@ arg3 = TestArg(
 
 # Generate values
 value = arg1.generate()                    # Single value
-samples = arg1.generate_samples(10)        # 10 samples
+samples = arg1.generate_samples(10)        # 10 draws ([value] for a static argument)
 ```
 
 **Key Features:**
@@ -228,27 +259,44 @@ samples = arg1.generate_samples(10)        # 10 samples
 - Type introspection
 - Integration with RNG types
 
+`value`, `validator` and `description` are keyword-only. `rng_type` must be an
+`RNGType` or have a callable `generate()`; anything else, such as a bare lambda or
+a class instead of an instance (`RNGBoolean` for `RNGBoolean()`), raises
+`TypeError` when the `TestArg` is built. An object without `python_type` gives
+the type `Any`.
+
 **Properties:**
 - `name` - Argument name
 - `description` - Human-readable description
 - `type` - Python type
 - `is_static` - Whether it has a fixed value
-- `has_directed_values` - Whether it has directed values
 
 **Inside a `Parameter`:** a strategy uses each argument's `rng_type` (or static
 `value`) and its `validator`. Define edge cases as the `Parameter`'s
-`directed_vectors` and `test_vectors`. (The argument-level `directed_values` and
-`test_values` are deprecated and removed in 4.0: a `Parameter` never turned them
-into vectors.) The validator runs on random draws,
-static values and `Series`/`RNGSequence` values, but not on directed or test
-vectors. A value that fails it stops collection with a `ValueError` and is not
+`directed_vectors` and `test_vectors`; a `TestArg` holds no vectors of its own,
+and `generate_samples(n)` returns `[value]` for a static argument and `n` draws
+otherwise. The validator runs on random draws, static values and
+`Series`/`RNGSequence` values, but not on directed or test vectors. A value that fails it stops collection with a `ValueError` and is not
 redrawn, so use a predicate on the RNG type to filter values instead.
 
 ---
 
 ### 3. `parameters.py` - Parameter Vector Container
 
-Groups multiple `TestArg` instances into parameter vectors (tuples).
+Groups multiple `TestArg` instances into parameter vectors. Every row
+it generates is a `Vector` (`_vector.py`): `vector_type(names)` builds one
+namedtuple class per tuple of argument names, which also subclasses `Vector`, and
+caches it, so `Parameter.vector_type` is shared by Parameters with the same names
+and a prefix of the names gets a class of its own. One private `_build_row` fills
+a row in declaration order (the enumerated values are already in place, the other
+arguments are drawn), builds the Vector and hands it to the constraints, for the
+plain, Series, `per_sequence_samples` and exhaustive paths alike. Each drawn
+argument draws from a generator of its own, reseeded for each row from the row's
+key (`_RowStreams`, see [Reproducibility](#reproducibility)); the generator is
+installed as `RNG._generator` only while the argument's `generate()` and
+validator run, and a retry continues it. `_generate_row(key, pos, j)` builds one
+row on its own, with the values of the full list. Argument names must therefore
+be identifiers that are not keywords and do not start with `_`.
 
 ```python
 from pytest_strategy import Parameter, TestArg
@@ -281,8 +329,8 @@ names = param.list_vector_names()                 # List all vector names
 # Add vectors dynamically
 param.add_directed_vector("custom", (25, 2.5, "slow"))
 
-# Add constraints (cross-parameter validation)
-param.add_constraint(lambda v: v[0] < v[1])  # Ensure first < second
+# Add constraints (cross-parameter validation); a row is a Vector, read by name
+param.add_constraint(lambda v: v.count <= v.timeout * 10, name="fits_timeout")
 ```
 
 **Sampling Modes:**
@@ -302,15 +350,81 @@ options) take precedence over the mode and return that one directed vector, or
 raise `KeyError` / `IndexError` when it does not exist. `n` must be an int >= 0
 in the modes that generate samples.
 
-**Constraints:** a random vector that fails `vector_constraints` is redrawn up to
-`max_retries` times (default 100) before `generate_vectors` raises. The error
-counts the draws each constraint rejected, naming it by its function name (or
-`constraint #i (lambda)`). With `Series`
+**Rows:** every generation path goes through one entry point,
+`Parameter._generate_rows(n, *, exhaustive=False, mode=..., filter_by_name=...,
+filter_by_index=..., constraints_off=..., stats=None)`, which returns the rows as
+`_Row`s in their 3.0 order: `kind` (`directed`, `test`, `random`, `exhaustive`,
+or `skipped` for the one row of an empty `skip_if_empty` sequence), `name` (the
+vector's name, else None), `index` (the number `VectorInfo.index` and the
+messages show: the vector's position, `j` for a random row, the position in the
+declaration-order product of the enumerated sequences for an exhaustive row,
+None for `skipped`), `pos` (the enumerated arguments as `(name, token)` pairs,
+sorted by name), `j` (the row's number within its combination: k for a plain
+random row, the cycle for a finite Series row, so a combination the constraints
+skip leaves a gap, the row's number with `per_sequence_samples`, 0 for an
+exhaustive row), `values` (a `Vector`), `labels` (the enumerated arguments'
+labels, in declaration order) and `param` (the `pytest.param` a vector was given
+as). `generate_vectors()` and `generate_exhaustive()` return the rows' values.
+The resolver calls `_generate_rows()` itself, with `exhaustive=True` under
+`--nsamples=auto`, and builds each row's test ID (`names_id()`) and `VectorInfo`
+from the same `_Row`, so the row index is defined once; a subclass that
+overrides `generate_vectors()` does not change a test's rows.
+`_position_keys(arg, sequence)` gives each position of an enumerated argument's
+sequence (after its predicate) a `_Key(label, token)`: the label the ID shows
+(`ch=2`, `ch=1~1` for a repeat, `ch3` by position) and a typed token (`n`,
+`b:True`, `e:<qualname>.<member>`, `i:42`, `f:<float.hex()>`, `s:fast`,
+`y:<hex>`, `#<position>`). `_value_keys()` decides a value's type in the order
+None, bool, Enum member, `numbers.Integral`, `numbers.Real`, str, bytes,
+anything else, and keys a value it cannot convert (a Flag value that is no
+member, an int with too many digits for `str()`) by its position. `_auto_order()`
+gives a sequence's `--nsamples=auto` order as positions
+(`SequenceLike._auto_positions()`), and matches the values of a subclass that
+overrides `_get_auto_sequence()` back to their positions (`RNGValueError` for a
+value its sequence does not have).
+
+**Constraints:** `vector_constraints` is a read-only mapping of names to
+functions (the private `_constraints` dict), in evaluation order; a list given
+to the constructor is named by each function's `__name__`, or `constraint_<i>`
+for lambdas, partials and callable objects (`_unnamed` keeps those names, so the
+messages add the constraint's origin). Duplicate names, a function given twice
+and names with whitespace, `:`, `,` or `=` fail when the `Parameter` is built. A
+random vector that fails a constraint is redrawn up to `max_retries` times
+(default 100) before `generate_vectors` raises `_ConstraintsExhausted`, whose
+message counts the draws by the name of the first failing constraint
+(`_Rejections`) and shows the first row each one rejected; the resolver replaces
+its last sentence with advice that names the strategy and its strictest
+constraint. The exception of a constraint that raises goes up unchanged, so a
+caller that catches its type keeps working, with a note naming the constraint
+and the row and a `_ConstraintFailure` in its `_CONSTRAINT_FAILURE` attribute
+(`_ConstraintFailure.attach()`, which replaces the note of an earlier failure on
+the same exception object, so a re-raised instance keeps one note); the resolver
+attaches it again so the note names `--strategy-constraint-off`, builds the
+collection error from it and chains it to the user's exception. `attach()`
+writes the note and the attribute with `object.__setattr__`, so a frozen
+dataclass or attrs exception is not replaced by a `FrozenInstanceError` (an
+exception that rejects even that gets no note, and its failure waits in
+`_unattached` until the resolver reports it); for the same reason the resolver's
+`_attributed_warnings` is a class, since a `contextlib.contextmanager` assigns
+the exception's `__traceback__` on the way out. The resolver collects the
+counts (and the combinations `--nsamples=auto` left out) for the `-v` summary in
+a `_GenerationStats` it passes as the `stats` keyword of `_generate_rows()`; the
+private `_stats` keyword of `generate_vectors()` and `generate_exhaustive()`
+passes one on.
+Their keyword-only `constraints_off` names constraints the call does not
+evaluate (`_evaluated()` builds the list once per call); the `Parameter` keeps
+them, so a cached factory's `Parameter` is never changed. The resolver passes
+the names of `--strategy-constraint-off` that the `Parameter` has
+(`StrategyOptions.constraints_off` intersected with its constraint names) and
+records every resolved strategy's constraint names on the session
+(`SessionState.constraint_names`), whether or not the run evaluates them, so the
+plugin can check the items once collection ends. A raising constraint's error
+names the constraints before it that were turned off (`_ConstraintFailure.off_before`).
+With `Series`
 args, `n` rows are taken by cycling through the `Series` combinations. A
 combination the constraints reject is skipped, after its random args have been
 redrawn up to `max_retries` times, and each such skip with random args emits a
 `PytestStrategiesWarning`. The call raises only when a whole cycle yields no
-vector. `generate_exhaustive()` (used for `--nsamples=auto`) builds the
+vector. `generate_exhaustive()` (the rows of `--nsamples=auto`) builds the
 Cartesian product of the `Series`/`RNGSequence` args, drops combinations the
 constraints reject after the same redraws, and raises when it drops all of them.
 
@@ -339,14 +453,21 @@ created with `skip_if_empty` that has no values, or `None`. When it is set,
 drawing random values (an invalid `n` still raises). `filter_by_name`/`filter_by_index` still raise
 `KeyError`/`IndexError` for a missing vector, so the CLI can tell whether a
 filter matched. The resolver then parametrizes the test with a single
-`pytest.param(None, ..., marks=pytest.mark.skip(reason=...), id="skipped")` row,
-also in dataclass mode, where no instance is built but the dataclass fields are
+`pytest.param(None, ..., marks=pytest.mark.skip(reason=...))` row, whose ID is `skipped`,
+also in record mode, where no instance is built but the dataclass fields are
 still checked against the strategy's arguments. `skip_if_empty` is keyword-only,
 and a non-callable `predicate` (such as a reason passed positionally) raises.
 
 The `Parameter` copies the `directed_vectors`, `test_vectors` and
 `vector_constraints` it is given, so `add_*`/`remove_*` never change the
-caller's dicts and lists.
+caller's dicts and lists. Every directed and test vector goes through
+`_normalize_vector()` (in `__init__` and the `add_*` methods), which stores it
+as a `Vector` in declaration order: a dict or a namedtuple by name, a tuple, list
+or other iterable by position, and a `pytest.param` rebuilt around the `Vector`
+with its marks. Strings, bytes, scalars, record instances and a `pytest.param`
+with an `id=` (the vector's name is its ID) fail there, and so do names that are
+not non-empty strings. `directed_vectors` and
+`test_vectors` are read-only `MappingProxyType` views of the private dicts.
 
 **Key Features:**
 - Vector management (add, remove, get)
@@ -377,7 +498,7 @@ from pytest_strategy import Parameter, RNGInteger, TestArg, register, strategy
 
 # Register a strategy
 @register("my_strategy")
-def create_samples(nsamples):
+def create_samples():
     # Return the Parameter itself; the plugin generates the vectors from it,
     # which is what lets CLI options such as --vector-mode apply to it
     return Parameter(
@@ -415,10 +536,12 @@ def test_coordinates(x, y):
    loads every strategy file and uses the only registration elsewhere,
    preferring one outside the rootdir; several candidates are an error. A
    factory passed directly is used as it is.
-4. `build_parametrization()` restarts the generator on the strategy and test's
-   own stream (see [Reproducibility](#reproducibility)), then calls the factory
-   once. It passes `nsamples` by keyword, positionally, or not at all, depending
-   on the factory's signature, and `ctx` when the factory has that parameter.
+4. `build_parametrization()` calls the factory once through
+   `_factory.call_factory()`, on the factory's own stream (see
+   [Reproducibility](#reproducibility)). The rows draw from streams keyed by
+   the run seed, the strategy name and the test's node ID. The factory gets, by
+   name, the inputs it declares: `nsamples`, `ctx`, `rng` and `options` (see
+   "Factory inputs" below).
 5. It generates the vectors from the returned `Parameter` according to the CLI
    options, with readable test IDs. The plugin inserts a
    `pytest.mark.parametrize` marker right after the `strategy` marker, so
@@ -430,19 +553,56 @@ raises `ValueError`) fail the test's collection like pytest's own parametrize
 errors: `In test_x: <message>`, with the factory's own frames and without the
 plugin's. `--full-trace` shows the full traceback.
 
+**Factory inputs:** `_factory.analyse()` reads the factory's signature into a
+`CallPlan` without calling anything, and `call_factory()` follows it. The
+signature of the callable that is called decides; when it has none or only
+`*args`/`**kwargs`, the `__wrapped__` chain is followed one level at a time
+(also behind a partial, a bound method, a callable object's `__call__` or a
+class's `__init__`) and the first signature that names its parameters decides,
+so with stacked decorators it is the outermost wrapper's that does. Without
+one the factory is called with no arguments. Each parameter named `nsamples`,
+`ctx`, `rng` or `options` gets that input (positional-only ones by position,
+the others by keyword, or all by position when a `functools.wraps` wrapper
+passed through has `*args` but no `**kwargs`); any other parameter keeps its
+default, `*args` and `**kwargs` receive nothing, and the mocks of a
+`mock.patch` passed through take the first parameters.
+A parameter without a default that is not an input, a reserved name (`base`,
+`config`, `request`) and an `async def` factory fail with a `ValueError` before
+the factory or the context hook runs. `ctx` is computed only for a factory that
+declares it, and is left out when it is None and the parameter has a default.
+The rule for 4.x: a new factory input arrives as a new `StrategyOptions` field
+with a default, or under a reserved name. The plugin never starts passing a
+value to a name that 4.0 accepted.
+
 A test parameter that is not one of the strategy's argument names is left to
 pytest as a fixture. A test can also take the vector as one dataclass instance:
-see "Dataclass Parameters" in the README.
+see "Record Parameters" in the README. `_records.py` holds that rule:
+`detect_record_param(test_fn, argnames, fixturenames)` reads
+`metafunc.fixturenames`, so an argument that the test or any of its fixtures asks
+for keeps the strategy in named mode, and the named-mode signature check counts
+those names as taken. It recognizes dataclasses, NamedTuple, TypedDict and
+pydantic v2 models (through `sys.modules`, never importing pydantic) with fixed
+field sets, and builds only dataclasses. The resolver asserts that no argument
+name is in `fixturenames` in record mode: only the record parameter is
+parametrized, so a fixture asking for an argument would find nothing.
 
 **Key Features:**
 - Folder-scoped strategy names
 - Automatic pytest parametrization
-- A random stream of its own for each strategy and test
+- Random streams of their own for each strategy, test, row and argument
 - CLI option integration
-- Readable test IDs. A value whose repr contains a memory address is shown by
+- Test IDs that name the row (`directed-zeros`, `rand-3`, `ch=2-rand-1`, built by
+  `names_id()` from the row's kind, name, j and labels), the same for every seed.
+  The ini option `strategies_ids=values` gives the 3.0 IDs built from the values
+  instead: there a value whose repr contains a memory address is shown by
   its type name, and set elements are sorted (also inside tuples, lists,
   dicts, and dataclass and namedtuple values that keep their generated repr),
   so IDs are the same on every run and on every xdist worker.
+  `Parameter(ids="names" | "values")` overrides the ini option for one strategy,
+  and a callable `ids=` (`_custom_ids()`) receives each row's `VectorInfo` with
+  the ID of the effective format and returns a str or None (keep it); the
+  skipped row gets no call. `_unique_ids()` then suffixes duplicates, and the
+  `VectorInfo` of each row carries the final ID.
 
 ---
 
@@ -458,6 +618,7 @@ Provides pytest hooks and CLI options.
 --vector-mode MODE        # Sampling mode: all, random_only, directed_only, mixed, test
 --vector-name NAME        # Run specific directed vector by name
 --vector-index INDEX      # Run specific directed vector by index
+--strategy-constraint-off [STRATEGY:]NAME[,...]  # Turn constraints off (repeatable)
 --list-strategies         # List the registered strategies and exit
 ```
 
@@ -465,7 +626,12 @@ Provides pytest hooks and CLI options.
 
 ```ini
 strategies_max_exhaustive = 100000  # Most rows --nsamples=auto (or per_sequence_samples) may generate per strategy
+strategies_ids = names              # Test IDs of strategy rows: names, or values (the 3.0 format)
 ```
+
+**Fixture and marker:** the session fixture `strategies_ctx` (D8, below) and the
+`strategy` marker, `strategy(name_or_factory, *, validate_signature=True)`,
+which `@strategy` adds and which also carries each row's `VectorInfo`.
 
 `--nsamples` is checked when the command line is parsed: anything other than an
 integer >= 0 or `auto` (in any case) is a usage error. Under `auto`, directed
@@ -476,26 +642,87 @@ own `nsamples`, or 10. A strategy that lacks the vector requested by
 `--vector-name` or `--vector-index` gets an empty parameter set (its tests are
 skipped). If no strategy has it, the run stops with a usage error.
 
+`--strategy-constraint-off` items are checked when the command line is parsed
+(`_options.parse_constraint_off`: whitespace, empty items, `:x` and `x:` are
+usage errors) and split at their last `:` into `(strategy, name)` pairs on
+`SessionOptions`. Once collection ends, an item that matches no constraint of a
+strategy the run resolved is a usage error when the run collected the whole
+suite, and otherwise a red line after the collection report (on a pytest-xdist
+worker, sent with the `-v` summary and printed by the controller). A run counts
+as the whole suite (`_collects_whole_suite`) when it was given no paths or node
+IDs (`config.args_source` is not `ARGS`), started in the rootdir (pytest's own
+rule in `Config._decide_args`: a run without arguments from a folder below it
+collects only that folder), and got none of `--lf`, `--sw`, `--ignore` or
+`--ignore-glob`, and when no test module or class was skipped or failed to
+collect (`pytest_collectreport` sets `SessionState.collectors_incomplete`: the
+strategies of its tests may not have been resolved). It is not checked under
+`--list-strategies` or when no `Parameter` strategy was resolved.
+
 **Pytest Hooks:**
 - `pytest_addhooks` - Adds the `pytest_strategies_context` hook (see below)
 - `pytest_addoption` - Adds CLI options
-- `pytest_configure` - Opens the session's state and sets the run's seed,
-  restarting the plugin's generator from it; a pytest-xdist worker without
-  `--rng-seed` takes the controller's seed
-- `pytest_configure_node` - (pytest-xdist only) sends the controller's seed to
-  each worker
+- `pytest_configure` - Checks the `strategies_ids` ini option (any value but
+  `names` or `values` is a `UsageError`, exit code 4), opens the session's state
+  and sets the run's seed, restarting the plugin's generator from it; a
+  pytest-xdist worker without `--rng-seed` takes the controller's seed, and a
+  `--lf` or `--sw` run without it the failed run's (`_reuse.plan()`, see
+  [Reproducibility](#reproducibility)). A `tryfirst` implementation opens the
+  state and chooses those seeds, reading the cache before the cache plugin sets
+  `config.cache`, so `get_context()` works in the other plugins' and the
+  conftest.py files' `pytest_configure`, with the conftest.py files loaded so
+  far. The other registers the plugin instance, whose `pytest_configure` sets
+  the seed after the initial conftest.py files' and the later plugins'
+  `pytest_configure`, as in 3.0: `RNG.seed(1234)` there sets it when no seed was
+  chosen, `config.option.rng_seed = 99` always. A context computed in
+  `pytest_configure` before such a call draws from the seed in effect then
+- `pytest_configure_node` - (pytest-xdist only) sends each worker the
+  controller's seed, and the `--lf` rows to deselect or to watch
+- `pytest_plugin_registered` - Records a `conftest.py` that pytest imported by
+  its path (a module registered under its path) in
+  `SessionState.imported_files`, which keys its fixtures and factories by its
+  path (see [Reproducibility](#reproducibility)). The hook is historic, so the
+  conftest files pytest loaded before the plugin registered count too
 - `pytest_collectstart` - Before a test module is imported, loads the strategy
   files of its folder and the folders above it
 - `pytest_generate_tests` - Resolves the test's `strategy` markers into
-  `parametrize` markers
+  `parametrize` markers. A second, module-level implementation runs last: it
+  fails a test written for record mode whose fixtures take every argument by
+  name when no fixture or parametrization gives its record parameter a value
+- `pytest_itemcollected` - (tryfirst) Stores the `VectorInfo` of each strategy
+  row an item runs, read from the row's `strategy` mark: the first in node-ID
+  order under `VECTOR_KEY`, all of them under `VECTORS_KEY`, before any
+  `pytest_collection_modifyitems` hook
+- `pytest_collectreport` - Notes a test module or class that was skipped or
+  failed to collect: its strategies may be unresolved, so the run counts as
+  narrowed for `--strategy-constraint-off`
 - `pytest_collection_modifyitems` - Fails the run on a name registered twice in
-  one folder, and when `--vector-name` or `--vector-index` matched no strategy
-- `pytest_collection_finish` - Handles `--list-strategies`
-- `pytest_report_header` - Prints the seed
-- `pytest_terminal_summary` - After a failed run, prints
-  `pytest-strategies: reproduce with --rng-seed=S`; with `-v`, a Strategy
-  Summary (tests and directed, random and test rows per strategy, and where
-  `nsamples` came from)
+  one folder, when `--vector-name` or `--vector-index` matched no strategy, and
+  when a `--strategy-constraint-off` item matched no constraint in a run of the
+  whole suite. Another deselects the `--lf` rows recorded under another seed
+- `pytest_collection_finish` - Handles `--list-strategies`, and prints the
+  unmatched `--strategy-constraint-off` items of a narrowed run; on a
+  pytest-xdist worker, notes the digest of each strategy's values and the
+  contexts the collection computed, for the controller
+- `pytest_report_header` - Prints the seed, the line that says a `--lf` or
+  `--sw` run reused it, and the `--strategy-constraint-off` items
+- `pytest_report_collectionfinish` - Prints the fingerprints of the contexts the
+  collection computed (`pytest-strategies: context <fp>`)
+- `pytest_runtest_logreport` - Records the tests whose setup or call failed, and
+  the failed strategy rows' commands (`report.pytest_strategies`, see `_repro`)
+- `pytest_terminal_summary` - After a failed run, prints `pytest-strategies:
+  reproduce with --rng-seed=S` with the failed tests' contexts and the failed
+  rows, and in any run the commands of the `--lf` rows set aside; with `-v`, a
+  Strategy Summary (rows of each kind per strategy, where `nsamples` came from)
+  and the Contexts block (label, fingerprint, tests per context). The xdist
+  controller first prints the workers' context line, and in red what differed
+- `pytest_sessionfinish` - A tryfirst one adds the `--junitxml` suite
+  properties. The other maps the failed tests to their factories' contexts and
+  records the failed seeds; a pytest-xdist worker sends its `-v` summary, the
+  recorded rows that passed and its part of the same-vectors check, and the
+  controller compares the parts and turns exit status 0 or 5 into 4 when they
+  differ
+- `pytest_testnodedown` - (pytest-xdist only) keeps what each worker sent, by
+  worker ID; a worker that crashed sent nothing
 
 **Strategy files:** a strategy file is named `strategies.py`, `strategy.py`,
 `*_strategies.py` or `*_strategy.py` and contains a registration decorator
@@ -525,8 +752,8 @@ taken by another file (`ImportPathMismatchError`, or a module with another
 that module out when a test module or `conftest.py` imports the file, so the
 file is not executed again. A file that a `conftest.py` or test module imported
 before the plugin reached it, with its strategies registered, is used as it is.
-The generator is restarted on a stream keyed by the file's path relative to the
-rootdir while a file is imported, and restored afterwards.
+A file is imported on a stream of its own, keyed by its path relative to the
+rootdir (see [Reproducibility](#reproducibility)).
 
 A file that raises while loading is reported with a
 `pytest-strategies: Warning - Failed to load ...` line. A file that calls
@@ -536,14 +763,285 @@ together with the files matching a pattern that mention `register` but have no
 registration decorator (so were not imported).
 
 **`pytest_strategies_context(config)`:** a `firstresult` hook the plugin adds.
-A factory with a `ctx` parameter gets its result as `ctx=` (when no
+A factory with a `ctx` parameter gets its result as `ctx` (when no
 implementation returns a value, `ctx` keeps its default, or a value bound with
-`functools.partial`, and is `None` without one); other factories are called as
-before.
-`call_factory` calls it through `runtime.strategy_context()` the first time a
-factory needs it, and the session keeps the result, or the exception it raised,
-for every later factory. Each (nested) session and each pytest-xdist worker
-calls it once. See the README for an example.
+`functools.partial`, and is `None` without one); other factories never trigger
+it. `_context.py` gives each folder its own context (D7). For a test,
+`runtime.test_context(metafunc.definition)` takes the implementations from
+`definition.ihook` (pytest's hook proxy for the test's folder: every plugin and
+the conftests of the folder and above); for a path,
+`runtime.path_context(path)` takes every implementation and drops the conftests
+whose folder does not contain it (`_context.visible_from()`; not
+`session.gethookproxy()`, which drops the conftests of a folder pytest has not
+collected). An implementation is a conftest's when its `plugin_name` ends with
+`conftest.py`. `_context.call_order()` orders them: `tryfirst`, the conftests
+from the deepest folder upward, the other plugins in pluggy's order (last
+registered first), `trylast`, the same order within the `tryfirst` and
+`trylast` groups. The first that is not None answers. The session's
+`ContextStore` calls each implementation on its own, with the arguments it
+declares, at most once per session, and keeps its `Answer` (the value and its
+label, or the exception with its traceback, re-raised for every folder that
+consults it before an answer). When `wrapper=True` or `hookwrapper=True`
+implementations are visible, the others are asked first as without them, and
+the wrappers then go through pluggy's call loop (`PluginManager._hookexec`,
+private) around the one that answered (or none), replaced by a stand-in that
+returns its kept answer. That answer is kept per wrappers and answering
+implementation (`ContextStore._wrapped`), so a child folder whose conftest
+returns None shares its parent's wrapped object and label, and the wrappers run
+once for it, and once more for each other set of wrappers around the same
+implementation. A wrapper's code before its yield runs after the implementations
+it wraps (a deviation from D7's "pluggy's own call loop"): calling them inside
+the loop would run each one after the wrappers of the first folder that asks and
+before those of the others, so what a wrapper prepares would reach an
+implementation in one run and not in another. Since the wrappers receive the
+implementation's kept object, which the folders without them get too,
+`ContextStore._through_pluggy()` takes its fingerprint right before the wrappers
+run and `_check_unchanged()` right after, and when it changed the wrapped answer
+is a `RuntimeError` that says a wrapper must return a new object (a change the
+fingerprint does not show, in an object counted by its type alone, goes
+unnoticed). Comparing with the fingerprint taken before the wrappers, not the
+one taken when the implementation returned, leaves out what a test, a fixture or
+a factory changed in between, and an object whose fingerprint changes by itself
+(taken a third time, it differs again) blames no wrapper. When the two
+fingerprints of the implementation's object differ (taken when it returned and
+right before the wrappers), the wrapped answer is marked (`Answer.changed`): its
+fingerprint shows what ran before, which on another xdist worker may not have,
+so the xdist check leaves it out (below). When the wrappers
+return the very object the implementation returned, the wrapped answer is the
+implementation's own `Answer`, so the folders on both sides share one label (a
+deviation from D7's label rule below: one object is one context for
+`strategies_ctx` and the context lines). A folder's answer is also
+kept per list of the implementations it sees, so later tests look it up.
+The label is the conftest's path relative to the rootdir, the plugin's name
+(its class's name when pluggy named it by its id), `none` when nothing
+answered, or with wrappers that return another object the deepest conftest
+among the wrappers and the implementation that answered (when none is a
+conftest, the answering plugin's name, or the first wrapper's when nothing
+answered). A `FolderContext`
+computes its folder's answer only when a factory that declares `ctx` is called;
+when such a factory fails with `ctx` None while another folder's conftest
+implements the hook, `FolderContext.why_none()` adds where. Each (nested)
+session and each pytest-xdist worker calls each implementation at most once.
+`export_strategies()`, which has no test, gives a factory the path caller's
+context of the folder of its file (`_export.context_folder()`), or the rootdir's
+for a file outside the rootdir or in a `site-packages` or `dist-packages`
+folder below the rootdir (one above it, which a checkout may be in, does not
+count). A factory that declares `ctx` is not called when
+`_context.unloaded_conftests()` finds a `conftest.py` that a test in that
+folder would see and pytest has not loaded: one on disk in the rootdir, the
+folder or a folder between them, that pytest considers
+(`PytestPluginManager._is_in_confcutdir()`, private; none under
+`--noconftest`) and that no registered plugin's name (`str(conftestpath)`)
+points to by its real path. Its entry is then
+`{"unavailable": "tests/b/conftest.py was not loaded in this session"}`, so the
+export never reports a context that a test there would not get. See the README
+for an example.
+
+Tests and fixtures read the same objects (D8). `strategies_ctx`, a
+session-scoped fixture defined in `plugin.py`, takes its consumers from
+`session.items` when it is set up: the items whose `fixturenames` contain it,
+each kept only when the name resolves to this fixture's definition for it
+(`plugin._gets_this_fixture()`, private API: `request._fixturedef`, the item's
+`_fixtureinfo.name2fixturedefs`, and for a dynamic request
+`session._fixturemanager.getfixturedefs()`): the last definition it sees, or one
+reached from it through definitions that request the name in turn. A folder
+whose `conftest.py` overrides the fixture without requesting it, or a test that
+parametrizes the name, is no consumer. When there is none, and the requesting
+item (`request._pyfuncitem`, private) asked through `request.getfixturevalue()`,
+every item it resolves for is one. It computes each consumer file's
+`SessionState.test_context(item).answer()`; when their labels differ it fails
+with `pytest.fail(..., pytrace=False)`, which pytest caches for the session, so
+each consumer fails with the message (`plugin._ctx_scopes_message()`, labels
+sorted, each with its first node ID). Otherwise it keeps the label and the
+consumers in `SessionState.ctx_fixture` (`_runtime.CtxFixture`) and returns
+their `Answer.get()`, the cached object or the implementation's own exception.
+So which items count does not depend on which one asks first, in one process
+or on any xdist worker. A test that used the fixture otherwise while others
+request it is checked after its setup and after its call, in the plugin's
+`pytest_runtest_setup` and `pytest_runtest_call` wrappers (`plugin._check_ctx()`,
+`_ctx_mismatch()`). It used it when `plugin._ctx_users()` finds the plugin's
+fixture among those its request resolved (`item._request._fixture_defs`,
+private), or a fixture of `CtxFixture.requesters` whose `cached_result` is still
+the one kept there, or when the error its phase raised is the error such a
+fixture cached (`_requester_error()`: pytest raises it again without adding the
+fixture to `_fixture_defs`). When its own folder's label is another one, a phase
+that passed or skipped fails with the message; for an error, the message is
+kept in `item.stash` and the plugin's `pytest_runtest_makereport` wrapper adds it
+to that phase's report, as a `pytest-strategies` section of the error's
+representation (`addsection()`, after wrapping a report that takes no sections
+in `_repro.SectionedRepr`), or of the report for a plain-text one. The error
+is left as it is: a fixture's cached error is one object, which pytest raises
+again for every test that gets the fixture.
+`CtxFixture.requesters` maps each fixture whose setup reached the plugin's
+fixture through `request.getfixturevalue()`, directly or through fixtures that
+used it, to the `cached_result` that setup left (a value or an error), so only
+the tests that get that very value are checked: a function-scoped fixture that
+asks only for some tests leaves the others alone. The plugin's
+`pytest_fixture_setup` wrapper finds them. Before the setup of a fixture that
+requests none of them, `_hide_ctx_users()` takes `strategies_ctx` and the
+fixtures that used it (`_ctx_users()`: the plugin's fixture, the current
+requesters, and the fixtures that request one of these, in turn, found in one
+pass because `_fixture_defs` lists a fixture after those it requests: pytest
+resolves them first, and the hidden ones go back in their order) out of the
+request's `_fixture_defs`, so a `request.getfixturevalue()` in the setup
+resolves them again, from their caches, and puts them back; after it, also when
+it raised, `_note_ctx_requester()` keeps the fixture when any of them is back,
+and restores the hidden ones. That works when the test resolved
+`strategies_ctx` before the fixture too, so it does not depend on which test
+sets the fixture up. While the setup runs, `request.fixturenames` lacks the
+hidden names that are not in the item's own closure.
+`pytest_fixture_post_finalizer` drops a requester when pytest tears its value
+down, so the plugin keeps no value alive. A fixture whose setup catches a
+requester's cached error and returns or raises something else is not seen.
+`pytest_strategy.get_context(config, path)` (`_api.py`) finds the session of
+`config` with `runtime.session_of()` (the innermost one, so an outer session's
+config still works while an in-process `pytester` session runs; `RuntimeError`
+when none) and returns `SessionState.path_context(path)()`, the path caller
+above. Both call only the implementations of the folders they ask for, as
+factories do.
+
+Each context has a fingerprint (D9). `_fingerprint.fingerprint(value, rootpath)`
+returns the first 8 hex characters of the SHA-256 of a canonical JSON encoding,
+and the qualified names of the types it holds by name alone (`partial`): every
+value that JSON does not hold as it is becomes an object with one key, its tag
+(`float` by repr, `enum` by qualified name and name, `bytes` as hex, `path`
+relative to the rootdir as spelled or through `realpath`, tagged strings for
+dates, times, `Decimal`, `UUID` and `complex`, `type` by qualified name, `model`
+for a pydantic v2 model through `model_dump(mode="python")`, recognized on its
+type by `model_fields` and `model_dump`, `dataclass`, `attrs` (recognized on
+its type by `__attrs_attrs__`) and `namedtuple` field by field, `namespace` for a
+`SimpleNamespace` or `argparse.Namespace` as its `vars()` pairs, `map` as pairs
+in their order, `set` sorted by the elements' JSON, `repr` for other objects,
+and `object` for a type that keeps `object.__repr__`, which goes in `partial`).
+A `repr` is the object's repr as `_shown()` writes it, after one reading
+(`_scan()`) that finds its quoted strings (a quote opens one only where it is
+not part of a word, `_opens_string()`, so the apostrophe of `O'Brien` does not)
+and pairs its brackets with one stack (`(`, `[`, `{`, and `<` when a `>`
+closes it; a `<` left open when an enclosing group closes, or at the end, is a
+comparison's, and a `>` that closes no `<` an arrow's), so its time grows with
+the length of the repr. `_render()` then writes it without its memory addresses
+(`_without_addresses()`: `" at 0x..."` in a `<...>` repr or a group inside one,
+and a mock's `" id='...'"` that ends its `<...>`; an address outside `<...>`,
+such as a register's, or after a comparison's `<`, stays), with the sets it
+shows sorted (`_sorted_sets()`: the items of each `{...}` with two or more items
+and no `:` between them, nested ones first, so the hash order of a set of
+strings or Enum members does not show; when some brackets do not pair up, the
+sets stay as they are, and the addresses are still removed). It reads only the text: an
+object that holds a set its repr does not show (a testbench holding pytest's
+config, a register holding its chip) costs nothing more, and a set shown
+another way (`",".join(tags)`) is not recognized. Lists and
+tuples are arrays; the exact types str, int, bool, None and float, and exact
+lists and tuples, take a fast path, for the value digests below. A container
+met again below itself is `{"cycle": n}`. Any exception while encoding (a raising repr, a
+`RecursionError`) gives `unavailable`. `ContextStore._call()` and
+`_through_pluggy()` compute it right after the call returns, inside the same
+`_Stream(root(S, "ctx"))`, and keep it on the `Answer` (`fingerprint`,
+`partial`), so later changes to the object change no fingerprint. In
+`build_parametrization`, the factory's `ctx` is a closure that records the
+folder's `Answer` when the factory asks for it: `VectorInfo.context` is that
+answer's fingerprint, None for a factory that does not declare `ctx`, and
+`runtime.record_context(label, test)` counts the test for the `-v` block.
+`ContextStore.scopes()` gives the answers the folders got, by label;
+`pytest_report_collectionfinish` prints those with a fingerprint
+(`plugin._contexts_text()`: `context <fp>` for one, `contexts <label> <fp>, ...`
+sorted by label for several, with `(partial: ...)`). `pytest_runtest_logreport`
+records the node IDs of failed setups and calls, and `pytest_sessionfinish`
+maps them to the labels and fingerprints their factories received
+(`plugin._failed_contexts()`, through the test's node ID without parameters,
+`_test_key()`), which end the reproduce line. `_summary()` carries the
+`Contexts` block of the `-v` summary (`_context_entries()`, by label), so a
+pytest-xdist worker sends it with it; the controller prints the first finished
+worker's summary with the blocks of every worker merged by label, since a
+context computed only when a test ran (`strategies_ctx`, `get_context()`) is in
+the block of the worker that ran it.
+
+Under pytest-xdist the plugin checks that every worker generated the same
+vectors (D9), because names in the test IDs no longer make xdist notice workers
+that generated different values. When its collection finishes, before any test
+can change a value, a worker notes the digest of each strategy's values
+(`plugin._value_digests()`: the first 8 hex characters of the SHA-256 of the
+canonical JSON text of `[nodeid, values]` of each of its rows, in collection
+order, written by the fingerprint's encoder (`_fingerprint.canonical()`), so a
+set, a model or an attrs instance among the values does not depend on the
+worker's `PYTHONHASHSEED`; `unavailable` when the encoding raises) and the
+contexts the collection computed, as the line printed after the collection
+shows them (`SessionState.value_digests`, `collection_contexts`).
+When its session finishes, it writes `workeroutput["pytest_strategies_check"]`
+(`plugin._check()`): `contexts`, each label of `ContextStore.scopes()` with its
+fingerprint, `none` or `error: <type>`, except a wrapped answer marked
+`Answer.changed`, and `values`, the digests; strings only,
+because execnet carries builtin types. Its summary also carries the collection's
+contexts and the contexts its failed tests received. The controller keeps each
+worker's summary and check by worker ID in `pytest_testnodedown`
+(`SessionState.worker_summaries`, `worker_checks`), and in
+`pytest_sessionfinish` compares each label and each strategy among the workers
+that have it (`plugin._differences()`, workers in the order of their numbers): a
+key only one worker has is not compared, since a test that runs on one worker can
+compute its folder's context through `strategies_ctx`. When some differ, it sets
+the exit status to 4 if it was 0 or 5, and `pytest_terminal_summary` prints the
+differences in red (`_DIFFERENT_VECTORS`, the lines, `_DIFFERENT_VECTORS_HINT`)
+before the reproduce line. That runs after pytest-xdist's own "Different tests
+were collected" error, which aborts the run before any test is scheduled. The
+controller's context line merges the workers' collection contexts, and its
+reproduce line the contexts the failed tests received, each label taking the
+first worker's value in worker order.
+
+---
+
+### 6. The modules 4.0 added
+
+Each holds one part of the 4.0 design (the plan's decision numbers in brackets);
+the sections above and under Reproducibility give the details.
+
+- `_factory.py` (D6): factory inputs by name. `analyse(factory)` reads the
+  signature into a `CallPlan` without calling anything, and
+  `call_factory(name, factory, inputs)` calls the factory once, with `ctx` as a
+  zero-argument provider, so the context hook runs only for a factory that
+  declares `ctx`. Its errors are `FactoryError`s (a `ValueError`) with an
+  optional `note`, which the resolver reports as `In test_x: ...` and the export
+  writes as an `error` entry. See "Factory inputs" in section 4.
+- `_options.py` (D6, D12): `StrategyOptions`, frozen, keyword-only and slotted,
+  and `VectorMode`. `parse_session_options(config)` reads the session-wide part
+  once into a `SessionOptions`, which `StrategyRuntime.strategy_options()` caches
+  per session; `for_strategy(name)` gives each strategy its instance, with the
+  `--strategy-constraint-off` names aimed at it. `parse_constraint_off()` splits
+  the option's items, and `constraint_off_item()` writes them back for the rerun
+  commands.
+- `_streams.py` (D5): random streams v1. `StreamKey.root(seed, *parts)`,
+  `.child(*parts)` and `.seed_int()` hash typed, length-prefixed parts with
+  BLAKE2b; `path_part()`, `file_part()` and `installed_part()` turn paths into
+  key parts. `VERSION` is the streams version that `VectorInfo.streams` reports.
+  `rng._Stream`, `rng._Ambient` and `parameters._RowStreams` use the keys (see
+  Reproducibility).
+- `_vector.py` (D10, D17): `Vector`, and `vector_type(names)`, which builds and
+  caches one namedtuple class per tuple of argument names (picklable through
+  `__reduce__`, also in a fresh process); `VectorInfo`, frozen and keyword-only,
+  and the stash keys `VECTOR_KEY` and `VECTORS_KEY`.
+- `_context.py` (D7): the context per folder. `call_order()` orders the
+  implementations a folder sees, `visible_from()` picks them for a path,
+  `ContextStore` calls each one at most once per session and keeps its `Answer`,
+  `FolderContext` computes a folder's answer when a factory asks for it, and
+  `unloaded_conftests()` names the `conftest.py` files the export cannot know.
+  `_fingerprint.py` (D9) holds `fingerprint()` and `canonical()`, the encoder of
+  the context fingerprints and of the xdist value digests.
+- `_records.py` (D16): the record-mode rule. `detect_record_param(test_fn,
+  argnames, fixturenames)` returns the parameter that takes the row as one
+  record, or None for named mode; it recognizes dataclasses, NamedTuple, TypedDict
+  and pydantic v2 models with fixed field sets, and builds only dataclasses.
+- `_encode.py` (D17, D19): `encode()`, the schema 1 value encoding, used by
+  `VectorInfo.to_dict()` and the export.
+- `_export.py` (D19): `document()`, the `export_strategies()` document, and the
+  fragments of `Parameter.to_dict()`, `TestArg.to_dict()` and
+  `RNGType.to_dict()` (`rng_type_dict()`); `context_folder()` gives the folder
+  whose context an exported factory gets.
+- `_ids.py` (D3): `names_id()`, the names format, next to the 3.0 values format
+  (`generate_test_ids()`), which `strategies_ids = values` selects.
+- `_repro.py` (D18): a failed row's section (`failure()`), its rerun command
+  (`generation_options()`, `quote()`), the JUnit properties
+  (`suite_properties()`, `testcase_properties()`) and `SectionedRepr`.
+- `_reuse.py` (D4): the cache key `pytest-strategies/failed-seeds` (`updated()`),
+  the seed a `--lf` or `--sw` run reuses (`plan()`), and the commands of the rows
+  it sets aside (`commands()`).
 
 ---
 
@@ -555,7 +1053,7 @@ calls it once. See the README for an example.
 from pytest_strategy import Parameter, RNGInteger, RNGWeightedInteger, TestArg, register, strategy
 
 @register("division_strategy")
-def create_division_samples(nsamples):
+def create_division_samples():
     param = Parameter(
         TestArg(
             name="dividend",
@@ -581,8 +1079,8 @@ def create_division_samples(nsamples):
         always_include_directed=True
     )
 
-    # Add constraint: divisor must not be zero
-    param.add_constraint(lambda v: v[1] != 0)
+    # Add a named constraint: divisor must not be zero
+    param.add_constraint(lambda v: v.divisor != 0, name="nonzero_divisor")
 
     return param
 
@@ -602,7 +1100,7 @@ def test_division(dividend, divisor):
         assert result < 0
 
 @register("string_concat_strategy")
-def create_string_samples(nsamples):
+def create_string_samples():
     from pytest_strategy.rng import RNGString, RNGChoice
 
     return Parameter(
@@ -643,8 +1141,15 @@ pytest test_math_operations.py --vector-mode directed_only
 # Only random tests
 pytest test_math_operations.py --nsamples 50 --vector-mode random_only
 
-# Run specific vector
+# Run specific vector, by its option or by its name in the test ID
 pytest test_math_operations.py --vector-name "simple"
+pytest test_math_operations.py -k simple
+
+# Rerun one random row with the values it had in a run with seed 42
+pytest "test_math_operations.py::test_division[rand-3]" --rng-seed 42
+
+# Turn the named constraint off for one run
+pytest test_math_operations.py --strategy-constraint-off=division_strategy:nonzero_divisor
 
 # Reproducible run
 pytest test_math_operations.py --rng-seed 42
@@ -661,14 +1166,16 @@ pytest test_math_operations.py -v
 param = Parameter(
     TestArg("min_val", rng_type=RNGInteger(0, 100)),
     TestArg("max_val", rng_type=RNGInteger(0, 100)),
+    # Ensure min < max; a row is a Vector, read by argument name
+    vector_constraints={"ordered": lambda v: v.min_val < v.max_val},
 )
 
-# Ensure min < max
-param.add_constraint(lambda v: v[0] < v[1])
-
-# Multiple constraints
-param.add_constraint(lambda v: v[1] - v[0] >= 10)  # At least 10 apart
+# More constraints run in order after it
+param.add_constraint(lambda v: v.max_val - v.min_val >= 10, name="apart")  # At least 10 apart
 ```
+
+`--strategy-constraint-off=apart` turns `apart` off for one run, and the error
+for a constraint that rejects every draw counts the rejections by name.
 
 ### Weighted Distributions
 
@@ -696,8 +1203,8 @@ arg = TestArg(
     validator=lambda x: 0 <= x <= 100
 )
 
-# Vector-level validation
-param.add_constraint(lambda v: v[0] + v[1] <= 100)
+# Vector-level validation, by argument name
+param.add_constraint(lambda v: v.cpu + v.io <= 100, name="total")
 ```
 
 ### Reproducibility
@@ -717,6 +1224,170 @@ also under `-q`. A run
 without `--rng-seed` picks a seed from the clock, and passing that printed seed
 reproduces the run.
 
+**Failed rows (`_repro.py`, D18):** the plugin's `pytest_runtest_makereport`
+wrapper reads `item.stash[VECTORS_KEY]` for a failed setup or call report. It
+wraps the other wrappers, so it sees the outcome they set: skipping's (which
+turns an XPASS(strict) into a failure) because it is registered after it, and
+through `tryfirst` also those registered later, such as a `conftest.py` loaded
+during collection. `_repro.failure()` returns the text of the row's section (a block
+per `VectorInfo`: strategy and origin, the vector line by kind, each value's
+`_value_repr` cut at `VALUE_LIMIT` characters below `-vv`, seed, context when
+set; then the `rerun` line) and the report's `pytest_strategies` attribute: a
+dict of strings, `command`, `row` (`describe()`: `burst random 3`), `seed`, and
+`options`, the command's arguments after `--rng-seed` as a JSON list. pytest's
+`TestReport` keeps such an extra attribute when it is serialized, so
+pytest-xdist carries it to the controller. The section is added with
+`report.longrepr.addsection("pytest-strategies", ...)`, together with the
+`strategies_ctx` guard's message when there is one. A `TerminalRepr` without
+`addsection`, such as pytest's `FixtureLookupErrorRepr` for a missing fixture, is
+wrapped first in `_repro.SectionedRepr`, which writes it and then its sections and
+passes its other attributes through (pytest-xdist sends it as its text, section
+included); a plain-string longrepr (XPASS(strict)) gets no section. `pytest_runtest_logreport`
+keeps each attribute in `SessionState.failed_rows` by node ID, and
+`pytest_terminal_summary` prints them after the reproduce line
+(`_failed_rows_lines()`: at most `_FAILED_ROWS_SHOWN` below `-v`, nothing under
+`-qq`). The command is `pytest <node id> --rng-seed=S` with the node ID from
+`config.cwd_relative_nodeid`, then `generation_options()`: `--nsamples` when
+`StrategyOptions.nsamples_source` says it was given, `--vector-mode` when not
+`all`, `--vector-name`, `--vector-index`, the last `-o` override of each
+`strategies_*` ini option, `config.option.inifilename` (`-c`),
+`config.option.rootdir`, and `--strategy-constraint-off` built from the rows'
+`constraints_off` with `constraint_off_item()`, so the items name the row's
+strategies. `quote()` uses `shlex.quote` on POSIX, and on Windows double quotes
+with the C runtime's backslash rules, leaving arguments of
+`[A-Za-z0-9_+=:./\-]` bare. pytest gives a file outside the rootdir a node ID
+relative to the path the run started from that contains it (`config.args`: `-c
+ci/pytest.ini` with `tests/` and no paths gives the invocation folder), and the
+random streams follow that node ID. So the command of such a row
+(`_outside_command()`) starts from the same paths (`start_args()`, relative to the
+folder the command runs from), adds the run's `--ignore` and `--ignore-glob`
+(`ignore_args()`, relative to that folder too: the files they left out were never
+collected, so `keyword()` cannot see them), and selects the row with `-k`
+(`keyword()`): the row's name, else with its module's name, else with its
+classes' too, the first expression that pytest's own `KeywordMatcher` and
+`Expression` match to that item alone among the session's items and those the
+run deselected (kept by the plugin's `pytest_deselected`; the rerun runs without
+the run's own selection).
+The matchers are built once per session, for the first such failure. Without such
+an expression (a name outside `-k`'s grammar, such as one with `=`, or two modules
+of one name), or when a start path does not exist (`--pyargs`), `rerun_nodeid()`
+gives the file's path from the invocation folder, and the section's `note` line
+and the row's `(outside the rootdir)` say that the rerun gets another node ID, and
+so other values. The integration tests
+(test_repro_section_integration.py) run each printed command through the
+platform's shell from the folder of the run, so the Windows CI cells check the
+quoting.
+
+**JUnit XML (D18):** junitxml writes `str(report.longrepr)` as a failure's text,
+which includes the sections added with `addsection`, so the failure text of a
+row ends with its section. A second `pytest_sessionfinish` of the plugin
+(`specname`, `tryfirst`, so it runs before junitxml's, which writes the file)
+adds `_repro.suite_properties()` through `add_global_property` of junitxml's
+`LogXML`, found under the private `_pytest.junitxml.xml_key` (`_junit_xml()`,
+None when the key is gone): `pytest_strategies.seed` and
+`pytest_strategies.failed.<i>`, the commands of `SessionState.failed_rows` from
+0. Only the process that writes the file has a `LogXML`, which is the
+pytest-xdist controller, and its `failed_rows` come from the workers' reports.
+Per test case, junitxml writes the `user_properties` of the teardown report (of
+the failing report when the teardown fails too, as a second test case), whatever
+the family, but only `xunit1` (and `legacy`, its alias) has properties per test
+case in its schema; pytest's `record_property` warns under `xunit2`. So the
+makereport wrapper appends `_repro.testcase_properties()` to
+`item.user_properties`, which pytest copies into the reports that follow, and to
+the failing report's, only when `_junit_family()` (`config.option.xmlpath` and
+the `junit_family` ini value, which a worker has too) gives `xunit1`. The
+properties are strings, so pytest-xdist carries them. Their `command` is run
+from the rootdir: the item's node ID (`rootdir_nodeid()`), and `-c` and
+`--rootdir` relative to the rootdir (`generation_options(..., start=rootpath)`).
+test_junitxml_integration.py checks each family, under `-n 2` too.
+
+**`--lf` and `--sw` (`_reuse.py`, D4):** the controller's `pytest_sessionfinish`
+(not a pytest-xdist worker's) updates the cache key
+`pytest-strategies/failed-seeds`, a dict `{nodeid: {"seed": S, "options":
+[...]}}` in the order the rows were recorded, newest last
+(`_record_failed_seeds()`, `_reuse.updated()`): it removes an entry whose row
+passed in this run under the entry's seed and options, then adds each row of
+`SessionState.failed_rows` again as the newest, with the seed and options of its
+report's `pytest_strategies` attribute. Those options are the ones of the
+command run from the rootdir (`generation_options(..., start=rootpath)`), so the
+map holds `-c` and `--rootdir` relative to the rootdir and they name the same
+files from any folder. An ini file outside the rootdir (`-c /dev/null
+--rootdir=.`) is held by its absolute path (`path_from()`), as a chain of `..`
+would change with the depth of a project moved with its cache.
+`_reuse.commands()` and `_reuse.differences()` write the relative ones relative
+to the invocation folder (`_placed()`, through `config.cwd_relative_nodeid`) and
+leave an absolute one as it is, and a recorded unit that names the ini file or
+the rootdir the run uses (`own_units()`, given or found, by the same rule)
+agrees with the run (`_matched()`, also in the removal check of `updated()`; a
+`-c` the run gives and the rows were recorded without still differs, as the ini
+file the recording run found is not known, while a `--rootdir` the run gives
+agrees with rows recorded without it, as they were recorded under the rootdir
+whose cache holds them). The makereport wrapper takes a passing row's options
+(`generation_options(..., start=rootpath)`) from a passing call report, only for
+the items in `SessionState.recorded`, the node IDs of the map's entries under the
+run's seed. A pytest-xdist worker gets `recorded`, `deselect` and `reused`
+through `workerinput` and sends its passed rows' options and the reused rows it
+collected through `workeroutput`, which
+`pytest_testnodedown` keeps in `SessionState.worker_reuse`. The map is written only when it changed, so a run
+that never failed creates nothing. With `--lf`, `--sw` or `--sw-skip` (not
+`--sw-reset`) and no seed given, the tryfirst `pytest_configure` calls
+`_reuse.plan()`. It reads the cache through `Cache.for_config(config,
+_ispytest=True)`, because the cache plugin's `pytest_configure`, tryfirst too,
+has not set `config.cache` yet, and a conftest.py's `pytest_configure` can
+compute a context, which draws from the run's seed (nothing is read without the
+cache plugin or under `--cache-clear`). It takes the keys of pytest's
+`cache/lastfailed`, or the `last_failed` of `cache/stepwise`, and keeps the
+map's entries among them whose file exists and that the run collects, by
+`config.args`: the paths and node IDs on the command line or, without any, the
+expanded testpaths or the folder pytest was started in, which pytest puts there
+too (a path is a prefix, and a node ID's `::` names match the test and its
+parametrizations; an argument that is not an existing path, such as a
+`--pyargs` module, selects everything). `_collecting()` finds a node ID's file
+as pytest names it: from the rootdir, or for a file outside the rootdir, from the
+start that contains it (pytest's `_check_initialpaths_for_relpath`; `-c
+ci/pytest.ini` with `tests/` and no paths names `tests/test_dma.py` from the
+invocation folder), with no path when the start is the file itself
+(`::test_write[rand-3]`). Such a row gets an `Outside` in `Reuse.outside`: the
+start, as a command gives it, and the failed tests it collects, outside the
+rootdir and inside it. `-k` and `-m` cannot take part, since
+they apply to collected items. The newest kept entry gives the seed. `Reuse.rows` are the kept entries of that seed, and
+`Reuse.others` the rest, which a second `pytest_collection_modifyitems`
+deselects through `pytest_deselected`: pytest's `LFPlugin` drops a test from
+`lastfailed` only on a report, so they stay there. That hook also notes which
+rows of `Reuse.rows` (`SessionState.reused`) it collected, and after a session
+that ran its tests `_uncollected_lines()` prints the command of the others
+(`_reuse.commands()`, with their recorded options): a deleted or renamed test,
+a row the run's options do not generate, or one in a file outside the rootdir
+that pytest's `--lf` skipped. Without it, a run whose other rows were all
+deselected would end with no test and no word on why. When none of the failed
+tests it would rerun is collected, `--lf` says `N known failures not in selected
+tests` and runs every collected test, as pytest does. The instance's `pytest_configure` seeds from `Reuse.seed`,
+unless a conftest.py's `pytest_configure` set `config.option.rng_seed`, which
+drops the reuse as `--rng-seed` would; an `RNG.seed()` call there does not
+change the reused seed, as it does not change `--rng-seed`. `_reuse_line()` adds
+to the header the options of the newest reused row that the run lacks (`with`)
+and those the run adds (`without`), from `generation_options(config, (),
+start=rootpath)`; a constraint the rows turned off counts as off when the run
+turns it off in their strategy or everywhere. After the failed rows, at every verbosity,
+`_deselected_lines()` prints one `pytest --lf --rng-seed=S ...` per seed and set
+of options for every row of `Reuse.others` (`_reuse.commands()`, the constraint
+items of a group merged into one option): the deselected ones, and those the run
+did not collect, such as rows whose `strategies_ids = values` IDs this seed
+names otherwise. Each command ends with what selects its rows, relative to the
+folder pytest was started in: a row's file when every test of that file in
+`Reuse.failed` (the last-failed set read at configure time) is one of the
+command's rows, else the row's node ID. A command without them would rerun the
+newest seed's rows with other values, and pytest drops a passing test from
+`lastfailed`, losing its failure. Rows outside the rootdir get commands of their
+own (`_outside_targets()`): a file or node ID would give them other node IDs, so
+the command starts from their `Outside.start`, adds `--deselect` (which matches
+raw node IDs) for the other failed tests outside the rootdir that it collects,
+except a node ID that starts one of the rows', and `--ignore` for each file
+inside the rootdir with a failed test: pytest's `LFPluginCollSkipfiles`, which
+`--lf` registers once it collected such a file, finds the failed tests' files from
+the rootdir and so skips every file outside it. test_lf_seed_reuse_integration.py runs pytest in subprocesses, with the
+cache plugin, `-n 2` included.
+
 **One generator of the plugin's own:** every draw (the RNG types and the `RNG.*`
 helpers) comes from `RNG.generator()`, a `random.Random` instance. The plugin
 never seeds or draws from Python's global `random` state, so code that uses
@@ -724,51 +1395,300 @@ never seeds or draws from Python's global `random` state, so code that uses
 generated vectors. A factory that needs `shuffle` or `gauss` should call them
 on `RNG.generator()`.
 
-**Per-test streams:** before calling a strategy's factory for a test, the plugin
-restarts the generator from the run seed and a key made of the strategy name,
-the test file's path relative to the rootdir and the test's qualified name
-(`RNG.refresh_seed(key=...)`). Each strategy and test pair therefore gets its
-own stream. The vectors of a test do not depend on which other tests are
-collected, on the collection order or on `--import-mode`. Two tests that share
-a strategy get different vectors. For the same seed, the values are those of
-2.0.0, and differ from those of 1.x (1.0.0 and the 1.1.0 pre-releases).
+**Plugin streams (streams v1, `_streams.py`):** every random stream is keyed by
+a `StreamKey` under the run seed S (`runtime.run_seed()`, never the mutable
+`RNG._seed`), except the user and direct streams, keyed under
+`RNG.get_seed()`:
+
+| Key | What draws from it |
+|---|---|
+| `T = root(S, "test", strategy, nodeid)` | everything for one strategy on one test |
+| `T/"factory"` | the factory call: `rng`, `RNG.*`, `RNG.generator()` |
+| `T/"row"/pos/j/name`, `T/"order"/name` | the rows (below) |
+| `root(S, "file", path)` | a strategy file's import; `path` is the file's (`_streams.file_part()`) |
+| `root(S, "module", path)` | a test module's import (a `pytest_make_collect_report` wrapper for a `Module`); `path` is the module's (`_streams.file_part()`) |
+| `root(S, "ctx")` | each `pytest_strategies_context` implementation call, reseeded before each |
+| `root(S, "fixture", scope, name, param_index, where, qualname, base)` | a fixture's setup (a `pytest_fixture_setup` wrapper); `scope` is the node ID of the node it is set up for, `""` for the session and the rootdir's node (`plugin._node_part()`); `where` and `qualname` are the fixture function's module or file and its qualified name (`plugin._fixture_definition()`), `base` the node ID pytest registered the fixture for (`plugin._fixture_base()`) |
+| `root(S, "body", nodeid, phase)` | one phase of a test, `setup`, `call` or `teardown` (wrappers around `pytest_runtest_setup`, `_call` and `_teardown`) |
+| `root(RNG.get_seed(), "user", key)` | `RNG.refresh_seed(key=...)` |
+| `root(S, "export", name, folder)` | a factory call from `export_strategies()`; `folder` is the factory's module or its file's folder (`_registry.source_part()`), relative to the rootdir; outside a session, the module's name for a module `sys.modules` has under it, else the folder's absolute path |
+| `root(RNG.get_seed(), "direct", n)` | `generate_vectors()` and the other generators called directly |
+
+A path in a key is relative to the rootdir in posix form
+(`_streams.path_part()`): the real path's when that is in the rootdir, else the
+path's as pytest spells it when that is in the rootdir (a folder linked into the
+checkout from a place that does not move with it, which every checkout that
+links it then keys alike), else the real path's, also outside the rootdir
+(`../shared/strategies.py`); it is absolute only on another Windows drive. A
+test module or strategy file of an installed package (a file in a
+`site-packages` or `dist-packages` folder, a test `--pyargs` runs) has its path
+below that folder instead (`_streams.installed_part()`), which does not depend
+on where the environment is. A fixture's `where` and an exported factory's
+`folder` come from `_registry.source_part()` (through `plugin.definition_part()`).
+They are the file, or its folder for an export, for a `conftest.py`, a test
+module that `python_files` matches or a strategy file that pytest or the plugin
+imports by its path, under a module name that depends on `--import-mode` and on
+the `__init__.py` files. A file with such a name counts as one when any of these
+holds (`_registry._imported_by_path()`):
+
+1. It is inside the rootdir, by its real path or as it is spelled (a folder
+   linked into the checkout counts), whatever the testpaths, `norecursedirs` and
+   the folders named on the command line say.
+2. It is below a `testpaths` entry (glob patterns expanded), which is static
+   configuration: with `testpaths = ../shared`, `../shared/test_x.py` keeps its
+   path.
+3. pytest or the plugin imported that very file by its path in this session: a
+   test module pytest collected (the `pytest_make_collect_report` wrapper sees
+   each `Module`), a `conftest.py` it loaded (pytest registers it as a plugin
+   under its path; `pytest_plugin_registered` is historic, so the conftest files
+   loaded before the plugin registers are seen too), or a strategy file the
+   plugin loaded. The session records their real paths in
+   `SessionState.imported_files` as they are imported; outside a session the set
+   is empty. A key reads the set when it is built: a fixture's when it first
+   draws, after collection; an export's when `export_strategies()` runs, which
+   during collection sees only the files imported so far. When the session's
+   `consider_namespace_packages` is false (pytest's default), rule 3 leaves out a
+   module of a regular package that `sys.modules` holds under its package name
+   (`_registry._held_under_package_name()`): the dotted name of the chain of
+   folders with an `__init__.py` above it, ending at the module
+   (`acme.test_utils` for `acme/test_utils.py`; the chain stops where
+   `_pytest.pathlib.resolve_package_path()` stops it, at a folder without one or
+   whose name is not an identifier). Without the option, pytest 8.4 and 9 import
+   such a module under that name in every import mode, the name another module's
+   `import acme.test_utils` gives it, so the rules below key it alike whether or
+   not the run collects its folder. With `consider_namespace_packages = true`,
+   pytest names it from `sys.path` instead (`ns.acme.test_utils` where the folder
+   above a namespace folder `ns/` is on `sys.path`, `acme.test_utils` elsewhere,
+   or a name importlib makes from the path), which depends on the launcher (the
+   `pytest` script puts its own folder on `sys.path`, `python -m pytest` the
+   working directory), the working directory and `--import-mode`, so rule 3
+   applies to every file it recorded. `plugin.definition_part()` reads the option
+   (`True` without a config) and passes it to `source_part()`.
+
+Every run of one checkout therefore keys the files of rules 1 and 2 alike: a full
+run, the run of a folder outside the testpaths (`pytest tests/integration` with
+`testpaths = tests/unit`, `pytest examples/` here, or a folder outside the rootdir
+with `-c` or `--rootdir`), the run of one node ID, every `--import-mode`, pytest 8
+and 9. (That is the file's part of a key. pytest names a test outside the rootdir
+from the path named on the command line, `test_a.py::test_a` in the run of its
+folder and `::test_a` in the run of its node ID, so the keys that hold node IDs, a
+fixture's `scope` and `base` and a test's `T` and body streams, differ between
+those two runs whatever the file's part.) A file with such a name for which none
+of them holds is a module of a library on `sys.path` (an editable install's `.pth`
+entry, `PYTHONPATH`, a `pip install` target folder), such as
+`extacme/strategies.py` or `extacme/test_helpers.py`: its path relative to the
+rootdir would change with the folder the checkout is in (`../../libs/extacme` in
+one, `../../../../libs/extacme` in another), so the rules for any other module
+apply to it. They apply as well to a regular package's module that rule 3 leaves
+out, such as `acme/test_utils.py` next to a rootdir in `tests/` (a flat layout).
+
+They are the module's name for a module imported by its name: an installed
+package's (in a `site-packages` or `dist-packages` folder, also when it is named
+like a test module), an editable install's, a plugin's or a helper module's, so a
+package's fixture draws the same installed, installed in editable mode or checked
+out next to the tests (also next to a rootdir in the checkout's `tests/` folder),
+and for code with no file (`exec`'d code, whose `"<string>"` would resolve against
+the working directory). They are the file for a module that `sys.modules` does
+not have under its name, and for a module whose name begins with the rootdir's
+folder or a folder above it (a rootdir with an `__init__.py`, or `proj.util` for
+the tests of a package checkout in `proj/tests`), whose name depends on the
+folders the checkout is in.
+
+These limitations remain. A package module inside the rootdir whose file name
+matches `python_files` or a strategy file pattern (`src/acme/test_utils.py`,
+`src/acme/strategies.py`) keeps its path there and has its module's name
+installed, so its fixtures and exported factories draw other values from the
+checkout or an editable install of it than from the installed package. Renaming
+the module (`src/acme/testing.py`) avoids that. Telling such a module from a test
+module by what the session collects would make the key depend on the run: pytest
+collects the same file in one run and not in another (a bare `pytest` without
+testpaths collects `src/acme/test_utils.py`), and a file it collects has a module
+name that depends on `--import-mode`.
+
+And rule 3 keys these files by their paths in a run that collects their folder
+and by their module's names in a run that does not, so the two runs draw other
+values:
+
+- (a) a helper named like a test module or a strategy file, outside the rootdir
+  and the testpaths, not in a regular package (its folder has no `__init__.py`),
+  imported by its name: `pytest -c pytest.ini ../other`, run in `proj/`, collects
+  `../other/test_b.py` and keys it by its path; the run of one node ID in
+  `../other/test_a.py`, which does `from test_b import port`, does not collect it
+  and keys it by its module's name;
+- (b) a regular package's module that `sys.modules` holds only under a longer
+  namespace-package name, such as a strategy file `ns/acme/strategies.py` that a
+  `conftest.py` imports as `ns.acme.strategies`;
+- (c) with `consider_namespace_packages = true`, (a) also holds for a regular
+  package's module outside the rootdir and the testpaths: `acme/test_utils.py`
+  next to a rootdir in `tests/` is keyed by its path in `pytest -c
+  tests/pytest.ini` from the project, which collects `acme/`, and by its name in
+  `pytest` from `tests/`.
+
+Listing such a folder in `testpaths` keys its files by their paths in every run.
+
+A fixture's definition and base are in its key because pytest sets up several
+fixtures of one name for the same scope node: an override that requests the
+fixture it overrides (`def x(x)`), the session fixtures of one name in two
+sibling folders' `conftest.py` files, and one fixture function that two
+`conftest.py` files import (`from helpers.fixtures import port`), which only
+`base` tells apart: the folder of the `conftest.py`, the test module or class
+the fixture is registered for, or `""` for a plugin and the rootdir's
+`conftest.py` (`FixtureDef.node` on pytest 9, whose node ID is `"."` there, and
+`FixtureDef.baseid` on pytest 8). `plugin._node_part()` turns `"."` into `""`
+for `base` and for `scope`: when the rootdir has an `__init__.py`, pytest 9 sets
+a package-scoped fixture of its `conftest.py` up for the rootdir's `Package`
+(`"."`), and pytest 8 for the session.
+
+Each non-row stream runs in an `rng._Stream` block: in the block,
+`RNG._ambient` (the plugin's generator, an `rng._Ambient`) draws from the key's
+stream as if reseeded in place from it, and is installed as `RNG._generator`;
+when the block ends, also on an exception, the generator's state,
+`RNG._generator` and `RNG._seed` are put back. Streams nest. Reseeding in place
+keeps a generator taken earlier from `RNG.generator()` on the current stream,
+and installing the ambient generator lets a strategy file imported from inside
+a constraint (when `RNG._generator` is an argument's) draw from its file
+stream. An `RNG.seed()` call inside a stream changes only the rest of that
+stream, and `RNG.get_seed()` is S everywhere else. `_Stream` is a class with
+`__enter__` and `__exit__`, not a `contextlib.contextmanager`, so that a frozen
+dataclass exception passes through unchanged.
+
+The seeding is lazy. Entering a block records its key (or a function that
+builds it) as pending; `_Ambient` seeds itself from it at the first `random()`
+or `getrandbits()`, or when `getstate()` reads its state, and only then saves
+the state in use for the block to put back. `seed()` and `setstate()` replace
+the state, so they skip the pending seeding but still save that state.
+`random.Random` draws only through `random()` and `getrandbits()` (its other
+methods call them, and `_randbelow` stays the `getrandbits()` one), so the
+values are those of a generator seeded when the block starts; a pending block
+also clears `gauss_next`, as seeding does, and puts it back. Seeding a pending
+block, and entering and ending one, hold the generator's lock
+(`_Ambient._lock`, an `RLock`): a thread that draws while another enters or
+ends a block (a stimulus thread that a fixture starts) never seeds the
+generator from a block that has ended or saves the state on another block, and
+a block stays pending until it is seeded, so such a draw waits for the seeding
+instead of drawing from the state the seeding replaces. Its draws still come
+from whichever block is in use, so they are not reproducible. Blocks that two
+threads enter may end in any order (`export_strategies()` in a thread while a
+test phase runs): a block that ends before a block entered after it hands that
+block what it would have put back. A draw from inside the seeding (a signal
+handler, a garbage collector callback) draws from the state in use, without
+seeding the block again or saving the state twice. Drawing a row holds the lock
+too (`Parameter._build_row()`), because the argument generators it installs as
+`RNG._generator` are process-wide: another thread that draws a row, or enters
+or ends a block, meanwhile cannot take one of them for the generator to put
+back, which would leave it installed after the rows. Another thread's `RNG.*`
+draw meanwhile still draws from it. An `os.register_at_fork` hook takes the
+lock before a fork and gives the child a new one, so a child forked while
+another thread seeds a block can draw. The plugin passes the fixture, phase and
+test module streams a function that builds the key, so a block that draws
+nothing costs about 2 µs, and one that draws about 20 µs more, mostly the
+seeding; each draw from the ambient generator costs about 0.1 µs more than from
+a plain `random.Random`. Most test phases and fixtures draw nothing: a run of
+20,000 trivial tests takes about 5% longer than without these streams, most of
+it in the three hook wrappers per test.
+
+**Row streams (streams v1, `_streams.py`):** the rows draw from streams keyed
+under `T = StreamKey.root(seed, "test", strategy, nodeid)`, where `nodeid` is the
+test's node ID without its parameters (`metafunc.definition.nodeid`). Each drawn
+argument of a row draws from `T/"row"/pos/j/name`: `pos` is the row's enumerated
+position, its `(name, token)` pairs sorted by name and flattened (the tokens of
+`_position_keys`), `j` is the row's index within that position, and `name` is
+the argument's name. The order of an `RNGSequence` under `--nsamples=auto` comes
+from `T/"order"/name`. A row's values therefore depend only on the seed, the
+strategy, the test, the row and the argument: more rows keep the first ones, a
+node ID run alone gets the values of the full run, adding, reordering or
+changing another argument leaves an argument's values alone, and a constraint
+redraws only the rows it rejects, continuing the same streams. Static `value=`
+arguments draw nothing. Direct calls (`generate_vectors()`, `generate_vector()`,
+`generate_exhaustive()` outside the plugin) use the key
+`root(RNG.get_seed(), "direct", n)`, where `n` is 128 bits drawn from
+`RNG._generator` once per call. The vectors of a test do not depend on which
+other tests are collected, on the collection order or on `--import-mode`. Two
+tests that share a strategy get different vectors, and so do two classes that
+inherit one test method. For the same seed, directed and test vectors and
+`Series` values are those of 3.x, unless the factory draws them; random rows
+and the values that factories, strategy files and the context hook draw differ
+from 3.x's.
+
+**Guard on draws outside the row streams:** these properties hold when every
+random value of a row comes from its arguments' RNG types, drawn inside
+`generate()` from `RNG.generator()` or the `RNG.*` helpers, with no state kept
+between calls (the `RNGType` docstring says so). Constraints run with the
+ambient generator installed, and a factory's `rng` is the ambient generator
+itself, so a constraint that calls `RNG.*` or an RNG type that draws from a
+generator kept from the factory draws from `RNG._ambient`: its values depend on
+what was drawn before (other rows, other tests of the module), not only on the
+row. `build_parametrization` compares `RNG._ambient._position()` before and
+after `_generate_rows()`: the pending key while nothing has used the current
+stream, which costs nothing, or else the generator's state (about 20 µs per
+test). For a test function the current stream is its module's, so the check is
+free unless the module drew when it was imported; pytest collects a class in a
+collect report of its own, outside the module's stream, so a test method always
+reads the state. When it changed, it emits one
+`PytestStrategiesWarning` inside `_attributed_warnings`, so it is prefixed with
+`Strategy '<name>' (<test>): ` and points at the test. It is a warning, not an
+error, because the values still repeat for the same seed, tests and options;
+under `filterwarnings = error` it becomes the collection error
+`Error generating samples for strategy ...`. A stream that runs inside a
+constraint (a strategy file imported there) puts the ambient generator back and
+does not trigger it. A generator an RNG type creates for itself is not the
+plugin's, so the guard cannot see it.
+
+**Golden values:** `tests/golden/seed1.json` holds the values of streams v1 for
+`--rng-seed=1`: every row of a small project that draws with every built-in RNG
+type, with predicates and under a constraint, in `Series` and
+`per_sequence_samples` rows and in an `RNGSequence` permutation under
+`--nsamples=auto`, with values that a factory, a strategy file and the context
+hook drew. `tests/integration/test_golden_values_integration.py` checks them on
+every CI cell (Linux and Windows, Python 3.11 to 3.14, pytest 8 and 9), under
+two `PYTHONHASHSEED` values. A change that fails it gives every recorded seed
+other values, so it belongs in a major release, with a new `_streams.VERSION`.
+The values also rest on `random.Random`'s `randint`, `choice`, `choices` and
+`sample`, which CPython may change; a CPython that does gets rows of its own in
+the file, keyed by its version. A built-in RNG type added later gets a strategy
+and a test of its own in the project, which adds rows and changes none.
 
 **Import time:** `pytest_configure` restarts the generator from the seed. A
-strategy file is imported on a stream of its own (keyed by its path), and the
-generator's state is restored afterwards, so its import-time draws do not
-depend on what was collected before. Draws at module level in a test module
-come from the generator as the tests collected before it left it: they follow
-the seed but change when the module is collected alone. When a session ends
-(including an in-process `pytester` run), the seed, the generator's state and
-the strategy registry are restored to what they were when it began.
+strategy file is imported on its file stream and a test module on its module
+stream, so their import-time draws do not depend on what was collected before,
+and a module collected alone gets the values of the full run. Draws when a
+`conftest.py` is imported are not keyed: pytest imports the initial conftests
+(the rootdir's and those of the folders on the command line) before
+`pytest_configure` seeds, and a node-ID rerun makes another conftest an initial
+one, so a key would give the full run and the rerun different values. The
+others are imported during collection, outside any stream. Any other module (a
+helper that test modules or strategy files import) runs on the stream of the
+first module that imports it, and shifts that module's later draws, so both
+depend on what was collected before; the README says to move such draws into a
+fixture, the context hook or a strategy file. A strategy file
+that a `conftest.py` imports at its top is reused as it is, so its import-time
+draws do not follow the seed either; the README says to import it inside a
+fixture or hook. When a session ends (including an in-process `pytester` run),
+the seed, the ambient generator's state, the installed generator and the
+strategy registry are restored to what they were when it began.
 
 **pytest-xdist:** the controller sends its seed to the workers, so `-n` works
-with or without `--rng-seed` and every worker generates the same tests.
+with or without `--rng-seed` and every worker generates the same tests. A run
+whose workers computed different contexts or generated different values under
+the same IDs fails with exit code 4 (see the xdist check under the context hook
+above).
 
-**Test bodies:** the seed reproduces the parameters, not random values drawn
-inside a test body. `RNG` draws there come from the generator as the earlier
-collection and tests left it, so they change when a single test is rerun or
-tests are scheduled differently under xdist. Calling `RNG.seed()` inside a test
-body does not change the test's parameters, which are already fixed by then. To
-make a body's own draws reproducible, reseed in the body. A stream keyed by the
-node ID still follows `--rng-seed`:
-
-```python
-import random
-
-from pytest_strategy import RNG
-
-def test_something(request):
-    RNG.refresh_seed(key=request.node.nodeid)
-    value = RNG.integer(0, 100)  # Same value for the same --rng-seed
-
-def test_fixed():
-    value = random.Random(42).randint(0, 100)  # Same value on every run
-```
-
-Do not call `RNG.seed()` in a test body: it restarts the plugin's generator from
-another seed, so the tests after it that reseed from `RNG.get_seed()` no longer
-follow `--rng-seed`.
+**Test bodies and fixtures:** each phase of a test (setup, call and teardown)
+runs on its body stream and each fixture's setup on its fixture stream, so a
+test body's `RNG` draws and a fixture's are the same whether the test runs
+alone, in the suite, in another order or under xdist. A fixture's stream is
+also keyed by its definition and where pytest registered it, so a fixture that
+overrides another of the same name and requests it, two sibling folders'
+session fixtures of one name, or one fixture function imported into two
+folders' `conftest.py` files, draw different values. A module- or
+session-scoped fixture is set up during the setup of whichever test needs it
+first; with a stream of its own, neither its draws nor that test's depend on
+which test that is. A fixture's teardown and a finalizer run in the teardown of
+the test that ends the fixture's scope, and draw from that test's teardown
+stream. The pseudo-fixtures of direct parametrization draw nothing and get no
+stream. `RNG.refresh_seed(key=request.node.nodeid)` is no longer needed in a
+test body; it still gives the stream of the seed and the key, whatever ran
+before it.
 
 For plain `random` calls, seed the global state per test from the run's seed,
 for example in an autouse fixture:
@@ -791,7 +1711,7 @@ directed_vectors={
 
 ```python
 # Instead of hoping random generation produces valid inputs
-param.add_constraint(lambda v: v[0] < v[1])  # min < max
+param.add_constraint(lambda v: v.min_val < v.max_val, name="ordered")
 ```
 
 ### 3. Use Weighted Distributions for Important Cases
@@ -819,13 +1739,12 @@ directed_vectors={
 ### 5. Use Validation for Complex Constraints
 
 ```python
-def is_valid_config(config_tuple):
-    timeout, retries, mode = config_tuple
-    if mode == "fast":
-        return timeout < 1.0 and retries <= 3
+def fast_mode_limits(v):
+    if v.mode == "fast":
+        return v.timeout < 1.0 and v.retries <= 3
     return True
 
-param.add_constraint(is_valid_config)
+param.add_constraint(fast_mode_limits)  # Named after the function
 ```
 
 ## Troubleshooting
@@ -837,12 +1756,13 @@ A predicate on an RNG type rejected 100 draws in a row. Either:
 - Move the rule to `vector_constraints`, whose redraws `Parameter(max_retries=...)` controls
 - Use directed vectors instead
 
-### "Could not generate valid vector ..."
+### "Could not generate random row K ..." or "Could not generate valid vector ..."
 
 The `vector_constraints` rejected every draw (or, with `Series`/`RNGSequence`
-args, every combination). The message counts the draws each constraint
-rejected, so you can see which one is too strict. Relax it, or raise
-`Parameter(max_retries=...)`.
+args, every combination). The message counts the draws by the name of the first
+constraint that rejected each one, and shows the first row each rejected, so you
+can see which one is too strict. Relax it, raise `Parameter(max_retries=...)`,
+or turn it off for one run with `--strategy-constraint-off=STRATEGY:NAME`.
 The related `PytestStrategiesWarning` "Series combination (...) skipped" means
 one combination was skipped after `max_retries` redraws of its random args.
 
@@ -876,20 +1796,20 @@ the size guard allows. Use fewer sequence values, or raise the limit with
 ### Tests not reproducible
 
 - Pass the same `--rng-seed` value (a run's seed is shown in the report header, and after a failed run); calling `RNG.seed()` inside a test body does not change its parametrized values
-- Use the same rootdir and a pytest-strategies version that generates the same values (2.0.0 and 3.0.0 do, except values strategy files draw when they are imported; 1.x does not)
+- Use the same rootdir, the same `--nsamples` and options (the rerun command a failure prints has them), and a pytest-strategies version with the same streams version (`VectorInfo.streams`: 1 since 4.0.0; 3.x and earlier draw other values)
 - Draw from the RNG types or `RNG.generator()` in factories: plain `random` calls are not seeded by the plugin
-- Random values drawn inside a test body are not covered by the seed; reseed in the body (see [Reproducibility](#reproducibility))
+- Draws made when a `conftest.py` is imported are not covered by the seed, and those of a helper module that test modules import depend on which module imports it first; move them into the context hook, a fixture or a strategy file (see [Reproducibility](#reproducibility))
 
 ## Future Enhancements
 
-- [ ] Vector groups (categorize directed vectors)
-- [ ] Combinatorial mode (all combinations of directed values)
-- [ ] Replay support (save/load generated vectors)
-- [ ] Statistics tracking (which vectors found bugs)
-- [ ] Partial vector support (None = generate random)
-- [ ] Vector inheritance/templates
-- [ ] Integration with hypothesis
-- [ ] Custom RNG types (user-defined)
+4.0 settles the contracts these build on (see "Compatibility rules for 4.x"
+under Contributing):
+
+- [ ] Dependent arguments: an argument whose values depend on the arguments before it
+- [ ] Strategy composition (`extends=`, `derive()`, `where=`)
+- [ ] Coverage bins
+- [ ] Records built from NamedTuple, TypedDict and pydantic models
+- [ ] Vector export and import, a regression bank, subtests mode and run profiles
 
 ## Contributing
 
@@ -905,9 +1825,25 @@ Set up and check a change the way CI does:
 pip install -e ".[dev]"
 python -m pytest -n auto                  # The suite (warnings are errors)
 python -m pytest examples/*.py --nsamples=auto
-ruff check src/ tests/ && black --check src/ tests/
+ruff check src/ tests/ benchmarks/ && black --check src/ tests/ benchmarks/
 mypy --strict src/pytest_strategy/ tests/unittests/test_typing.py
 ```
+
+`benchmarks/bench.py` times row generation through
+`Parameter.generate_vectors()`: 10,000 rows of 5 arguments, 100,000 rows of 4,
+and 5,000 rows of 2 arguments whose constraints reject about half the draws.
+`--sweep` adds that last case at about 0%, 50% and 90% rejection, per accepted
+row, and `--memory` the collection of 100,000 exhaustive rows in a new
+interpreter (time and peak memory). CI runs `python benchmarks/bench.py --sweep
+--memory` as an informational step of the examples job, which never fails it.
+Timings compare only on one machine: to compare two versions, run the script
+once with each, the other version's `src` on `PYTHONPATH`. On Python 3.11
+(Linux), 4.0 generates 10,000 rows of 5 arguments in about 0.47 s (3.0: 0.05 s),
+about 8.5 µs more per drawn argument per row, almost all of it seeding the
+argument's generator. A rejected row continues its arguments' streams instead
+of reseeding them, so the cost per accepted row does not grow with the rejection
+rate: 16 to 17 µs more than 3.0 at 0%, 50% and 90%. Collecting 100,000
+exhaustive rows takes about 10 s and 417 MiB at peak (3.0: 6 s and 328 MiB).
 
 The suite runs with `filterwarnings = error`, `--strict-markers`,
 `--strict-config` and `empty_parameter_set_mark = fail_at_collect`, and an
@@ -915,13 +1851,99 @@ autouse fixture in `tests/conftest.py` restores the registry, the seed and the
 random state after each test. Inner `pytester` runs that expect a warning use
 `runpytest_subprocess`, so the outer `error` filter does not apply to them.
 
+### Compatibility rules for 4.x
+
+A 4.x release only adds: a test suite, a factory, a recorded seed and an export
+reader that work with 4.0.0 keep working, with the same values.
+
+- **Keyword-only additions.** Options that a 4.x release adds to a public
+  callable go after a `*`, so that they are keyword-only and no existing
+  positional call changes meaning. Since 4.0, `TestArg`'s options after
+  `rng_type`, `strategy()`'s `validate_signature`, `export_strategies()`'s
+  `format` and `Parameter.generate_vectors()`'s options after `n` are
+  keyword-only. Fields added to `StrategyOptions` and `VectorInfo` are
+  keyword-only and have defaults.
+- **New factory inputs.** A new factory input arrives as a new
+  `StrategyOptions` field with a default, or under a reserved parameter name
+  (`base`, `config`, `request`). The plugin never starts passing a value to a
+  parameter name that 4.0 left alone, and `*args` and `**kwargs` never receive
+  anything (`_factory.py`).
+- **Schema evolution.** Schema 1 (the export, `Parameter.to_dict()`,
+  `VectorInfo.to_dict()`) changes by addition only; the paragraph on
+  `export_strategies()` below has the rule.
+- **Streams version.** The random streams are versioned (`_streams.VERSION`,
+  which `VectorInfo.streams` reports). Whatever changes the values a seed gives
+  (a stream key or its encoding, the order in which a row's arguments draw, the
+  retry rule, the position tokens of enumerated values, replacing
+  `random.Random`) changes every recorded seed's rows, so it waits for a major
+  release and comes with a new `VERSION`, new goldens
+  (`tests/golden/seed1.json` and the key goldens in
+  `tests/unittests/test_streams.py`) and a migration note in the CHANGELOG. A
+  built-in RNG type added in 4.x gets a strategy and a test of its own in the
+  golden project, which adds rows and changes none.
+- **Test IDs.** The names format (`_ids.names_id()`) is part of the contract:
+  `-k` expressions, `--deselect` lists and the `--lf` cache name rows by it.
+- **Record kinds.** The field sets of the four record kinds are fixed, so
+  building NamedTuple, TypedDict or pydantic records later cannot change which
+  parameter takes the row.
+
+**Option names.** Command-line options that a 4.x release adds are named `--strategy-<x>` and read
+as `config.option.strategy_<x>`, and ini options are named `strategies_<x>`; the
+3.0 options `--rng-seed`, `--nsamples`, `--vector-mode`, `--vector-name`,
+`--vector-index` and `--list-strategies` keep their names. A run sets an ini
+option with pytest's `-o`, and no command-line option mirrors one: a switch for
+the test IDs would make the `--lf` cache disagree from one run to the next. A new
+ini option is registered with `type="string"` and without `aliases=` (pytest 9
+only), and checked in the `tryfirst` `pytest_configure`, so a bad value is a
+`UsageError` (exit code 4) before the session starts; a value that pytest 9
+cannot read as a string (`strategies_ids = 1` in `pytest.toml`) gets the same
+message, and `--help` skips the check, as pytest does for its own ini options.
+`strategies_max_exhaustive` keeps its 3.0 check, made only when a run enumerates.
+pytest turns argparse's abbreviations off, so no name can clash with a prefix of
+another. Reserved for later releases: `--strategy-coverage` (4.2),
+`--strategy-export` and `--strategy-import` (vector export and import),
+`--strategy-lf` (a regression bank), `--strategy-profile` with the ini option
+`strategies_profiles` (run profiles), and the ini option `strategies_subtests`.
+`tests/integration/test_option_names_integration.py` checks the names against
+`pytest --help` with and without the plugin.
+
+**Schema 1.** `export_strategies()` and the `to_dict()` methods write schema 1 (`_export.py`,
+whose values go through `_encode.encode()`, as `VectorInfo.to_dict()`'s do).
+`_export.document()` calls each registration's factory as collection does and
+writes one entry per registration; an entry whose factory raised, or whose
+custom RNG type's `to_dict()` returns what JSON cannot hold, becomes an `error`
+entry, so one strategy never fails the whole export. A factory error is
+reported as the factory's own exception type and message, and the hint the
+plugin adds to it (`_factory.FactoryError.note`) goes in `note`. Built-in RNG
+types get typed fields by their exact class; a subclass or a custom type gets
+`{"type": ..., "attributes": {...}}`, its public instance attributes in the
+value encoding. Schema 1 evolves by addition only: readers ignore keys they do
+not know and unknown values of the string enums (`kind`, `source`,
+`VectorInfo.kind`), and read an unknown `$`-tagged object like `$repr`, so a
+4.x release may add keys and enum values (`source: "dependent"` is reserved for
+4.1). Removing, renaming or retyping a key bumps `schema`. The golden test
+(`tests/integration/test_export_schema_integration.py`) compares the export of
+a project covering every RNG type with `tests/golden/export-schema1.json`,
+`generator.version` masked: update the file only for such an addition, as its
+docstring says.
+
 ## Releasing
 
-1. Set the version in `pyproject.toml` and `__version__` in
-   `src/pytest_strategy/__init__.py` (a test checks they match), and turn
-   `## [Unreleased]` in `CHANGELOG.md` into `## [X.Y.Z] - <date>` with a new empty
-   `[Unreleased]` above it and a comparison link at the bottom.
-2. Merge into `main` once CI is green.
+1. Set the version in `pyproject.toml`, in `__version__` in
+   `src/pytest_strategy/__init__.py`, in the "Documents pytest-strategies
+   X.Y.Z." line at the top of
+   `src/pytest_strategy/skill/pytest-strategies/SKILL.md` and in the README's
+   install command (`pytest-strategies.git@vX.Y.Z`); tests check that the four
+   match. Turn `## [Unreleased]` in `CHANGELOG.md` into
+   `## [X.Y.Z] - <date>` with a new empty `[Unreleased]` above it and a
+   comparison link at the bottom. From 4.0.0 on, a major release's section
+   starts with `### Migrating from <previous major>.x`, which names every API
+   the release removes: `tests/unittests/test_fix_docs.py` checks it against
+   the APIs its `REMOVED_IN_MAJOR` lists for that major.
+2. Set the date of the `## [X.Y.Z]` heading to the release day: when the
+   release waited after step 1, for a review or an approval, change it in a
+   last commit before the merge, since no check compares it with the tag. Merge
+   into `main` once CI is green.
 3. Tag that commit and push the tag:
    `git tag -a vX.Y.Z -m "pytest-strategies X.Y.Z" && git push origin vX.Y.Z`.
    Alternatively, run the Release workflow by hand on `main` with the version;

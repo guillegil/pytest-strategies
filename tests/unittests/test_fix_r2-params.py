@@ -30,7 +30,7 @@ from pytest_strategy import (
     Strategy,
     TestArg,
 )
-from pytest_strategy._resolver import resolve_and_parametrize
+from pytest_strategy._resolver import build_parametrization
 from pytest_strategy.strategy import PytestStrategiesWarning
 
 
@@ -94,14 +94,9 @@ class TestNsamplesAutoAccepted:
         def test_fn(x):
             pass
 
-        marked = resolve_and_parametrize(
-            "fix_r2_auto",
-            test_fn,
-            registry={"fix_r2_auto": factory},
-            config=config,
-            pytest_fixtures=set(),
-        )
-        return list(marked.pytestmark[0].args[1])
+        return build_parametrization(
+            "fix_r2_auto", factory, test_fn, config=config, pytest_fixtures=set()
+        ).values
 
     def test_factory_forwarding_cli_auto_is_exhaustive(self):
         """--nsamples=auto reaches the factory as "auto"; forwarding it used to raise."""
@@ -386,29 +381,30 @@ class TestToDictDescribesRNGConfiguration:
     """The export used to drop the Enum class and report a set predicate as no predicate."""
 
     def test_rng_enum_without_predicate(self):
-        details = TestArg("color", rng_type=RNGEnum(Color)).to_dict()["rng_details"]
-        assert details == {
-            "enum_class": "Color",
-            "weights": "None",
-            "predicate": "None",
-            "has_predicate": False,
+        rng = TestArg("color", rng_type=RNGEnum(Color)).to_dict()["rng"]
+        assert rng == {
+            "type": "RNGEnum",
+            "enum": "Color",
+            "members": [{"$enum": "Color", "member": member.name} for member in Color],
+            "weights": None,
+            "predicate": False,
         }
 
     def test_rng_enum_with_predicate(self):
         rng_type = RNGEnum(Color, predicate=lambda c: c is not Color.RED)
-        details = TestArg("color", rng_type=rng_type).to_dict()["rng_details"]
-        assert details["enum_class"] == "Color"
-        assert details["has_predicate"] is True
+        rng = TestArg("color", rng_type=rng_type).to_dict()["rng"]
+        assert rng["enum"] == "Color"
+        assert rng["predicate"] is True
 
     def test_rng_integer_keys_kept(self):
-        plain = TestArg("n", rng_type=RNGInteger(0, 10)).to_dict()["rng_details"]
-        filtered = TestArg("n", rng_type=RNGInteger(0, 10, predicate=bool)).to_dict()["rng_details"]
-        assert plain == {"min": "0", "max": "10", "predicate": "None", "has_predicate": False}
-        assert filtered == {"min": "0", "max": "10", "has_predicate": True}
+        plain = TestArg("n", rng_type=RNGInteger(0, 10)).to_dict()["rng"]
+        filtered = TestArg("n", rng_type=RNGInteger(0, 10, predicate=bool)).to_dict()["rng"]
+        assert plain == {"type": "RNGInteger", "min": 0, "max": 10, "predicate": False}
+        assert filtered == {"type": "RNGInteger", "min": 0, "max": 10, "predicate": True}
 
     def test_rng_without_predicate_attribute_has_no_flag(self):
-        details = TestArg("s", rng_type=Series([1, 2])).to_dict()["rng_details"]
-        assert "has_predicate" not in details
+        rng = TestArg("s", rng_type=Series([1, 2])).to_dict()["rng"]
+        assert "predicate" not in rng
 
     def test_export_strategies_is_json_with_details(self):
         @Strategy.register("fix_r2_export")
@@ -418,6 +414,7 @@ class TestToDictDescribesRNGConfiguration:
             )
 
         data = json.loads(Strategy.export_strategies())
-        details = data["fix_r2_export"]["arguments"][0]["rng_details"]
-        assert details["enum_class"] == "Color"
-        assert details["has_predicate"] is True
+        [entry] = [entry for entry in data["strategies"] if entry["name"] == "fix_r2_export"]
+        rng = entry["parameter"]["arguments"][0]["rng"]
+        assert rng["enum"] == "Color"
+        assert rng["predicate"] is True

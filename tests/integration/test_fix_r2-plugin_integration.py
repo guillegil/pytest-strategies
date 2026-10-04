@@ -137,11 +137,11 @@ class TestWithoutTerminalPlugin:
 
             pytest.importorskip({MISSING_MODULE!r})
 
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, Strategy, TestArg
 
             @Strategy.register("r2_optional")
             def optional(nsamples):
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
             """)
         pytester.makepyfile(test_other="def test_other():\n    pass\n")
 
@@ -171,11 +171,11 @@ class TestSkippedStrategyFileIsNamed:
 
             pytest.importorskip({MISSING_MODULE!r})
 
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, Strategy, TestArg
 
             @Strategy.register("r2_arr")
             def arr(nsamples):
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
             """)
         pytester.makepyfile(test_arr="""
             from pytest_strategy import Strategy
@@ -358,22 +358,13 @@ class TestVectorFilterMatchingNothing:
         assert result.ret == pytest.ExitCode.OK
         result.assert_outcomes(passed=2, skipped=1)
 
-    def test_filter_without_parameter_strategies_is_not_checked(self, pytester):
-        pytester.makepyfile(strategies="""
-            from pytest_strategy import Strategy
-
-            @Strategy.register("r2_ages")
-            def ages(nsamples):
-                return ("x",), [(1,)]
-
-            @Strategy.register("r2_other")
-            def other(nsamples):
-                return ("x",), [(2,)]
-            """)
+    def test_filter_without_resolved_strategies_is_not_checked(self, pytester):
+        # The strategies are registered, but no collected test uses them
+        pytester.makepyfile(test_vectors="def test_plain():\n    pass\n")
 
         result = pytester.runpytest_subprocess("--vector-name=newbron")
 
-        result.assert_outcomes(passed=3)
+        result.assert_outcomes(passed=1)
 
     def test_filter_matching_no_strategy_under_xdist(self, pytester):
         pytest.importorskip("xdist")

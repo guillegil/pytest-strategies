@@ -8,16 +8,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from pytest_strategy import RNG, Strategy
+from pytest_strategy import RNG, Parameter, Strategy, TestArg
 from pytest_strategy._runtime import StrategyRuntime, runtime
 from pytest_strategy.plugin import PytestStrategyPlugin
 
 STRATEGY_SOURCE = """
-from pytest_strategy import Strategy
+from pytest_strategy import Parameter, Strategy, TestArg
 
 @Strategy.register("r2_unit_strat")
 def r2_unit_strat(nsamples):
-    return ("x",), [(1,)]
+    return Parameter(TestArg("x", value=1), nsamples=1)
 """
 
 MISSING_MODULE = "pytest_strategies_missing_module"
@@ -133,10 +133,10 @@ class TestRuntimeRestoresGlobalState:
         registry = Strategy._registry
 
         def outer(nsamples):
-            return ("x",), [(1,)]
+            return Parameter(TestArg("x", value=1), nsamples=1)
 
         def inner(nsamples):
-            return ("x",), [(2,)]
+            return Parameter(TestArg("x", value=2), nsamples=1)
 
         rt.push("outer")
         Strategy.register("r2_outer_strat")(outer)
@@ -156,7 +156,7 @@ class TestRuntimeRestoresGlobalState:
         rt = StrategyRuntime()
 
         def factory(nsamples):
-            return ("x",), [(1,)]
+            return Parameter(TestArg("x", value=1), nsamples=1)
 
         rt.push("first")
         Strategy.register("r2_first_run_strat")(factory)

@@ -17,17 +17,18 @@ class TestMetadataExport:
         data1 = arg1.to_dict()
         assert data1["name"] == "static"
         assert data1["description"] == "A static value"
-        assert data1["has_static_value"] is True
-        assert data1["static_value"] == "42"
+        # The value keeps its type (3.0 wrote has_static_value and str(value))
+        assert data1["source"] == "value"
+        assert data1["value"] == 42
 
         # RNG arg
         arg2 = TestArg("rng", rng_type=RNGInteger(0, 10))
         data2 = arg2.to_dict()
         assert data2["name"] == "rng"
-        assert data2["rng_type"] == "RNGInteger"
-        assert "rng_details" in data2
-        assert data2["rng_details"]["min"] == "0"
-        assert data2["rng_details"]["max"] == "10"
+        assert data2["source"] == "rng"
+        assert data2["rng"]["type"] == "RNGInteger"
+        assert data2["rng"]["min"] == 0
+        assert data2["rng"]["max"] == 10
 
     def test_parameter_to_dict(self):
         """Test Parameter.to_dict() serialization"""
@@ -38,18 +39,20 @@ class TestMetadataExport:
         )
 
         data = param.to_dict()
+        assert data["schema"] == 1
         assert len(data["arguments"]) == 2
         assert data["arguments"][0]["name"] == "x"
         assert data["arguments"][1]["name"] == "y"
-        assert "edge" in data["directed_vectors"]
-        assert data["directed_vectors"]["edge"] == ["0", "5"]
+        assert data["directed_vectors"] == [
+            {"name": "edge", "id": "directed-edge", "values": {"x": 0, "y": 5}}
+        ]
 
     def test_strategy_export(self):
         """Test Strategy.export_strategies()"""
 
         # Register a test strategy
         @Strategy.register("export_test_strategy")
-        def strategy_factory(n):
+        def strategy_factory(nsamples):
             return Parameter(
                 TestArg("status", rng_type=RNGEnum(Status)),
                 TestArg("count", rng_type=RNGInteger(1, 100)),
@@ -59,7 +62,9 @@ class TestMetadataExport:
         json_str = Strategy.export_strategies()
         data = json.loads(json_str)
 
-        assert "export_test_strategy" in data
-        strategy_data = data["export_test_strategy"]
+        assert (data["schema"], data["kind"]) == (1, "strategies")
+        [entry] = [e for e in data["strategies"] if e["name"] == "export_test_strategy"]
+        strategy_data = entry["parameter"]
         assert len(strategy_data["arguments"]) == 2
-        assert strategy_data["arguments"][0]["rng_type"] == "RNGEnum"
+        assert strategy_data["arguments"][0]["rng"]["type"] == "RNGEnum"
+        assert strategy_data["arguments"][0]["python_type"] == "Status"

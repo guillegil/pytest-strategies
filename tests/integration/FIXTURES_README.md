@@ -1,307 +1,147 @@
-# Fixture Integration Tests - Summary
+# Strategies and Fixtures
 
-## Overview
+`test_fixtures_integration.py` checks that strategies and pytest fixtures work
+together: a strategy row and any fixtures in one test, with no configuration. This
+page says how the two combine; the project [README](../../README.md) has the full
+rules.
 
-Created comprehensive tests demonstrating that **pytest-strategies works seamlessly with pytest fixtures**, allowing you to combine strategy parameters with any pytest fixture.
+## How a test gets its arguments
 
-## Key Achievement
+`@strategy("name")` parametrizes the test with the strategy's argument names. Every
+other parameter of the test is a fixture, which pytest provides as usual:
 
-✅ **Strategies and fixtures work together perfectly**  
-✅ **Automatic fixture detection** - no manual configuration needed  
-✅ **146 fixture integration tests passing**  
-✅ **486 total tests passing** (340 previous + 146 new)
-
-## How It Works
-
-The Strategy decorator now automatically detects and excludes fixtures from signature validation:
-
-1. **Known pytest fixtures** (request, tmp_path, capsys, etc.) are automatically recognized
-2. **Custom fixtures** are detected by checking if a parameter is NOT in the strategy argnames
-3. **Strategy parameters** are validated normally
-
-This means you can mix strategy parameters with any fixture without any special configuration!
-
-## Test Coverage
-
-### Fixtures Tested
-
-1. **Custom Fixtures**
-   - `sample_config`: Configuration dictionary
-   - `api_client`: Mock API client
-   - `database_connection`: Mock database connection
-   - `temp_data`: Temporary test data
-   - `resource_with_cleanup`: Fixture with setup/teardown
-   - `database_type`: Parametrized fixture
-
-2. **Built-in Pytest Fixtures**
-   - `request`: Pytest request fixture
-   - `tmp_path`: Temporary path fixture
-   - `monkeypatch`: Environment variable patching
-   - `capsys`: Stdout/stderr capture
-
-### Test Scenarios
-
-#### Single Fixture with Strategy (13 tests)
-```python
-@Strategy.strategy("fixture_compatible_strategy")
-def test_strategy_with_single_fixture(
-    user_id: int,           # From strategy
-    operation: str,         # From strategy
-    sample_config: Dict     # From fixture
-):
-    assert isinstance(user_id, int)
-    assert sample_config["max_retries"] == 3
-```
-
-#### Multiple Fixtures with Strategy (13 tests)
-```python
-@Strategy.strategy("fixture_compatible_strategy")
-def test_strategy_with_multiple_fixtures(
-    user_id: int,                    # From strategy
-    operation: str,                  # From strategy
-    sample_config: Dict,             # Fixture 1
-    api_client: str,                 # Fixture 2
-    database_connection: str         # Fixture 3
-):
-    # All work together!
-```
-
-#### Cleanup Fixtures (13 tests)
 ```python
 @pytest.fixture
-def resource_with_cleanup():
-    resource = {"initialized": True}
-    yield resource
-    resource["initialized"] = False  # Cleanup
+def sample_config() -> dict[str, int]:
+    return {"max_retries": 3}
+
 
 @Strategy.strategy("fixture_compatible_strategy")
-def test_with_cleanup(user_id: int, operation: str, resource_with_cleanup: Dict):
-    assert resource_with_cleanup["initialized"] is True
+def test_strategy_with_single_fixture(user_id: int, operation: str, sample_config: dict[str, int]):
+    assert 1 <= user_id <= 1000  # user_id and operation come from the strategy
+    assert sample_config["max_retries"] == 3  # sample_config from the fixture
 ```
 
-#### Parametrized Fixtures (39 tests = 13 strategy × 3 database types)
+- Built-in fixtures (`request`, `tmp_path`, `monkeypatch`, `capsys`, ...) and your
+  own fixtures, with setup and teardown or with any scope, work the same way.
+- A strategy argument that has the name of a fixture replaces that fixture in the
+  test, as `@pytest.mark.parametrize` does.
+- With `validate_signature=True`, the default, every strategy argument must be asked
+  for, by the test or by a fixture it uses; otherwise collection fails:
+
+  ```text
+  In test_missing: Signature validation failed for strategy 'users': Test function signature mismatch for strategy 'users'!
+    Strategy provides: ['user_id', 'role']
+    Test function expects: ['user_id']
+    Missing parameters: ['role']
+  ```
+
+## Fixtures that ask for strategy arguments
+
+A fixture can take strategy arguments itself, and build what the test needs from each
+row. The test then asks for the fixture only:
+
+```python
+# conftest.py
+@pytest.fixture
+def user(user_id, role):
+    return {"id": user_id, "role": role}
+
+
+# test_users.py
+@strategy("users")
+def test_login(user):
+    assert user["role"] in ("admin", "user", "guest")
+```
+
+A test can also receive the whole row as one record, a dataclass whose fields are the
+strategy's arguments. The rule: **a test receives the row as one record when (1)
+neither the test nor any fixture it uses asks for one of the strategy's argument
+names, and (2) exactly one test parameter is annotated with a record type whose
+fields are exactly those names. Otherwise the strategy passes its arguments by name,
+one test parameter each.** So a fixture like `user` above makes the strategy pass the
+arguments by name, and a test that also takes a record of them fails collection (see
+"Record Parameters" in the README).
+
+## Parametrized fixtures and test IDs
+
+A parametrized fixture multiplies the rows: each strategy row runs with each of the
+fixture's parameters. pytest puts the fixture's ID before the strategy's:
+
 ```python
 @pytest.fixture(params=["sqlite", "postgres", "mysql"])
 def database_type(request):
     return request.param
 
+
 @Strategy.strategy("fixture_compatible_strategy")
-def test_with_parametrized_fixture(
-    user_id: int,
-    operation: str,
-    database_type: str  # Creates 3x tests!
-):
+def test_strategy_with_parametrized_fixture(user_id: int, operation: str, database_type: str):
     assert database_type in ["sqlite", "postgres", "mysql"]
 ```
 
-#### Request Fixture (13 tests)
-```python
-@Strategy.strategy("fixture_compatible_strategy")
-def test_with_request_fixture(
-    user_id: int,
-    operation: str,
-    request: pytest.FixtureRequest
-):
-    assert hasattr(request, 'node')
+```text
+test_strategy_with_parametrized_fixture[sqlite-directed-admin]
+test_strategy_with_parametrized_fixture[sqlite-directed-user]
+test_strategy_with_parametrized_fixture[sqlite-rand-0]
+...
+test_strategy_with_parametrized_fixture[mysql-rand-9]
 ```
 
-#### Tmp_path Fixture (13 tests)
-```python
-@Strategy.strategy("fixture_compatible_strategy")
-def test_with_tmp_path(
-    user_id: int,
-    operation: str,
-    tmp_path: pytest.TempPathFactory
-):
-    test_file = tmp_path / f"user_{user_id}.txt"
-    test_file.write_text(f"Operation: {operation}")
-    assert test_file.exists()
-```
-
-#### Monkeypatch Fixture (13 tests)
-```python
-@Strategy.strategy("fixture_compatible_strategy")
-def test_with_monkeypatch(
-    user_id: int,
-    operation: str,
-    monkeypatch: pytest.MonkeyPatch
-):
-    monkeypatch.setenv("TEST_USER_ID", str(user_id))
-    assert os.getenv("TEST_USER_ID") == str(user_id)
-```
-
-#### Capsys Fixture (13 tests)
-```python
-@Strategy.strategy("fixture_compatible_strategy")
-def test_with_capsys(
-    user_id: int,
-    operation: str,
-    capsys: pytest.CaptureFixture
-):
-    print(f"User {user_id} performing {operation}")
-    captured = capsys.readouterr()
-    assert str(user_id) in captured.out
-```
-
-#### Complex Integration (13 tests)
-```python
-@Strategy.strategy("api_test_strategy")
-def test_complex_integration(
-    endpoint: str,                   # Strategy param 1
-    status_code: int,                # Strategy param 2
-    api_client: str,                 # Fixture 1
-    database_connection: str,        # Fixture 2
-    sample_config: Dict,             # Fixture 3
-    tmp_path: pytest.TempPathFactory,# Fixture 4
-    monkeypatch: pytest.MonkeyPatch  # Fixture 5
-):
-    # Everything works together!
-```
-
-## Type Hints
-
-All files now have proper type hints:
-
-### Strategy Definitions (`strategies.py`)
-```python
-from typing import Tuple, Sequence, Any
-
-@Strategy.register("simple_integer_strategy")
-def create_simple_integer_strategy(nsamples: int) -> Parameter:
-    ...
-
-@Strategy.register("legacy_tuple_strategy")
-def create_legacy_tuple_strategy(nsamples: int) -> Tuple[Tuple[str, ...], Sequence[Tuple[int, ...]]]:
-    ...
-```
-
-### Test Files
-```python
-from typing import Dict, List
-
-@pytest.fixture
-def sample_config() -> Dict[str, int]:
-    return {"max_retries": 3}
-
-@pytest.fixture
-def temp_data() -> List[int]:
-    return [1, 2, 3, 4, 5]
-```
-
-## Implementation Details
-
-### Enhanced Signature Validation
-
-The `_validate_signature` method now intelligently detects fixtures:
-
-```python
-@staticmethod
-def _validate_signature(test_fn, argnames: Sequence[str], strategy_name: str) -> None:
-    """
-    Validate that test function signature matches strategy argnames.
-    
-    Automatically excludes pytest fixtures from validation by checking if
-    parameters have fixture markers or are in the known fixtures list.
-    """
-    sig = inspect.signature(test_fn)
-    test_params = list(sig.parameters.keys())
-
-    # A parameter is considered a fixture if:
-    # 1. It's in the common pytest fixtures list, OR
-    # 2. It's not in the strategy argnames (assumed to be a custom fixture)
-    actual_params = []
-    for p in test_params:
-        if p in Strategy.PYTEST_FIXTURES:
-            continue  # Skip known pytest fixtures
-        if p not in argnames:
-            continue  # Skip custom fixtures
-        actual_params.append(p)
-```
-
-This approach means:
-- ✅ No manual fixture registration needed
-- ✅ Works with any custom fixture
-- ✅ Works with all built-in pytest fixtures
-- ✅ Maintains proper validation for strategy parameters
-
-## Test Results
+The IDs name the rows, so they stay the same for every seed, and `-k` selects by both
+parts:
 
 ```bash
-pytest tests/integration/test_fixtures_integration.py -v
+pytest tests/integration/test_fixtures_integration.py -k "parametrized and sqlite and directed"
+pytest "tests/integration/test_fixtures_integration.py::test_strategy_with_parametrized_fixture[mysql-rand-3]" --rng-seed=42
 ```
 
-**Results:**
-- ✅ **146 tests passed**
-- ⏱️ **0.10s execution time**
-- 12 strategies registered
-- All fixture types tested
+## The row and the context in fixtures
 
-### All Tests Combined
+- The item of each strategy row carries the row's `VectorInfo` in
+  `request.node.stash[VECTOR_KEY]` (its strategy, kind, name, index, values and
+  seed), for fixtures that log or label the row. Read it with
+  `request.node.stash.get(VECTOR_KEY, None)` in a fixture that also serves tests
+  without a strategy.
+- The `strategies_ctx` session fixture gives the object that the
+  `pytest_strategies_context` hook returned for the tests that use it, the one the
+  factories received, and `pytest_strategy.get_context(config, path)` gives the
+  context of a folder. A testbench fixture can build on it instead of reading the
+  configuration again (see "The context in fixtures" in the README).
 
-```bash
-pytest tests/ -v
-```
+## Random draws in fixtures
 
-**Results:**
-- ✅ **486 tests passed** (340 previous + 146 new)
-- ⏱️ **0.22s execution time**
-- No failures, no errors
-
-## Usage Examples
-
-### Basic: Strategy + Single Fixture
+`RNG` draws made in a fixture follow `--rng-seed`. Each fixture's setup draws from a
+stream derived from the seed, the node ID the fixture is set up for, its name, its
+parameter index and where it is defined. So a fixture draws the same values whether
+its test runs alone, in the suite, in another order or under pytest-xdist:
 
 ```python
 @pytest.fixture
-def config():
-    return {"timeout": 30}
-
-@Strategy.strategy("my_strategy")
-def test_with_config(param1: int, param2: str, config: dict):
-    # param1 and param2 from strategy
-    # config from fixture
-    assert config["timeout"] == 30
+def token():
+    return RNG.integer(0, 2**32 - 1)
 ```
 
-### Advanced: Strategy + Multiple Fixtures
+So `pytest "test_users.py::test_token[rand-1]" --rng-seed=1` gives the `token` that
+row had in a whole run with `--rng-seed=1`. Python's own `random` module does not
+follow the seed (see "Draws outside the rows" in the README).
 
-```python
-@Strategy.strategy("api_strategy")
-def test_api_endpoint(
-    endpoint: str,          # Strategy
-    status_code: int,       # Strategy
-    api_client,             # Fixture
-    database,               # Fixture
-    tmp_path,               # Built-in fixture
-    monkeypatch             # Built-in fixture
-):
-    # All parameters work together seamlessly!
-```
+## The tests
 
-### With Parametrized Fixtures
+| Test                                     | Fixtures                                                                    |
+| ---------------------------------------- | --------------------------------------------------------------------------- |
+| `test_strategy_with_single_fixture`      | `sample_config`                                                             |
+| `test_strategy_with_multiple_fixtures`   | `sample_config`, `api_client`, `database_connection`                        |
+| `test_api_with_client_fixture`           | `api_client`                                                                |
+| `test_strategy_with_cleanup_fixture`     | `resource_with_cleanup`, with teardown                                      |
+| `test_strategy_with_parametrized_fixture` | `database_type`, three parameters                                           |
+| `test_strategy_with_request_fixture`     | `request`                                                                   |
+| `test_strategy_with_tmp_path`            | `tmp_path`                                                                  |
+| `test_strategy_with_monkeypatch`         | `monkeypatch`                                                               |
+| `test_strategy_with_capsys`              | `capsys`                                                                    |
+| `test_complex_integration`               | `api_client`, `database_connection`, `sample_config`, `tmp_path`, `monkeypatch` |
 
-```python
-@pytest.fixture(params=["dev", "staging", "prod"])
-def environment(request):
-    return request.param
-
-@Strategy.strategy("deployment_strategy")
-def test_deployment(
-    version: str,           # Strategy (generates multiple values)
-    config: dict,           # Strategy (generates multiple values)
-    environment: str        # Fixture (creates 3x tests)
-):
-    # This creates: len(strategy_samples) × 3 tests
-    # Each strategy sample is tested in all 3 environments!
-```
-
-## Summary
-
-✅ **Seamless integration** between strategies and fixtures  
-✅ **146 new tests** demonstrating fixture compatibility  
-✅ **486 total tests passing** with no regressions  
-✅ **Automatic fixture detection** - works with any fixture  
-✅ **Full type hints** on all files  
-✅ **Comprehensive coverage** of all common fixture types  
-
-**Key Insight:** You can now use pytest-strategies in any existing test suite without worrying about fixture compatibility. Just add `@Strategy.strategy()` to your tests and it will work alongside all your existing fixtures!
+The strategies `fixture_compatible_strategy` and `api_test_strategy` are registered
+in the test module itself. Fixtures that ask for strategy arguments, records,
+`strategies_ctx` and fixture streams have their own tests in
+`test_records_integration.py`, `test_strategies_ctx_integration.py` and
+`test_plugin_streams_integration.py`.

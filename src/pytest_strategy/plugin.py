@@ -14,7 +14,9 @@ import argparse
 import contextlib
 import difflib
 import fnmatch
+import functools
 import glob
+import hashlib
 import importlib.abc
 import importlib.machinery
 import importlib.util
@@ -23,31 +25,60 @@ import os
 import re
 import sys
 import traceback
-from collections.abc import Callable, Iterator, Sequence
-from pathlib import Path, PurePath
+from collections.abc import (
+    Callable,
+    Generator,
+    Iterable,
+    Iterator,
+    Mapping,
+    MutableMapping,
+    Sequence,
+)
+from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, get_args
 
+import _pytest.python
 import pytest
+from _pytest._code.code import TerminalRepr
 from _pytest.pathlib import ImportPathMismatchError, import_path
 from pytest import Config, Session
 
+from . import _repro, _reuse
+from ._context import Answer
+from ._fingerprint import UNAVAILABLE, canonical
+from ._options import VectorMode, constraint_off_item, parse_constraint_off
 from ._registry import (
+    STRATEGY_FILE_PATTERNS,
     Registration,
     _contains,
     _describe_factory,
     display_path,
     factory_source,
+    matches_pattern,
     registry,
+    source_part,
+    test_file_patterns,
 )
-from ._runtime import runtime
-from .rng import RNG
+from ._runtime import CtxFixture, runtime
+from ._streams import StreamKey, file_part, seed_part
+from ._vector import VECTOR_KEY, VECTORS_KEY, VectorInfo
+from .rng import RNG, _Stream
 
 # This package's folder, whose frames are left out of the errors shown for a factory
 _PACKAGE_DIR = os.path.normcase(os.path.realpath(os.path.dirname(__file__)))
 
+# A test's record parameters that its strategies, in named mode, leave to fixtures:
+# (parameter, error) pairs, checked once the test is parametrized
+_UNFILLED_RECORDS = pytest.StashKey[list[tuple[str, str]]]()
+
+# The function of the fixture pytest makes for each argument of a parametrization
+# (private API; None if a pytest moves it): it returns the argument's value and runs
+# no user code, so it gets no random stream
+_DIRECT_PARAM_FIXTURE: Any = getattr(_pytest.python, "get_direct_param_fixture_func", None)
+
 # Strategy file names; a file is imported only if it also contains a registration
-_STRATEGY_FILE_PATTERNS = ("strategies.py", "strategy.py", "*_strategies.py", "*_strategy.py")
+_STRATEGY_FILE_PATTERNS = STRATEGY_FILE_PATTERNS
 
 # A registration decorator: @Strategy.register(...), or @register("name") and
 # @<module>.register("name") with a string literal, also as name="..."
@@ -77,13 +108,7 @@ def _matches_norecursedirs(pattern: str, path: Path) -> bool:
     one with a separator (e.g. ``tests/data``) against the end of the path
     (pytest's ``_pytest.pathlib.fnmatch_ex``).
     """
-    if os.sep != "/" and os.sep not in pattern and "/" in pattern:
-        pattern = pattern.replace("/", os.sep)
-    if os.sep not in pattern:
-        return fnmatch.fnmatch(path.name, pattern)
-    if PurePath(path).is_absolute() and not os.path.isabs(pattern):
-        pattern = f"*{os.sep}{pattern}"
-    return fnmatch.fnmatch(str(path), pattern)
+    return matches_pattern(pattern, str(path))
 
 
 class _LoadedModuleLoader(importlib.abc.Loader):
@@ -183,42 +208,85 @@ class PytestStrategyPlugin:
 
     @pytest.hookimpl
     def pytest_configure(self, config: Config) -> None:
-        """Seed the RNG and register the strategy marker."""
-        rng_seed = config.getoption("--rng-seed", None)
-        workerinput = getattr(config, "workerinput", None)
-        worker_seed = workerinput.get("pytest_strategies_seed") if workerinput else None
-        if rng_seed is None and worker_seed is not None:
-            # A pytest-xdist worker without --rng-seed uses the controller's seed
-            # (see pytest_configure_node). Workers must generate identical vectors,
-            # or xdist aborts with "Different tests were collected".
-            RNG.seed(worker_seed)
-        else:
-            # Without --rng-seed the seed chosen for this process is kept. Either
-            # way the generator restarts from it, so values drawn when test
-            # modules are imported follow the printed seed. The global random
-            # state is not touched.
-            RNG.seed(rng_seed)
+        """
+        Seed the RNG and register the strategy marker.
+
+        The module's ``pytest_configure`` registers the instance, so this runs
+        after the pytest_configure of the initial conftest.py files and of the
+        plugins registered after the module: one that seeds there
+        (``RNG.seed(1234)``, or ``config.option.rng_seed = 99``) sets the run's
+        seed, as in 3.0. ``--rng-seed``, and the seed a ``--lf`` or ``--sw`` run
+        reuses, win over ``RNG.seed(1234)``; ``config.option.rng_seed = 99`` wins
+        over both.
+        """
+        # A pytest-xdist worker without --rng-seed uses the controller's seed (see
+        # pytest_configure_node): workers must generate identical vectors. A --lf
+        # or --sw run without it reuses the failed run's seed (_reuse.plan).
+        # Without any, the seed chosen for this process is kept. Either way the
+        # generator restarts from it, so values drawn when test modules are
+        # imported follow the printed seed. The global random state is not touched.
+        given = _given_seed(config)
         state = runtime.current
+        reuse = state.reuse if state is not None else None
+        if state is not None and reuse is not None and given is not None:
+            # A conftest.py's pytest_configure set config.option.rng_seed, which wins
+            # as --rng-seed does. The reused seed acts as --rng-seed: an RNG.seed()
+            # call there does not change it.
+            state.reuse = reuse = None
+        RNG.seed(reuse.seed if reuse is not None else given)
         if state is not None:
             state.run_seed = RNG.get_seed()
+            _read_failed_seeds(config, state)
         # From now on, a test module that imports a strategy file the plugin has
         # not loaded yet gets it loaded by the plugin (see _StrategyFileFinder)
         _install_strategy_file_finder()
 
         config.addinivalue_line(
             "markers",
-            "strategy(name_or_factory, validate_signature=True): parametrize the test with "
+            "strategy(name_or_factory, *, validate_signature=True): parametrize the test with "
             "a strategy (added by @strategy)",
         )
 
     @pytest.hookimpl(optionalhook=True)
     def pytest_configure_node(self, node: Any) -> None:
         """
-        Send the controller's RNG seed to a pytest-xdist worker.
+        Send the controller's RNG seed to a pytest-xdist worker, and the failed rows
+        it deselects (recorded under another seed than the one a --lf run reuses),
+        those a --lf run reuses the seed of, and those recorded under this run's seed
+        (see ``_read_failed_seeds``).
 
         Optional hook: only called when pytest-xdist is installed.
         """
         node.workerinput["pytest_strategies_seed"] = _run_seed()
+        state = runtime.current
+        if state is not None:
+            node.workerinput[_DESELECT] = sorted(state.deselect)
+            node.workerinput[_REUSED] = sorted(state.reused)
+            node.workerinput[_RECORDED] = sorted(state.recorded)
+
+    @pytest.hookimpl
+    def pytest_plugin_registered(self, plugin: object, plugin_name: str, manager: Any) -> None:
+        """
+        Record a ``conftest.py`` that pytest imported by its path in this session, so
+        its fixtures and factories are keyed by its path (``definition_part``), also
+        outside the rootdir and the testpaths.
+
+        pytest registers a conftest module under its path. The hook is historic:
+        when the plugin registers, in ``pytest_configure``, it is called for every
+        plugin registered before, the initial conftest.py files among them.
+        """
+        state = runtime.current
+        if state is None or state.config is None or manager is not state.config.pluginmanager:
+            return
+        file = getattr(plugin, "__file__", None)
+        if (
+            isinstance(plugin, ModuleType)
+            and isinstance(file, str)
+            and os.path.basename(file) == "conftest.py"
+            and os.path.isabs(plugin_name)
+            and _file_key(plugin_name) == _file_key(file)
+        ):
+            state.imported_files.add(_file_key(file))
 
     # ==== COLLECTION HOOKS ====
 
@@ -233,7 +301,35 @@ class PytestStrategyPlugin:
         imported do not depend on which test modules were collected before.
         """
         if isinstance(collector, pytest.Module) and runtime.current is not None:
-            self._load_directories(collector.config, os.path.realpath(collector.path.parent))
+            self._load_directories(collector.config, collector.path.parent)
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_make_collect_report(
+        self, collector: pytest.Collector
+    ) -> Generator[None, pytest.CollectReport, pytest.CollectReport]:
+        """
+        Collect a test module on a random stream of its own, root(S, "module", path)
+        (streams v1), where path is the module's path relative to the rootdir, or
+        below its site-packages folder for an installed package's (``file_part``).
+
+        Values the module draws when it is imported (``BASE = RNG.integer(0, 9)`` at
+        module level) are then the same whether it is collected alone or with other
+        modules, in any order. The module is imported here, after pytest_collectstart
+        loaded its folder's strategy files. The key is built only if the module draws.
+
+        The module's path is recorded as one pytest imported by its path, so its
+        fixtures are keyed by it (``definition_part``).
+        """
+        state = runtime.current
+        if not isinstance(collector, pytest.Module) or state is None:
+            return (yield)
+        # pytest imports the module by its path: its fixtures are keyed by it
+        # (definition_part), also outside the rootdir and the testpaths
+        state.imported_files.add(_file_key(collector.path))
+        seed = seed_part(_run_seed())
+        path, rootpath = collector.path, collector.config.rootpath
+        with _Stream(lambda: StreamKey.root(seed, "module", file_part(path, rootpath))):
+            return (yield)
 
     @pytest.hookimpl(tryfirst=True)
     def pytest_generate_tests(self, metafunc: pytest.Metafunc) -> None:
@@ -253,6 +349,7 @@ class PytestStrategyPlugin:
         from ._resolver import build_parametrization
 
         markers: list[pytest.Mark] = []
+        unfilled: list[tuple[str, str]] = []
         for mark in own_markers:
             markers.append(mark)
             if mark.name != "strategy":
@@ -268,6 +365,9 @@ class PytestStrategyPlugin:
                     config=metafunc.config,
                     pytest_fixtures=Strategy.PYTEST_FIXTURES,
                     validate=validate,
+                    fixturenames=metafunc.fixturenames,
+                    test_key=metafunc.definition.nodeid,
+                    context=runtime.test_context(metafunc.definition),
                 )
             except ValueError as e:
                 if metafunc.config.getoption("fulltrace", False):
@@ -290,26 +390,75 @@ class PytestStrategyPlugin:
                 # frames of a factory that raised, without the plugin's
                 pytest.fail(error, pytrace=False)
             markers.append(
-                pytest.mark.parametrize(
-                    parametrization.argnames, parametrization.values, ids=parametrization.ids
-                ).mark
+                pytest.mark.parametrize(parametrization.argnames, parametrization.params()).mark
             )
+            unfilled.extend(parametrization.unfilled)
         own_markers[:] = markers
+        if unfilled:
+            metafunc.definition.stash[_UNFILLED_RECORDS] = unfilled
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_itemcollected(self, item: pytest.Item) -> None:
+        """
+        Store the VectorInfo of the strategy rows an item runs: the first one in
+        the node ID under ``VECTOR_KEY``, every one under ``VECTORS_KEY``.
+
+        Each row carries a ``strategy`` mark holding its VectorInfo (the test's own
+        ``strategy`` marks hold a strategy name or factory), and pytest copies a
+        row's marks onto its item in the order of the node ID. This runs as each
+        item is collected, before any ``pytest_collection_modifyitems`` hook.
+        """
+        infos = tuple(
+            mark.args[0]
+            for mark in item.iter_markers("strategy")
+            if mark.args and isinstance(mark.args[0], VectorInfo)
+        )
+        if infos:
+            item.stash[VECTOR_KEY] = infos[0]
+            item.stash[VECTORS_KEY] = infos
+
+    @pytest.hookimpl
+    def pytest_collectreport(self, report: pytest.CollectReport) -> None:
+        """
+        Note a collector (a test module, a class) that was skipped, such as a module
+        that calls ``pytest.importorskip()``, or failed, such as a module that does
+        not import or a strategy whose factory raised: the strategies of its tests
+        may not have been resolved.
+        """
+        state = runtime.current
+        if state is not None and (report.skipped or report.failed):
+            state.collectors_incomplete = True
 
     @pytest.hookimpl(trylast=True)
     def pytest_collection_modifyitems(
         self, session: Session, config: Config, items: list[pytest.Item]
     ) -> None:
         """
-        Fail the run on a strategy name registered twice in one directory, and when
-        --vector-name/--vector-index matched no strategy at all.
+        Fail the run on a strategy name registered twice in one directory, when
+        --vector-name/--vector-index matched no strategy at all, and when a
+        --strategy-constraint-off item matched no constraint in a run that
+        collected the whole suite.
 
         A strategy without the requested directed vector gets an empty parameter
         set, so its tests are skipped. That is intended when another strategy has
         the vector, but when none has it (a typo, an index out of range) every
-        test would be skipped and the run would still pass.
+        test would be skipped and the run would still pass. Likewise, a misspelled
+        constraint name would leave the constraint on while the user believes it is
+        off. A run that collected only some tests resolved only some strategies, and
+        so did a run in which a test module was skipped or failed to collect, so
+        there the unmatched items are reported in red and the run goes on.
         """
         message = self._clash_error() or self._vector_filter_error(config)
+        unmatched = self._constraint_off_error(config)
+        if unmatched is not None:
+            state = runtime.current
+            complete = state is not None and not state.collectors_incomplete
+            if complete and _collects_whole_suite(config):
+                message = message or unmatched
+            elif state is not None:
+                # Printed once pytest has reported the collection (on a pytest-xdist
+                # worker, by the controller: see pytest_terminal_summary)
+                state.unmatched_constraints_off = unmatched.splitlines()
         if message is None:
             return
         if getattr(config, "workerinput", None) is None:
@@ -319,6 +468,48 @@ class PytestStrategyPlugin:
         # nothing instead; the controller stops the session with this message.
         items.clear()
         session.shouldfail = message
+
+    @pytest.hookimpl(specname="pytest_collection_modifyitems")
+    def pytest_collection_modifyitems_reuse(self, config: Config, items: list[pytest.Item]) -> None:
+        """
+        Deselect the failed rows a --lf or --sw run does not rerun: those recorded
+        under another seed than the one it reuses (``SessionState.deselect``), whose
+        values this seed would not give. A deselected test stays in pytest's
+        last-failed set, and the terminal summary gives the command that reruns it
+        (``_deselected_lines``). pytest's own --lf selection, a wrapper, runs after
+        this.
+
+        Also note which of the rows the run reuses the seed of it collected: the
+        terminal summary gives the command that reruns the others, which were
+        deleted or renamed, are not generated with the run's options, or are in a
+        file pytest's --lf did not collect (``_uncollected_lines``).
+        """
+        state = runtime.session_of(config)
+        if state is None:
+            return
+        if state.reused:
+            state.reused_collected.update(i.nodeid for i in items if i.nodeid in state.reused)
+        if not state.deselect:
+            return
+        kept: list[pytest.Item] = []
+        deselected: list[pytest.Item] = []
+        for item in items:
+            (deselected if item.nodeid in state.deselect else kept).append(item)
+        if deselected:
+            items[:] = kept
+            config.hook.pytest_deselected(items=deselected)
+
+    @pytest.hookimpl
+    def pytest_deselected(self, items: Sequence[pytest.Item]) -> None:
+        """
+        Keep the tests the run deselected: the -k expression that the rerun command
+        of a failed row outside the rootdir gives must not select them either
+        (``_repro.keyword``), as that command runs without the run's own selection.
+        """
+        if items:
+            state = runtime.session_of(items[0].config)
+            if state is not None:
+                state.deselected_items.extend(items)
 
     @staticmethod
     def _clash_error() -> str | None:
@@ -359,6 +550,258 @@ class PytestStrategyPlugin:
             f"Directed vectors by strategy: {available}"
         )
 
+    def _constraint_off_error(self, config: Config) -> str | None:
+        """
+        Describe the --strategy-constraint-off items that matched no constraint of a
+        strategy this run resolved.
+
+        An item matches when a resolved strategy it applies to (every strategy for a
+        bare name) has a constraint with its name, whether or not the run evaluates
+        the constraints.
+
+        Returns:
+            The message, or None if every item matched, the option was not given,
+            no Parameter strategy was resolved, or under --list-strategies
+        """
+        state = runtime.current
+        if state is None or config.option.list_strategies or not state.constraint_names:
+            return None
+        known = state.constraint_names
+        lines = []
+        for target, name in dict.fromkeys(runtime.session_options(config).constraints_off):
+            if any(
+                name in names
+                for strategy, names in known.items()
+                if target is None or target == strategy
+            ):
+                continue
+            item = constraint_off_item(target, name)
+            # A bare name is compared with the names, an aimed one with the aimed items
+            if target is None:
+                candidates = sorted({c for names in known.values() for c in names})
+            else:
+                candidates = sorted({f"{s}:{c}" for s, names in known.items() for c in names})
+            line = f"--strategy-constraint-off={item} matched no constraint."
+            close = difflib.get_close_matches(item, candidates, n=3)
+            if close:
+                line += " Did you mean " + " or ".join(repr(c) for c in close) + "?"
+            lines.append(line)
+        if not lines:
+            return None
+        by_strategy = "; ".join(
+            f"{strategy}: {', '.join(names) if names else 'none'}"
+            for strategy, names in sorted(known.items())
+        )
+        return "\n".join(lines) + f" Constraints by strategy: {by_strategy}"
+
+    @pytest.hookimpl(trylast=True)
+    def pytest_collection_finish(self, session: Session) -> None:
+        """
+        Print the --strategy-constraint-off items that matched no constraint in a
+        run that did not collect the whole suite, in red, after the collection report.
+
+        A pytest-xdist worker's output is not shown: the worker sends the lines
+        with its -v summary, and the controller prints them in its terminal summary.
+        The worker also notes the digest of each strategy's values, before any test
+        can change a value, and the contexts the collection computed, for the
+        controller (see ``pytest_sessionfinish``).
+        """
+        state = runtime.current
+        if state is None:
+            return
+        if getattr(session.config, "workerinput", None) is not None:
+            state.value_digests = _value_digests(
+                session.items, getattr(session.config, "rootpath", None)
+            )
+            state.collection_contexts = {
+                label: _fingerprint_text(answer)
+                for label, answer in _computed_contexts(state).items()
+            }
+            return
+        for line in state.unmatched_constraints_off:
+            self._write_line(session.config, line, red=True)
+
+    # ==== RANDOM STREAMS OF FIXTURES AND TESTS ====
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(
+        self, fixturedef: pytest.FixtureDef[Any], request: pytest.FixtureRequest
+    ) -> Generator[None, Any, Any]:
+        """
+        Set a fixture up on a random stream of its own (streams v1): root(S,
+        "fixture", scope, name, param_index, where, qualname, base), where scope is
+        the node ID of the fixture's scope node ("" for the session and the rootdir's
+        package, ``_node_part``), and where, qualname and base tell the fixture from
+        another of the same name (``_fixture_definition``, ``_fixture_base``).
+
+        A module- or session-scoped fixture is set up during the setup of whichever
+        test needs it first; with its own stream, its draws, and that test's, do
+        not depend on which test that is. Its teardown runs in the teardown of a
+        test, and draws from that test's teardown stream. The key is built only if
+        the fixture draws.
+        """
+        state = runtime.current
+        if fixturedef.func is _DIRECT_PARAM_FIXTURE or state is None:
+            return (yield)
+        seed = seed_part(_run_seed())
+        scope = _node_part(request.node.nodeid)
+        param_index = getattr(request, "param_index", 0)
+
+        def key() -> StreamKey:
+            definition = state.fixture_definitions.get(fixturedef)
+            if definition is None:
+                definition = (
+                    *_fixture_definition(fixturedef.func, request.config),
+                    _fixture_base(fixturedef),
+                )
+                state.fixture_definitions[fixturedef] = definition
+            return StreamKey.root(
+                seed, "fixture", scope, fixturedef.argname, param_index, *definition
+            )
+
+        # A request.getfixturevalue() in this setup that reaches strategies_ctx, or a
+        # fixture that used it, makes the tests that get this value of the fixture
+        # from its cache use it too (_hide_ctx_users, _note_ctx_requester)
+        watched = _hide_ctx_users(fixturedef, request, state)
+        try:
+            with _Stream(key):
+                return (yield)
+        finally:
+            if watched is not None:
+                _note_ctx_requester(fixturedef, request, *watched, state)
+
+    def pytest_fixture_post_finalizer(
+        self, fixturedef: pytest.FixtureDef[Any], request: pytest.FixtureRequest
+    ) -> None:
+        """
+        Forget the value a fixture cached when its setup asked for strategies_ctx
+        (``CtxFixture.requesters``) when pytest tears it down, so the plugin does not
+        keep it alive.
+        """
+        state = runtime.session_of(request.config)
+        fixture = state.ctx_fixture if state is not None else None
+        if (
+            fixture is not None
+            and fixturedef in fixture.requesters
+            and fixture.requesters[fixturedef] is fixturedef.cached_result
+        ):
+            del fixture.requesters[fixturedef]
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_runtest_setup(self, item: pytest.Item) -> Generator[None, None, None]:
+        """
+        Run a test's setup on its own random stream (see ``_phase_stream``), and
+        check the context it got from ``strategies_ctx`` (see ``_check_ctx``).
+        """
+        with _phase_stream(item, "setup"):
+            try:
+                result = yield
+            except BaseException as error:
+                _check_ctx(item, "setup", error)
+                raise
+            _check_ctx(item, "setup", None)
+            return result
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_runtest_call(self, item: pytest.Item) -> Generator[None, None, None]:
+        """
+        Run a test's body on its own random stream (see ``_phase_stream``), and
+        check the context it got from ``strategies_ctx`` (see ``_check_ctx``).
+        """
+        with _phase_stream(item, "call"):
+            try:
+                result = yield
+            except BaseException as error:
+                _check_ctx(item, "call", error)
+                raise
+            _check_ctx(item, "call", None)
+            return result
+
+    @pytest.hookimpl(wrapper=True, tryfirst=True)
+    def pytest_runtest_makereport(
+        self, item: pytest.Item, call: pytest.CallInfo[None]
+    ) -> Generator[None, pytest.TestReport, pytest.TestReport]:
+        """
+        Add a ``pytest-strategies`` section below the traceback of a strategy row's
+        failed setup or call: what the row is, its values, the seed and the command
+        that runs it again (``_repro``). The report gets the command too, in its
+        ``pytest_strategies`` attribute (strings only, which pytest-xdist carries to
+        the controller), for the list of failed rows in the terminal summary and the
+        JUnit XML report's suite properties. A report that takes no section, such as
+        a missing fixture's, is wrapped in one that does (``_repro.SectionedRepr``).
+        A failure reported as plain text (an XPASS(strict)) gets no section, and a
+        teardown error gets nothing.
+
+        For a ``--junitxml`` report of the ``xunit1`` or ``legacy`` family, the row's
+        JUnit properties (``_repro.testcase_properties``) go to the item's
+        ``user_properties``, which pytest copies into the reports that follow and
+        junitxml writes from the teardown report into the test case, and to this
+        report's, which junitxml reads instead when the teardown fails too. The
+        ``xunit2`` schema has no properties per test case, and junitxml would write
+        them whatever the family, so they are left out there.
+
+        The guard's message that ``_check_ctx`` kept for a test's setup or call that
+        raised an error goes into the same section, before the row. A failure
+        reported as plain text gets it as a section of the report's own.
+
+        A passing call of a row the failed-seeds map holds under this run's seed
+        (``SessionState.recorded``) notes the options of its rerun command run from
+        the rootdir, as the map holds them, so the entry leaves the map when they
+        are the ones it was recorded with.
+
+        It wraps the other wrappers, so it sees the outcome they set: skipping's,
+        which turns an XPASS(strict) into a failure, registered before the plugin,
+        and through tryfirst also those registered after it, such as the wrapper of
+        a conftest.py loaded while the tests are collected.
+        """
+        report = yield
+        message = item.stash.get(_CTX_MESSAGES, {}).pop(call.when, None)
+        repro: str | None = None
+        if report.passed and call.when == "call":
+            state = runtime.session_of(item.config)
+            if state is not None and item.nodeid in state.recorded:
+                infos = item.stash.get(VECTORS_KEY, ())
+                if infos:
+                    # As the map holds them: run from the rootdir
+                    options = _repro.generation_options(
+                        item.config, infos, start=item.config.rootpath
+                    )
+                    state.passed_rows[item.nodeid] = tuple(options)
+        elif report.failed and call.when in ("setup", "call"):
+            infos = item.stash.get(VECTORS_KEY, ())
+            if infos:
+                repro, attribute = _repro.failure(item, infos)
+                # TestReport keeps extra attributes when pytest-xdist serializes it
+                report.pytest_strategies = attribute  # type: ignore[attr-defined]
+                if _junit_family(item.config) == "xunit1":
+                    for prop in _repro.testcase_properties(item, infos):
+                        # Once, also when a plugin runs the test again
+                        if prop not in item.user_properties:
+                            item.user_properties.append(prop)
+                        if prop not in report.user_properties:
+                            report.user_properties.append(prop)
+        text = "\n\n".join(part for part in (message, repro) if part is not None)
+        if not text:
+            return report
+        add = getattr(report.longrepr, "addsection", None)
+        if not callable(add) and isinstance(report.longrepr, TerminalRepr):
+            # A report without sections, such as a missing fixture's
+            report.longrepr = _repro.SectionedRepr(report.longrepr)
+            add = report.longrepr.addsection
+        if callable(add):
+            add(_SECTION, text)
+        elif message is not None:
+            report.sections.append((_SECTION, message))
+        return report
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_runtest_teardown(
+        self, item: pytest.Item, nextitem: pytest.Item | None
+    ) -> Generator[None, None, None]:
+        """Run a test's teardown on its own random stream (see ``_phase_stream``)."""
+        with _phase_stream(item, "teardown"):
+            return (yield)
+
     # ==== STRATEGY LOOKUP ====
 
     def resolve(
@@ -391,7 +834,7 @@ class PytestStrategyPlugin:
 
         directory = _file_key(test_path.parent)
         if config is not None:
-            self._load_directories(config, os.path.realpath(test_path.parent))
+            self._load_directories(config, test_path.parent)
         found = registry.nearest(ref, directory)
         if found is not None:
             return ref, found.factory
@@ -414,17 +857,22 @@ class PytestStrategyPlugin:
             raise ValueError(_ambiguous_message(ref, test_path, candidates))
         raise ValueError(strategy_not_found_message(ref, directory, rootpath))
 
-    def _load_directories(self, config: Config, directory: str) -> None:
+    def _load_directories(self, config: Config, folder: Path) -> None:
         """
-        Load the strategy files of ``directory`` and each directory above it, closest first.
+        Load the strategy files of a test module's folder and each directory above
+        it, closest first.
 
-        ``directory`` is a real path as the file system spells it, not a
-        ``_file_key``: files are imported and reported under their own spelling
-        (on Windows, ``_file_key`` lowercases the path).
+        The directories are its real path and those above it, as the file system
+        spells them, not ``_file_key``s: files are imported and reported under their
+        own spelling (on Windows, ``_file_key`` lowercases the path). The random
+        streams of the folder's own files are keyed by its path as pytest spells it
+        (``folder``), which is the same in every checkout for a folder linked into
+        the rootdir from a place that does not move with it (``path_part``).
         """
         state = runtime.current
         if state is None:
             return
+        directory = os.path.realpath(folder)
         for current in self._directories_up(config, directory):
             key = os.path.normcase(current)
             if key in state.loaded_dirs:
@@ -432,7 +880,9 @@ class PytestStrategyPlugin:
             state.loaded_dirs.add(key)
             files = self._strategy_files_in(Path(current))
             if files:
-                self._load_strategy_files(files, config)
+                self._load_strategy_files(
+                    files, config, spelled=folder if current == directory else None
+                )
 
     def _directories_up(self, config: Config, directory: str) -> Iterator[str]:
         """
@@ -539,58 +989,225 @@ class PytestStrategyPlugin:
 
     @pytest.hookimpl
     def pytest_report_header(self, config: Config, start_path: Path) -> list[str]:
-        """Add the RNG seed to the test report header."""
-        return [f"pytest-strategies: RNG seed = {_run_seed()}"]
+        """
+        Add the RNG seed, whether it was reused from the failed run for --lf or --sw
+        (``_reuse_line``), and the constraints turned off, to the test report header.
+        """
+        lines = [f"pytest-strategies: RNG seed = {_run_seed()}"]
+        state = runtime.session_of(config)
+        if state is not None and state.reuse is not None:
+            lines.append(_reuse_line(config, state.reuse))
+        items = runtime.session_options(config).constraints_off_items
+        if items:
+            lines.append(f"pytest-strategies: constraints off: {', '.join(items)}")
+        return lines
+
+    @pytest.hookimpl
+    def pytest_report_collectionfinish(self, config: Config) -> list[str]:
+        """
+        Print the fingerprints of the testbench contexts the collection computed,
+        after the collection report (also under -q and --collect-only): ``context
+        976bcfdf``, or ``contexts conftest.py 976bcfdf, tests/a/conftest.py b1e1b237``
+        with each one's label, for a context with several. Nothing when no context
+        was computed, or none was other than None.
+
+        A pytest-xdist controller collects nothing, so this does not run there.
+        """
+        state = runtime.session_of(config)
+        if state is None:
+            return []
+        shown = {label: _fingerprint_text(a) for label, a in _computed_contexts(state).items()}
+        text = _contexts_text(shown)
+        return [f"pytest-strategies: {text}"] if text is not None else []
+
+    @pytest.hookimpl
+    def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
+        """
+        Note a test whose setup or call failed, for the line that reproduces the run,
+        and the rerun command of a failed strategy row, for the list of failed rows
+        (on the pytest-xdist controller too, which gets the workers' reports).
+        """
+        if report.failed and report.when != "teardown":
+            state = runtime.current
+            if state is not None:
+                state.failed_tests.add(report.nodeid)
+                row = getattr(report, "pytest_strategies", None)
+                if isinstance(row, dict) and report.nodeid not in state.failed_rows:
+                    state.failed_rows[report.nodeid] = row
 
     @pytest.hookimpl
     def pytest_terminal_summary(
         self, terminalreporter: Any, exitstatus: int, config: Config
     ) -> None:
-        """Say how to reproduce a failed run, and summarize the strategies with -v."""
+        """
+        Say how to reproduce a failed run, with the contexts the failed tests'
+        factories received, list the failed strategy rows' rerun commands
+        (``_failed_rows_lines``), give the commands that rerun the failed rows a
+        --lf run reused the seed of but did not collect (``_uncollected_lines``,
+        unless the session stopped before its tests ran) and those it set aside
+        (``_deselected_lines``), and summarize the strategies and the contexts
+        with -v.
+
+        On the pytest-xdist controller, which collects nothing, first print what the
+        workers printed after their collection (the contexts, the unmatched
+        --strategy-constraint-off items), and then, in red, what the workers
+        generated differently (see ``pytest_sessionfinish``).
+        """
         state = runtime.current
+        summary = state.worker_summary if state is not None else None
+        if state is not None and state.worker_summaries:
+            # The line the workers printed after their collection
+            collected = _merged(
+                s.get("collection_contexts", {}) for s in _by_worker(state.worker_summaries)
+            )
+            text = _contexts_text(collected)
+            if text is not None:
+                terminalreporter.write_line(f"pytest-strategies: {text}")
+        # Unmatched --strategy-constraint-off items a pytest-xdist worker reported
+        for line in (summary or {}).get("unmatched_constraints_off", []):
+            terminalreporter.write_line(f"pytest-strategies: {line}", red=True)
+        if state is not None and state.worker_differences:
+            for line in [_DIFFERENT_VECTORS, *state.worker_differences, *_DIFFERENT_VECTORS_HINT]:
+                terminalreporter.write_line(line, red=True)
         failed = exitstatus in (pytest.ExitCode.TESTS_FAILED, pytest.ExitCode.INTERRUPTED)
         distributed = getattr(config.option, "dist", "no") != "no"
         if failed and state is not None and (state.resolutions or distributed):
+            # Exactly the 3.0 line when no failed test's factory received a context
+            contexts = _contexts_text(state.failed_contexts)
+            suffix = f" ({contexts})" if contexts is not None else ""
             terminalreporter.write_line(
-                f"pytest-strategies: reproduce with --rng-seed={_run_seed()}"
+                f"pytest-strategies: reproduce with --rng-seed={_run_seed()}{suffix}"
             )
+            for line in _failed_rows_lines(state.failed_rows, self._verbosity(config)):
+                terminalreporter.write_line(line)
+        if state is not None:
+            if exitstatus in _FINISHED:
+                for line in _uncollected_lines(state, config):
+                    terminalreporter.write_line(line)
+            for line in _deselected_lines(state, config):
+                terminalreporter.write_line(line)
 
         if self._verbosity(config) < 1:
             return
         terminalreporter.section("Strategy Summary")
-        summary = state.worker_summary if state is not None else None
         if summary is None:
             summary = _summary(state)
         if not summary["count"]:
             terminalreporter.write_line("No strategies registered")
+        else:
+            terminalreporter.write_line(f"Registered strategies: {summary['count']}")
+            for line in summary["lines"]:
+                terminalreporter.write_line(f"  {line}")
+            if self._verbosity(config) >= 2:
+                # Show all strategy names in very verbose mode
+                for name in summary["names"]:
+                    terminalreporter.write_line(f"  - {name}")
+        entries: dict[str, str] = summary.get("contexts", {})
+        if state is not None and state.worker_summaries:
+            # Every worker's: a context computed only when a test ran (through
+            # strategies_ctx or get_context()) is in the summary of the worker
+            # that ran it
+            entries = _merged(s.get("contexts", {}) for s in _by_worker(state.worker_summaries))
+        if entries:
+            terminalreporter.write_line(f"Contexts: {len(entries)}")
+            for label, text in sorted(entries.items()):
+                terminalreporter.write_line(f"  {label}: {text}")
+
+    @pytest.hookimpl(tryfirst=True, specname="pytest_sessionfinish")
+    def pytest_sessionfinish_junit(self, session: Session) -> None:
+        """
+        Give the ``--junitxml`` report, of every family, the test suite properties
+        ``pytest_strategies.seed`` and ``pytest_strategies.failed.<i>``, the rerun
+        command of each failed strategy row (``_repro.suite_properties``), before
+        junitxml writes the file in its own ``pytest_sessionfinish`` (tryfirst).
+
+        Only the process that writes the report has junitxml's object: the
+        pytest-xdist controller, whose failed rows came from the workers' reports.
+        """
+        state = runtime.session_of(session.config)
+        add = getattr(_junit_xml(session.config), "add_global_property", None)
+        if state is None or not callable(add):
             return
-        terminalreporter.write_line(f"Registered strategies: {summary['count']}")
-        for line in summary["lines"]:
-            terminalreporter.write_line(f"  {line}")
-        if self._verbosity(config) >= 2:
-            # Show all strategy names in very verbose mode
-            for name in summary["names"]:
-                terminalreporter.write_line(f"  - {name}")
+        for name, value in _repro.suite_properties(state.seed(), state.failed_rows.values()):
+            add(name, value)
 
     @pytest.hookimpl
     def pytest_sessionfinish(self, session: Session) -> None:
-        """On a pytest-xdist worker, send the -v summary to the controller."""
+        """
+        Note the contexts the failed tests' strategy factories received, and update
+        the failed-seeds map in pytest's cache (``_record_failed_seeds``).
+
+        A pytest-xdist worker sends the controller its -v summary and its part of the
+        check that every worker generated the same vectors: the fingerprint of each
+        context it computed, by label, and the digest of each strategy's values. The
+        controller compares them, and when two workers differ on a context or a
+        strategy, the run fails with exit code 4 if it would have passed (or
+        collected nothing), and the terminal summary names them. Every worker
+        collects every test, so their contexts and values must be the same; names
+        in the test IDs no longer make pytest-xdist notice different values.
+
+        A worker also sends the failed rows that passed under their recorded seed,
+        and those of the reused seed it collected; only the controller writes the
+        map.
+        """
+        state = runtime.current
+        if state is not None and state.worker_summaries:
+            # The controller: its failed tests ran in the workers
+            failed = _merged(
+                s.get("failed_contexts", {}) for s in _by_worker(state.worker_summaries)
+            )
+            state.failed_contexts = dict(sorted(failed.items()))
+        elif state is not None and state.failed_tests:
+            state.failed_contexts = _failed_contexts(state, session.items)
         workeroutput = getattr(session.config, "workeroutput", None)
         if workeroutput is not None:
-            workeroutput["pytest_strategies_summary"] = _summary(runtime.current)
+            workeroutput["pytest_strategies_summary"] = _summary(state)
+            workeroutput[_CHECK] = _check(state)
+            if state is not None:
+                workeroutput[_REUSE] = {
+                    "passed": {nodeid: list(o) for nodeid, o in state.passed_rows.items()},
+                    "collected": sorted(state.reused_collected),
+                }
+        if state is None:
+            return
+        if workeroutput is None:
+            _record_failed_seeds(session.config, state)
+        state.worker_differences = _differences(state.worker_checks)
+        if state.worker_differences and session.exitstatus in (
+            pytest.ExitCode.OK,
+            pytest.ExitCode.NO_TESTS_COLLECTED,
+        ):
+            session.exitstatus = pytest.ExitCode.USAGE_ERROR
 
     @pytest.hookimpl(optionalhook=True)
     def pytest_testnodedown(self, node: Any, error: Any) -> None:
         """
-        Keep the -v summary of the first pytest-xdist worker that finished.
+        Keep what a pytest-xdist worker sent when its session finished, by worker ID:
+        its summary (the -v summary shown is the first worker's that finished, with
+        the Contexts of every worker), its part of the check that the workers
+        generated the same vectors, the failed rows it saw pass under their recorded
+        seed and those of the reused seed it collected. A worker that crashed sent
+        nothing.
 
         The controller collects nothing, and every worker collects all the tests.
         Optional hook: only called when pytest-xdist is installed.
         """
         state = runtime.current
-        summary = getattr(node, "workeroutput", {}).get("pytest_strategies_summary")
-        if state is not None and state.worker_summary is None and summary is not None:
-            state.worker_summary = summary
+        output = getattr(node, "workeroutput", None)
+        if state is None or not isinstance(output, dict):
+            return
+        worker = str(node.gateway.id)
+        summary = output.get("pytest_strategies_summary")
+        if isinstance(summary, dict):
+            if state.worker_summary is None:
+                state.worker_summary = summary
+            state.worker_summaries[worker] = summary
+        check = output.get(_CHECK)
+        if isinstance(check, dict):
+            state.worker_checks[worker] = check
+        reuse = output.get(_REUSE)
+        if isinstance(reuse, dict):
+            state.worker_reuse[worker] = reuse
 
     # ==== HELPER METHODS ====
 
@@ -609,19 +1226,7 @@ class PytestStrategyPlugin:
         Returns:
             List of directories to search
         """
-        rootdir = Path(config.rootpath)
-        testpaths = config.getini("testpaths")
-
-        search_paths: list[Path] = []
-        for entry in testpaths:
-            if any(char in entry for char in "*?["):
-                # pytest expands wildcards in testpaths (e.g. "pkgs/*/tests")
-                matches = sorted(glob.glob(entry, root_dir=rootdir, recursive=True))
-                search_paths.extend(rootdir / match for match in matches)
-            else:
-                search_paths.append(rootdir / entry)
-        if not testpaths:
-            search_paths.append(rootdir)
+        search_paths = _testpaths(config) if config.getini("testpaths") else [Path(config.rootpath)]
 
         # Paths named on the command line (or the testpaths pytest collects) may
         # lie outside the search paths, or inside a directory the search skips.
@@ -823,19 +1428,25 @@ class PytestStrategyPlugin:
         except OSError:
             return b""
 
-    def _load_strategy_files(self, strategy_files: list[Path], config: Config) -> None:
+    def _load_strategy_files(
+        self, strategy_files: list[Path], config: Config, spelled: Path | None = None
+    ) -> None:
         """
         Load strategy definition files by importing them.
 
         Each file is imported at most once per session, through pytest's own
         importer with the session's --import-mode, so it gets the module name a
         test module importing it would use. Values a file draws from the RNG when
-        it is imported come from a stream of its own, derived from the seed and
-        its path, so they do not depend on which files were loaded before.
+        it is imported come from a stream of its own, derived from the run's seed
+        and its path relative to the rootdir (or below its site-packages folder,
+        ``file_part``), so they do not depend on which files were loaded before,
+        nor on where the checkout is.
 
         Args:
             strategy_files: List of strategy file paths to load
             config: Pytest config object
+            spelled: The files' folder as pytest spells it, when the files are
+                spelled by its real path (see ``_load_directories``)
         """
         state = runtime.current
         for file_path in strategy_files:
@@ -854,10 +1465,20 @@ class PytestStrategyPlugin:
                 self._record_loaded(file_path, imported, config)
                 continue
 
-            rng_state = RNG.generator().getstate()
-            RNG.refresh_seed(key=f"file:{_relative(file_path, config)}")
+            # Imported on its own random stream, root(S, "file", path) (streams v1)
+            stream = _Stream(
+                StreamKey.root(
+                    seed_part(_run_seed()),
+                    "file",
+                    file_part(
+                        file_path if spelled is None else spelled / file_path.name,
+                        getattr(config, "rootpath", None),
+                    ),
+                )
+            )
             try:
-                module = self._import(file_path, config)
+                with stream:
+                    module = self._import(file_path, config)
 
             except pytest.skip.Exception as e:
                 # pytest.skip() / pytest.importorskip() at module level: the file
@@ -886,9 +1507,6 @@ class PytestStrategyPlugin:
                 # turn it into a load error.
                 self._record_loaded(file_path, module, config)
                 _install_strategy_file_finder()
-
-            finally:
-                RNG.generator().setstate(rng_state)
 
     def _import(self, file_path: Path, config: Config) -> ModuleType:
         """
@@ -939,6 +1557,9 @@ class PytestStrategyPlugin:
         state = runtime.current
         if state is not None:
             state.strategy_modules[_file_key(file_path)] = module
+            # A strategy file of the session: its factories are keyed by its path
+            # (definition_part), also outside the rootdir and the testpaths
+            state.imported_files.add(_file_key(file_path))
         runtime.record_discovered_file(file_path)
 
         # Optionally log in verbose mode
@@ -1050,7 +1671,7 @@ def _marker_arguments(mark: pytest.Mark) -> tuple[Any, bool]:
     if args or kwargs or not (isinstance(ref, str) or callable(ref)):
         raise ValueError(
             f"invalid strategy marker {mark.args!r} {mark.kwargs!r}; use "
-            "@strategy(name_or_factory, validate_signature=True)"
+            "@strategy(name_or_factory, *, validate_signature=True)"
         )
     return ref, bool(validate)
 
@@ -1092,10 +1713,8 @@ def _inside(registration: Registration, rootpath: str | None) -> bool:
 
 def _relative(file_path: Path | str, config: Config | None) -> str:
     """
-    Return a path relative to the rootdir in posix form, or as it is outside it.
-
-    The file system's spelling is kept, also on Windows, so the per-file random
-    stream is the same on every OS.
+    Return a path relative to the rootdir in posix form, or as it is outside it,
+    for messages. The file system's spelling is kept, also on Windows.
     """
     rootpath = getattr(config, "rootpath", None)
     if rootpath is not None:
@@ -1185,19 +1804,582 @@ def strategy_not_found_message(name: str, directory: str, rootpath: str | None) 
 
 def _run_seed() -> int:
     """The seed the current session started from, even if a test reseeded the RNG."""
+    return runtime.run_seed()
+
+
+def _fixture_definition(func: Callable[..., Any], config: Config | None) -> tuple[str, str]:
+    """
+    Return where a fixture is defined, as two parts of its stream key: its module's
+    name, or its file relative to the rootdir in posix form for a conftest.py, a
+    test module or a strategy file (``source_part()``), and its function's
+    qualified name (``TestDb.conn`` for one defined in a class).
+
+    pytest sets up a fixture that overrides another of the same name (``def
+    x(x)`` in a test module, over the conftest's ``x``), and the session fixtures
+    of one name in two sibling folders' conftest.py files, for the same scope
+    node: their definitions give them streams of their own. A fixture that a
+    package defines (a plugin's, or a helper module's) is named by its module, so
+    it draws the same whether the package is installed, installed in editable
+    mode or checked out next to the tests, unless the module's file is named like
+    a test module or a strategy file (``test_utils.py``) and is inside the rootdir,
+    below a testpaths entry or imported by its path in the session, which keys it
+    by its path (``definition_part``); without ``consider_namespace_packages``, a
+    regular package's module that pytest imported under its package name
+    (``acme.test_utils``) keeps that name. One whose code has no file (``exec``'d
+    code) is named by its module too: its file would resolve against the working
+    directory.
+    """
+    return (definition_part(func, config), factory_source(func)[1] or "")
+
+
+def definition_part(fn: Callable[..., Any], config: Config | None, *, folder: bool = False) -> str:
+    """
+    Return ``source_part()`` of a fixture or a factory for the session of ``config``:
+    relative to its rootdir, with its ``python_files`` patterns, its testpaths, its
+    ``consider_namespace_packages`` value (True without a config) and, for the
+    active session's config, the files pytest and the plugin imported by their
+    paths in it (``SessionState.imported_files``). A ``conftest.py``, a test module
+    or a strategy file is keyed by its path inside the rootdir, below a testpaths
+    entry, or when this session imported it by its path, unless, with
+    ``consider_namespace_packages`` false, it is a regular package's module that
+    ``sys.modules`` holds under its package name; elsewhere (a library on
+    ``sys.path`` with ``acme/strategies.py``) by the rules of any other module,
+    which give its module's name when ``sys.modules`` has it under that name. The
+    limitations this leaves are in ``source_part()``.
+    """
     state = runtime.current
-    if state is not None and state.run_seed is not None:
-        return state.run_seed
-    return RNG.get_seed()
+    imported = (
+        state.imported_files
+        if state is not None and config is not None and state.config is config
+        else frozenset()
+    )
+    return source_part(
+        fn,
+        getattr(config, "rootpath", None),
+        folder=folder,
+        test_files=test_file_patterns(config),
+        testpaths=_ini_testpaths(config),
+        imported=imported,
+        namespace_packages=_namespace_packages(config),
+    )
+
+
+def _namespace_packages(config: Config | None) -> bool:
+    """
+    The ``consider_namespace_packages`` ini value of ``config``, or True without a
+    config, or for one that does not have it (a unit test's stand-in).
+    """
+    try:
+        value = config.getini("consider_namespace_packages") if config is not None else True
+    except (AttributeError, ValueError):
+        return True
+    return value if isinstance(value, bool) else True
+
+
+def _testpaths(config: Config) -> list[Path]:
+    """
+    Return the testpaths ini entries as folders, relative to the rootdir, with glob
+    patterns expanded as pytest does (``pkgs/*/tests``).
+    """
+    rootdir = Path(config.rootpath)
+    folders: list[Path] = []
+    for entry in config.getini("testpaths"):
+        if any(char in entry for char in "*?["):
+            # pytest expands wildcards in testpaths (e.g. "pkgs/*/tests")
+            matches = sorted(glob.glob(entry, root_dir=rootdir, recursive=True))
+            folders.extend(rootdir / match for match in matches)
+        else:
+            folders.append(rootdir / entry)
+    return folders
+
+
+def _ini_testpaths(config: Config | None) -> list[Path]:
+    """``_testpaths()``, or no folders for a config without them (a unit test's stand-in)."""
+    try:
+        if config is None or not isinstance(config.getini("testpaths"), list):
+            return []
+        return _testpaths(config)
+    except (AttributeError, TypeError, ValueError):
+        return []
+
+
+def _fixture_base(fixturedef: pytest.FixtureDef[Any]) -> str:
+    """
+    Return where pytest registered a fixture, as a part of its stream key: the
+    node ID below which it is visible (``FixtureDef.baseid``), the folder of its
+    conftest.py, its test module or class, or ``""`` for a plugin's fixture and
+    the rootdir's conftest.py (``_node_part``).
+
+    One fixture function that two conftest.py files import (``from
+    helpers.fixtures import port``) is registered twice, and pytest sets both up
+    for the session: their bases give them streams of their own.
+    """
+    # pytest 9 registers a fixture for a node, and derives baseid from it
+    node = getattr(fixturedef, "node", None)
+    return _node_part(str(node.nodeid if node is not None else getattr(fixturedef, "baseid", "")))
+
+
+def _node_part(nodeid: str) -> str:
+    """
+    Return a node ID as a part of a fixture's stream key: ``""`` for the rootdir's
+    node (``"."``, a ``Dir``, or a ``Package`` when the rootdir has an
+    ``__init__.py``), as for the session, which covers the same tests.
+
+    pytest 9 gives ``"."`` where pytest 8 gives ``""``: as the base of a fixture of
+    the rootdir's conftest.py, and as the scope node of a package-scoped fixture
+    there when the rootdir is a package (pytest 8 then sets it up for the session).
+    """
+    return "" if nodeid == "." else nodeid
+
+
+def _phase_stream(item: pytest.Item, phase: str) -> contextlib.AbstractContextManager[Any]:
+    """
+    Return the random stream of one phase of a test (``setup``, ``call`` or
+    ``teardown``): root(S, "body", nodeid, phase) (streams v1).
+
+    A test body's ``RNG`` draws are then the same alone, in the whole suite, in
+    any order and on any pytest-xdist worker, and an ``RNG.seed()`` call in it
+    changes nothing after the phase. Without a session there is no stream. The key
+    is built only if the phase draws.
+    """
+    if runtime.current is None:
+        return contextlib.nullcontext()
+    return _Stream(
+        functools.partial(StreamKey.root, seed_part(_run_seed()), "body", item.nodeid, phase)
+    )
 
 
 def _summary(state: Any) -> dict[str, Any]:
-    """Return what the -v Strategy Summary shows, in types pytest-xdist can send."""
+    """
+    Return what the -v Strategy Summary shows, in types pytest-xdist can send, and
+    what the controller prints for a worker: the contexts its collection computed
+    and those its failed tests' factories received (label -> fingerprint).
+    """
     return {
         "count": _registration_count(),
         "lines": _summary_lines(state.resolutions) if state is not None else [],
         "names": sorted(registry.names()),
+        "unmatched_constraints_off": (
+            list(state.unmatched_constraints_off) if state is not None else []
+        ),
+        "contexts": _context_entries(state) if state is not None else {},
+        "collection_contexts": dict(state.collection_contexts) if state is not None else {},
+        "failed_contexts": dict(state.failed_contexts) if state is not None else {},
     }
+
+
+def _computed_contexts(state: Any) -> dict[str, Answer]:
+    """
+    Return the contexts the session computed that are not None (their answers by
+    label, sorted by label): what the folders that asked got, errors left out.
+    """
+    return {
+        label: answer
+        for label, answer in state.contexts.scopes().items()
+        if answer.fingerprint is not None
+    }
+
+
+def _fingerprint_text(answer: Answer) -> str:
+    """Return a context's fingerprint, and the types it has by name alone: ``(partial: Plain)``."""
+    if not answer.partial:
+        return str(answer.fingerprint)
+    return f"{answer.fingerprint} (partial: {', '.join(answer.partial)})"
+
+
+def _contexts_text(fingerprints: Mapping[str, str]) -> str | None:
+    """
+    Describe contexts given as label -> fingerprint: ``context 976bcfdf`` for one,
+    ``contexts conftest.py 976bcfdf, tests/a/conftest.py b1e1b237`` for several
+    (sorted by label), None for none.
+    """
+    if not fingerprints:
+        return None
+    if len(fingerprints) == 1:
+        return f"context {next(iter(fingerprints.values()))}"
+    return "contexts " + ", ".join(f"{label} {fp}" for label, fp in sorted(fingerprints.items()))
+
+
+# The failed rows listed below -v; the others are counted
+_FAILED_ROWS_SHOWN = 10
+
+
+def _failed_rows_lines(rows: Mapping[str, Mapping[str, str]], verbosity: int) -> list[str]:
+    """
+    Return the lines that list the failed strategy rows after the line that says how
+    to reproduce the run: ``pytest-strategies: failed rows:``, then each row's
+    rerun command followed by a comment naming the row (``# burst random 3``), at
+    most ``_FAILED_ROWS_SHOWN`` of them below -v and then ``... and N more``.
+    Nothing under -qq, or when no strategy row failed.
+
+    Args:
+        rows: The failed rows' ``pytest_strategies`` report attributes, by node ID
+        verbosity: The -v count (negative for -q)
+    """
+    if not rows or verbosity <= -2:
+        return []
+    entries = list(rows.values())
+    shown = entries if verbosity >= 1 else entries[:_FAILED_ROWS_SHOWN]
+    lines = ["pytest-strategies: failed rows:"]
+    lines.extend(f"  {row.get('command', '')}  # {row.get('row', '')}" for row in shown)
+    if len(entries) > len(shown):
+        lines.append(f"  ... and {len(entries) - len(shown)} more")
+    return lines
+
+
+# What the pytest-xdist controller sends each worker (workerinput): the node IDs of
+# the failed rows the worker deselects, of those a --lf run reuses the seed of, and
+# of those recorded under the run's seed
+_DESELECT = "pytest_strategies_deselect"
+_REUSED = "pytest_strategies_reused"
+_RECORDED = "pytest_strategies_recorded"
+
+# What a worker sends back (workeroutput): the options of the recorded rows whose
+# call passed, and the reused rows it collected
+_REUSE = "pytest_strategies_reuse"
+
+# The exit statuses of a session that ran its tests: the rows a --lf run reused the
+# seed of and did not collect are listed only then
+_FINISHED = (pytest.ExitCode.OK, pytest.ExitCode.TESTS_FAILED, pytest.ExitCode.NO_TESTS_COLLECTED)
+
+
+def _read_failed_seeds(config: Config, state: Any) -> None:
+    """
+    Note, once the run's seed is set, which failed rows the run deselects (those a
+    --lf or --sw run did not reuse the seed of; ``_reuse.plan``), which it reuses
+    the seed of, and which rows the failed-seeds map holds under the run's seed,
+    whose entries leave the map when they pass (see ``pytest_runtest_makereport``).
+
+    A pytest-xdist worker gets them from the controller (``pytest_configure_node``)
+    and reads nothing from the cache. Without pytest's cache plugin there is no
+    ``config.cache``, and nothing is read.
+    """
+    workerinput = getattr(config, "workerinput", None)
+    if workerinput is not None:
+        state.deselect = set(workerinput.get(_DESELECT, ()))
+        state.reused = set(workerinput.get(_REUSED, ()))
+        state.recorded = set(workerinput.get(_RECORDED, ()))
+        return
+    if state.reuse is not None:
+        state.deselect = set(state.reuse.others)
+        state.reused = set(state.reuse.rows)
+    cache = getattr(config, "cache", None)
+    if cache is not None:
+        seed = state.seed()
+        state.recorded = {
+            nodeid for nodeid, entry in _reuse.read(cache).items() if entry.seed == seed
+        }
+
+
+def _record_failed_seeds(config: Config, state: Any) -> None:
+    """
+    Update the failed-seeds map in pytest's cache when the session finishes, on the
+    process that reports the run (not on a pytest-xdist worker): record each strategy
+    row whose setup or call failed, as the newest entry, and remove the entries of
+    the rows that passed under their seed and their options (``_reuse.updated``; a
+    ``-c`` or ``--rootdir`` an entry holds counts as the run's when it names the ini
+    file or the rootdir the run uses, and a ``--rootdir`` the run gives agrees with
+    an entry without it). The map is read again first, and written only when it
+    changed.
+    """
+    cache = getattr(config, "cache", None)
+    if cache is None:
+        return
+    passed: dict[str, Sequence[str]] = dict(state.passed_rows)
+    for output in _by_worker(state.worker_reuse):
+        rows = output.get("passed")
+        if isinstance(rows, dict):
+            passed.update(
+                (nodeid, options)
+                for nodeid, options in rows.items()
+                if isinstance(options, list) and all(isinstance(o, str) for o in options)
+            )
+    if not passed and not state.failed_rows:
+        return
+    entries = _reuse.read(cache)
+    new = _reuse.updated(entries, state.seed(), passed, state.failed_rows, _reuse.own_units(config))
+    if list(new.items()) != list(entries.items()):
+        _reuse.write(cache, new)
+
+
+def _reuse_line(config: Config, reuse: _reuse.Reuse) -> str:
+    """
+    Return the header line that says a --lf or --sw run reused the failed run's
+    seed, naming the options the newest reused row was recorded with when they
+    differ from the run's (``recorded with --nsamples=13``); they are not applied.
+    Both are compared as the commands run from the rootdir, a recorded ``-c`` or
+    ``--rootdir`` agrees when it names the ini file or the rootdir the run uses, a
+    ``--rootdir`` the run gives agrees with rows recorded without it, and the paths
+    are written relative to the folder pytest was started in (an ini file outside
+    the rootdir by its absolute path).
+    """
+    text = (
+        f"pytest-strategies: seed reused from the failed run for {reuse.flag} "
+        "(--rng-seed overrides)"
+    )
+    differences = _reuse.differences(
+        list(reuse.rows.values()),
+        _repro.generation_options(config, (), start=config.rootpath),
+        runtime.session_options(config).constraints_off,
+        _reuse.own_units(config),
+        config.cwd_relative_nodeid,
+    )
+    return text if differences is None else f"{text}; recorded {differences}"
+
+
+def _uncollected_lines(state: Any, config: Config) -> list[str]:
+    """
+    Return the lines that give the commands rerunning the failed rows a --lf or --sw
+    run reused the seed of but did not collect (``_reuse.commands``): rows deleted
+    or renamed, not generated with the run's options (``--nsamples``), or in a file
+    pytest's --lf did not collect. Without them, a run whose rows of the other
+    seeds were all deselected would end with no test run, and no word on why.
+    Nothing when it collected them all, or under pytest-xdist when no worker said
+    which it collected.
+    """
+    reuse = state.reuse
+    if reuse is None:
+        return []
+    collected = set(state.reused_collected)
+    outputs = list(_by_worker(state.worker_reuse))
+    if getattr(config.option, "dist", "no") != "no" and not outputs:
+        return []
+    for output in outputs:
+        rows = output.get("collected")
+        if isinstance(rows, list):
+            collected.update(row for row in rows if isinstance(row, str))
+    rows = [(nodeid, entry) for nodeid, entry in reuse.rows.items() if nodeid not in collected]
+    if not rows:
+        return []
+    if len(rows) == 1:
+        first = "1 failed row recorded under the reused seed was not collected"
+        them = "it"
+    else:
+        first = f"{len(rows)} failed rows recorded under the reused seed were not collected"
+        them = "them"
+    lines = [f"pytest-strategies: {first}; unless deleted or renamed, run {them} with:"]
+    for command, n in _reuse.commands(
+        reuse.flag, rows, reuse.failed, config.cwd_relative_nodeid, reuse.outside
+    ):
+        lines.append(f"  {command}  # {n} row{'' if n == 1 else 's'}")
+    return lines
+
+
+def _deselected_lines(state: Any, config: Config) -> list[str]:
+    """
+    Return the lines that give the commands rerunning the failed rows a --lf or --sw
+    run did not rerun, because they were recorded under another seed than the one it
+    reused: ``pytest --lf --rng-seed=S ...`` for each of their seeds, with the files
+    or node IDs that select them, followed by the number of rows
+    (``_reuse.commands``). Nothing when there are none.
+
+    Every such row the run selects is listed: those it collected were deselected
+    (by pytest-xdist's workers under pytest-xdist), and the others were not
+    collected at all, such as a row whose ID shows its values
+    (``strategies_ids = values``), which this seed names otherwise.
+    """
+    reuse = state.reuse
+    if reuse is None or not reuse.others:
+        return []
+    rows = list(reuse.others.items())
+    seeds = "another seed" if len({entry.seed for _, entry in rows}) == 1 else "other seeds"
+    rows_text = "1 failed row" if len(rows) == 1 else f"{len(rows)} failed rows"
+    them = "it" if len(rows) == 1 else "them"
+    lines = [f"pytest-strategies: deselected {rows_text} recorded under {seeds}; run {them} with:"]
+    for command, n in _reuse.commands(
+        reuse.flag, rows, reuse.failed, config.cwd_relative_nodeid, reuse.outside
+    ):
+        lines.append(f"  {command}  # {n} row{'' if n == 1 else 's'}")
+    return lines
+
+
+def _junit_family(config: Config) -> str | None:
+    """
+    Return the family of the run's ``--junitxml`` report, ``xunit1`` for
+    ``legacy`` (junitxml's own rule), or None without one. It is read from the
+    options and the ini file, so a pytest-xdist worker, which leaves the report to
+    the controller, gets the controller's family.
+    """
+    if not getattr(config.option, "xmlpath", None):
+        return None
+    try:
+        family = str(config.getini("junit_family"))
+    except ValueError:
+        # Without the junitxml plugin
+        return None
+    return "xunit1" if family == "legacy" else family
+
+
+def _junit_xml(config: Config) -> Any:
+    """
+    Return the object junitxml writes the run's ``--junitxml`` report with, or None
+    without one (on a pytest-xdist worker too). It is kept in a private stash key of
+    pytest's, so None when that key is gone.
+    """
+    try:
+        from _pytest.junitxml import xml_key
+    except ImportError:
+        return None
+    return config.stash.get(xml_key, None)
+
+
+def _context_entries(state: Any) -> dict[str, str]:
+    """
+    Describe each context the session computed for the -v summary, by label,
+    sorted: its fingerprint and the number of tests whose strategy factories
+    received it.
+    """
+    return {
+        label: f"{_fingerprint_text(answer)}, {len(state.context_tests.get(label, ()))} test(s)"
+        for label, answer in _computed_contexts(state).items()
+    }
+
+
+def _test_key(item: pytest.Item) -> str | None:
+    """
+    Return the node ID of an item's test without its parameters (the
+    ``metafunc.definition.nodeid`` its strategies were resolved with), or None for
+    an item that is not a test function's.
+    """
+    original = getattr(item, "originalname", None)
+    if not isinstance(original, str) or not item.nodeid.endswith(item.name):
+        return None
+    return item.nodeid[: len(item.nodeid) - len(item.name)] + original
+
+
+def _failed_contexts(state: Any, items: Sequence[pytest.Item]) -> dict[str, str]:
+    """
+    Return the contexts the strategy factories of the failed tests among ``items``
+    received, as label -> fingerprint, sorted by label.
+    """
+    labels = {test: label for label, tests in state.context_tests.items() for test in tests}
+    found: dict[str, str] = {}
+    for item in items:
+        if item.nodeid not in state.failed_tests:
+            continue
+        fingerprint = next(
+            (info.context for info in item.stash.get(VECTORS_KEY, ()) if info.context),
+            None,
+        )
+        test = _test_key(item)
+        label = labels.get(test) if test is not None else None
+        if fingerprint is not None and label is not None:
+            found[label] = fingerprint
+    return dict(sorted(found.items()))
+
+
+# What a pytest-xdist worker sends the controller for the check that every worker
+# generated the same vectors (workeroutput, strings only)
+_CHECK = "pytest_strategies_check"
+
+# The message of that check, before and after the lines that name what differs
+_DIFFERENT_VECTORS = "pytest-strategies: the xdist workers generated different vectors:"
+_DIFFERENT_VECTORS_HINT = (
+    "Make pytest_strategies_context and the strategy factories give the same result "
+    "in every worker:",
+    "no temporary paths, process IDs, times, unseeded random values or lists built from sets",
+    "(leave them out, or use pydantic Field(exclude=True) in a context).",
+)
+
+
+def _value_digests(
+    items: Sequence[pytest.Item], rootpath: str | os.PathLike[str] | None = None
+) -> dict[str, str]:
+    """
+    Return the digest of each strategy's values, by strategy name, sorted: the
+    first 8 hex characters of the SHA-256 of the canonical JSON text of each of its
+    items' node ID and values, in collection order. That is the encoding of the
+    context fingerprint (``_fingerprint``), which sorts sets, writes models,
+    dataclasses and attrs classes field by field, and leaves out memory addresses,
+    so the digest does not depend on a worker's ``PYTHONHASHSEED``. A strategy
+    with a value that cannot be encoded (its repr raises) gets ``unavailable``.
+    """
+    text = canonical(rootpath)
+    hashes: dict[str, Any] = {}
+    for item in items:
+        for info in item.stash.get(VECTORS_KEY, ()):
+            digest = hashes.get(info.strategy)
+            if digest is None:
+                digest = hashes[info.strategy] = hashlib.sha256()
+            elif isinstance(digest, str):
+                continue
+            try:
+                row = text([item.nodeid, list(info.values)])
+            except Exception:
+                hashes[info.strategy] = UNAVAILABLE
+                continue
+            digest.update(row.encode("ascii") + b"\n")
+    return {
+        name: digest if isinstance(digest, str) else digest.hexdigest()[:8]
+        for name, digest in sorted(hashes.items())
+    }
+
+
+def _check(state: Any) -> dict[str, dict[str, str]]:
+    """
+    Return a pytest-xdist worker's part of the check that the workers generated the
+    same vectors: ``contexts``, each context the session computed by its label (its
+    fingerprint, ``none`` where nothing answered, or ``error: <type>`` for an
+    implementation that raised), and ``values``, each strategy's digest. A
+    wrapper's answer computed from an object that had changed since its
+    implementation returned it (``Answer.changed``) is left out: its fingerprint
+    shows what the worker ran before, as a test that changes the object would.
+    """
+    if state is None:
+        return {"contexts": {}, "values": {}}
+    contexts = {}
+    for label, answer in state.contexts.scopes().items():
+        if answer.changed:
+            continue
+        if answer.error is not None:
+            contexts[label] = f"error: {type(answer.error).__name__}"
+        else:
+            contexts[label] = answer.fingerprint if answer.fingerprint is not None else "none"
+    return {"contexts": contexts, "values": dict(state.value_digests)}
+
+
+def _worker_order(worker: str) -> tuple[str, int]:
+    """Sort pytest-xdist worker IDs by their number: gw2 before gw10."""
+    match = re.fullmatch(r"(.*?)(\d+)", worker)
+    return (match.group(1), int(match.group(2))) if match else (worker, -1)
+
+
+def _by_worker(found: Mapping[str, Any]) -> list[Any]:
+    """Return the values of a mapping by pytest-xdist worker ID, in worker order."""
+    return [found[worker] for worker in sorted(found, key=_worker_order)]
+
+
+def _merged(mappings: Iterable[Mapping[str, str]]) -> dict[str, str]:
+    """Merge mappings: a key keeps the value of the first mapping that has it."""
+    merged: dict[str, str] = {}
+    for mapping in mappings:
+        for key, value in mapping.items():
+            merged.setdefault(key, value)
+    return merged
+
+
+def _differences(checks: Mapping[str, Mapping[str, Mapping[str, str]]]) -> list[str]:
+    """
+    Return a line for each context (by label) and each strategy whose fingerprint or
+    digest differs between the pytest-xdist workers that have it, with each one's:
+    ``  context tests/a/conftest.py: gw0 1a2b3c4d, gw1 9f8e7d6c``, ``  values of
+    strategy burst: gw0 5e6f7a8b, gw1 0c1d2e3f``. A context or a strategy only one
+    worker has is not compared: a test that runs on one worker only may compute a
+    context through ``strategies_ctx``.
+
+    Args:
+        checks: What each worker sent (``_check``), by worker ID
+    """
+    workers = sorted(checks, key=_worker_order)
+    lines = []
+    for kind, title in (("contexts", "context"), ("values", "values of strategy")):
+        found = {worker: checks[worker].get(kind) or {} for worker in workers}
+        for key in sorted({key for values in found.values() for key in values}):
+            seen = [(worker, found[worker][key]) for worker in workers if key in found[worker]]
+            if len({value for _, value in seen}) > 1:
+                each = ", ".join(f"{worker} {value}" for worker, value in seen)
+                lines.append(f"  {title} {key}: {each}")
+    return lines
 
 
 def _registration_count() -> int:
@@ -1205,23 +2387,50 @@ def _registration_count() -> int:
     return sum(len(registry.registrations(name)) for name in registry.names())
 
 
+# The row kinds of the -v summary, in the order it lists them
+_SUMMARY_KINDS = ("directed", "random", "test", "exhaustive", "skipped")
+
+
 def _summary_lines(resolutions: list[Any]) -> list[str]:
-    """Summarize the resolved strategies for -v: tests and rows per strategy."""
+    """
+    Summarize the resolved strategies for -v: tests and rows of each kind per
+    strategy, and for a strategy with constraints the draws each rejected (and, under
+    --nsamples=auto, the combinations left out) and the constraints
+    --strategy-constraint-off turned off.
+    """
     by_strategy: dict[tuple[str, str], list[Any]] = {}
     for resolution in resolutions:
         by_strategy.setdefault((resolution.strategy, resolution.where), []).append(resolution)
     lines = []
     for (name, where), entries in sorted(by_strategy.items()):
-        directed = sum(e.directed for e in entries)
-        random_rows = sum(e.random for e in entries)
-        test_rows = sum(e.test for e in entries)
-        rows = f"{directed} directed, {random_rows} random"
-        if test_rows:
-            rows += f", {test_rows} test"
+        counts = {kind: sum(getattr(e, kind) for e in entries) for kind in _SUMMARY_KINDS}
+        # Directed and random rows always, the other kinds when there are some
+        rows = ", ".join(
+            f"{count} {kind}"
+            for kind, count in counts.items()
+            if count or kind in ("directed", "random")
+        )
         sources = sorted({f"{e.nsamples} from {e.source}" for e in entries if e.source})
         line = f"{name} ({where}): {len(entries)} test(s), {rows} rows"
         if sources:
             line += "; nsamples=" + ", ".join(sources)
+        # The constraints turned off, which reject nothing
+        off = list(dict.fromkeys(c for e in entries for c in e.constraints_off))
+        # The draws each constraint rejected first, over the strategy's tests
+        rejected: dict[str, int] = {}
+        for e in entries:
+            for constraint in e.constraints:
+                if constraint not in off:
+                    count = e.rejected.get(constraint, 0)
+                    rejected[constraint] = rejected.get(constraint, 0) + count
+        if rejected:
+            line += "; rejected: " + ", ".join(f"{c}={count}" for c, count in rejected.items())
+            left_out = [e.left_out for e in entries if e.left_out is not None]
+            if left_out:
+                combinations = "combination" if sum(left_out) == 1 else "combinations"
+                line += f"; left out: {sum(left_out)} {combinations}"
+        if off:
+            line += "; off: " + ", ".join(off)
         lines.append(line)
     return lines
 
@@ -1256,6 +2465,359 @@ def _nsamples_type(value: str) -> int | str:
     if nsamples < 0:
         raise argparse.ArgumentTypeError(error)
     return nsamples
+
+
+def _constraint_off_type(value: str) -> str:
+    """
+    Check one --strategy-constraint-off value: ``ITEM[,ITEM...]`` with
+    ``ITEM = [STRATEGY:]NAME``.
+
+    Returns:
+        The value as given; the session's options split it into items
+
+    Raises:
+        argparse.ArgumentTypeError: For whitespace, an empty item, or an empty
+            strategy or name (``:x``, ``x:``), so pytest reports a usage error
+            when it parses the command line
+    """
+    try:
+        parse_constraint_off(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+    return value
+
+
+def _collects_whole_suite(config: Config) -> bool:
+    """
+    Check whether the run collected every test, by what it was asked to collect:
+    no paths or node IDs on the command line, started from the rootdir (pytest
+    collects only the current folder when run without arguments from a folder
+    below it), and none of --lf, --sw, --ignore or --ignore-glob.
+
+    A run that asked for every test can still leave strategies unresolved, when a
+    test module was skipped or failed to collect: pytest_collectreport notes that.
+    """
+    source = config.args_source
+    if source is Config.ArgsSource.ARGS:
+        return False
+    # pytest's own rule (Config._decide_args): without arguments, a run started in
+    # the rootdir collects testpaths (or the rootdir), and any other run the
+    # current folder
+    if (
+        source is Config.ArgsSource.INVOCATION_DIR
+        and config.invocation_params.dir != config.rootpath
+    ):
+        return False
+    narrowing = ("lf", "stepwise", "stepwise_skip", "ignore", "ignore_glob")
+    return not any(config.getoption(dest, None) for dest in narrowing)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
+    """
+    Fail the collection of a test written for record mode whose fixtures ask for
+    every strategy argument, so the strategy passes them by name, when nothing
+    gives its record parameter a value.
+
+    Runs once every other pytest_generate_tests hook has parametrized the test, so
+    a parametrization of the parameter counts. pytest would otherwise fail each
+    row at setup with "fixture 'p' not found", which says nothing of record mode.
+    """
+    unfilled = metafunc.definition.stash.get(_UNFILLED_RECORDS, None)
+    # The names pytest finds a fixture for at setup, parametrized names included. A
+    # pytest without this private attribute leaves the error to setup.
+    provided = getattr(metafunc, "_arg2fixturedefs", None)
+    if not unfilled or not isinstance(provided, Mapping):
+        return
+    for param, message in unfilled:
+        if param not in provided:
+            pytest.fail(f"In {metafunc.function.__name__}: {message}", pytrace=False)
+
+
+# The name of the plugin's fixture of the testbench context
+_CTX_FIXTURE = "strategies_ctx"
+
+# The guard's message for a test's setup or call that raised an error after using
+# strategies_ctx with another folder's context, by phase (_check_ctx), and the title
+# of the report section that shows it, with a failed strategy row's repro section
+_CTX_MESSAGES = pytest.StashKey[dict[str, str]]()
+_SECTION = _repro.SECTION
+
+
+@pytest.fixture(scope="session")
+def strategies_ctx(request: pytest.FixtureRequest) -> Any:
+    """
+    The testbench context of the tests that use this fixture: the object their
+    strategy factories receive as ``ctx`` from ``pytest_strategies_context``,
+    computed if no factory needed it yet, or None when nothing answers.
+
+    It is a session fixture, so a session-scoped ``tb`` fixture can build on it. A
+    session fixture has one value, so the tests that use it must share one context:
+    when they are in folders whose contexts come from different implementations,
+    each of them fails, and a folder with its own pytest_strategies_context uses
+    ``pytest_strategy.get_context(request.config, __file__)`` in its conftest.py
+    fixtures instead. The tests that use it are those that request it, directly or
+    through other fixtures, except those in a folder whose conftest.py defines a
+    fixture of that name that does not request this one. When no test requests it
+    and one asks for it through ``request.getfixturevalue()``, every test counts.
+    When some do, a test that asks for it that way, or gets the value a fixture
+    cached when its setup asked for it that way, gets their context, and fails
+    after its setup or its call when its own folder's context is another one. What
+    the implementation raised is raised again as it is, so a ``pytest.skip`` there
+    skips the tests that use it.
+    """
+    state = runtime.session_of(request.config)
+    if state is None:
+        return None
+    # The test that asked first (private API, as the session-scoped request's node
+    # is the session), and this fixture's definition (private API)
+    item = getattr(request, "_pyfuncitem", None)
+    own = getattr(request, "_fixturedef", None)
+    items = list(request.session.items)
+    consumers = [
+        i
+        for i in items
+        if _CTX_FIXTURE in getattr(i, "fixturenames", ()) and _gets_this_fixture(i, own, False)
+    ]
+    if item is not None and _CTX_FIXTURE in getattr(item, "fixturenames", ()):
+        consumers.append(item)
+    elif not consumers:
+        # Only asked for through request.getfixturevalue(): any test may use it
+        consumers = [i for i in items if _gets_this_fixture(i, own, True)]
+        if item is not None:
+            consumers.append(item)
+    # Otherwise a test asked for it through request.getfixturevalue() while others
+    # request it: it gets their context, and is checked after its phase
+    # (_ctx_mismatch), whichever of them asked first
+    if not consumers:
+        return state.path_context()()
+    # The tests in one file share their folder's context
+    answers: dict[Path, Answer] = {}
+    scopes: dict[str, dict[str, None]] = {}
+    for consumer in consumers:
+        answer = answers.get(consumer.path)
+        if answer is None:
+            answer = answers[consumer.path] = state.test_context(consumer).answer()
+        scopes.setdefault(answer.label, {})[consumer.nodeid] = None
+    if len(scopes) > 1:
+        pytest.fail(_ctx_scopes_message(scopes), pytrace=False)
+    answer = answers[consumers[-1].path]
+    state.ctx_fixture = CtxFixture(own, answer.label, scopes)
+    return answer.get()
+
+
+def _gets_this_fixture(item: pytest.Item, own: Any, dynamic: bool) -> bool:
+    """
+    Whether ``item`` gets the plugin's ``strategies_ctx``, whose definition is
+    ``own``: the last definition of the name its folder sees, or one that a
+    definition it gets requests in turn (an override in a conftest.py that builds
+    on it). A test in a folder whose conftest.py overrides the fixture without
+    requesting it gets the override only. Unknown (private API: the item's fixture
+    closure, and for a dynamic request the fixture manager's lookup) counts as yes.
+    """
+    if own is None:
+        return True
+    info = getattr(item, "_fixtureinfo", None)
+    definitions = getattr(info, "name2fixturedefs", {}).get(_CTX_FIXTURE)
+    if definitions is None and dynamic:
+        manager = getattr(item.session, "_fixturemanager", None)
+        try:
+            definitions = manager.getfixturedefs(_CTX_FIXTURE, item) if manager else None
+        except Exception:
+            definitions = None
+    if not definitions:
+        return True
+    for definition in reversed(definitions):
+        if definition is own:
+            return True
+        if _CTX_FIXTURE not in getattr(definition, "argnames", ()):
+            return False
+    return False
+
+
+def _ctx_users(item: Any, resolved: Mapping[str, Any], fixture: CtxFixture | None) -> set[str]:
+    """
+    Return the names of the fixtures that a test's request resolved (``resolved``,
+    name -> FixtureDef, private API) and that used the plugin's ``strategies_ctx``,
+    whose value is ``fixture`` (none while it has none): ``strategies_ctx`` when
+    the test gets the plugin's (``_gets_this_fixture``), the fixtures in
+    ``fixture.requesters`` with the very value they cached when their setup asked
+    for it, and the fixtures that request one of these, directly or through others.
+    """
+    if fixture is None:
+        return set()
+    users: set[str] = set()
+    for requester, cached in fixture.requesters.items():
+        name = requester.argname
+        if requester.cached_result is cached and resolved.get(name) is requester:
+            users.add(name)
+    own = resolved.get(_CTX_FIXTURE)
+    if own is not None and (
+        own is fixture.definition or _gets_this_fixture(item, fixture.definition, True)
+    ):
+        users.add(_CTX_FIXTURE)
+    if users:
+        # One pass: a fixture comes after the fixtures it requests in ``resolved``, as
+        # pytest resolves them first and _hide_ctx_users puts them back in order
+        for name, other in resolved.items():
+            if name not in users and not users.isdisjoint(getattr(other, "argnames", ())):
+                users.add(name)
+    return users
+
+
+def _hide_ctx_users(
+    fixturedef: pytest.FixtureDef[Any], request: pytest.FixtureRequest, state: Any
+) -> tuple[MutableMapping[str, Any], dict[str, Any], int] | None:
+    """
+    Take ``strategies_ctx`` and the fixtures that used it (``_ctx_users``) out of
+    the fixtures the test's request resolved (``request._fixture_defs``, private
+    API, name -> FixtureDef) while ``fixturedef`` is set up, and return that
+    mapping, what was taken out of it and how many fixtures are left in it: a
+    ``request.getfixturevalue()`` in the setup that reaches one of them then
+    resolves it again, from its cache, and puts it back, which shows also when the
+    test had resolved it before (``_note_ctx_requester``). None for a fixture that
+    is not watched: ``strategies_ctx`` itself or a folder's override of it, one that
+    requests it or one of those fixtures (the tests that get it request them too),
+    or a pytest without these private attributes.
+    """
+    # The test (private API)
+    item = getattr(request, "_pyfuncitem", None)
+    resolved = getattr(request, "_fixture_defs", None)
+    if (
+        fixturedef.argname == _CTX_FIXTURE
+        or item is None
+        or not isinstance(resolved, MutableMapping)
+    ):
+        return None
+    users = _ctx_users(item, resolved, state.ctx_fixture)
+    if _CTX_FIXTURE in resolved:
+        # A folder's override too: what the setup asks for is told after it
+        users.add(_CTX_FIXTURE)
+    if not users.isdisjoint(fixturedef.argnames):
+        return None
+    # In their order, which _ctx_users relies on
+    hidden = {name: resolved.pop(name) for name in [name for name in resolved if name in users]}
+    return resolved, hidden, len(resolved)
+
+
+def _note_ctx_requester(
+    fixturedef: pytest.FixtureDef[Any],
+    request: pytest.FixtureRequest,
+    resolved: MutableMapping[str, Any],
+    hidden: Mapping[str, Any],
+    count: int,
+    state: Any,
+) -> None:
+    """
+    After ``fixturedef`` was set up, or failed (pytest caches its error too), keep
+    it in ``CtxFixture.requesters`` with the value it cached when its setup reached
+    the plugin's ``strategies_ctx`` or a fixture that used it: those were hidden
+    (``_hide_ctx_users``), so any of them in ``resolved`` now was resolved by this
+    setup, which made ``resolved`` longer than the ``count`` it had then. Then put
+    the hidden ones back as they were.
+    """
+    try:
+        fixture = state.ctx_fixture
+        cached = fixturedef.cached_result
+        if (
+            fixture is not None
+            and cached is not None
+            and len(resolved) > count
+            and _ctx_users(getattr(request, "_pyfuncitem", None), resolved, fixture)
+        ):
+            fixture.requesters[fixturedef] = cached
+    finally:
+        resolved.update(hidden)
+
+
+def _requester_error(fixture: CtxFixture, error: BaseException | None) -> bool:
+    """
+    Whether ``error`` is the error that a fixture in ``fixture.requesters`` cached
+    when its setup asked for ``strategies_ctx`` and then raised: pytest raises that
+    object again for each test that gets the fixture, and does not count the
+    fixture among those the test's request resolved.
+    """
+    if error is None:
+        return False
+    for requester, cached in fixture.requesters.items():
+        failure = cached[2] if isinstance(cached, tuple) and len(cached) == 3 else None
+        if (
+            requester.cached_result is cached
+            and isinstance(failure, tuple)
+            and failure
+            and failure[0] is error
+        ):
+            return True
+    return False
+
+
+def _ctx_mismatch(item: pytest.Item, error: BaseException | None = None) -> str | None:
+    """
+    Return the guard's message when ``item`` used the plugin's ``strategies_ctx``
+    without being one of the tests it counted when it was set up, through
+    ``request.getfixturevalue()`` (its own, or that of a fixture whose setup asked
+    for it, ``_ctx_users``, including a fixture whose cached error is the ``error``
+    its phase raised), and its folder's context is not the one the fixture
+    returned; None otherwise. Private API: the fixtures the test's request resolved
+    (``item._request._fixture_defs``).
+    """
+    state = runtime.session_of(item.config)
+    fixture = state.ctx_fixture if state is not None else None
+    if state is None or fixture is None:
+        return None
+    resolved = getattr(getattr(item, "_request", None), "_fixture_defs", None)
+    if not isinstance(resolved, Mapping) or any(
+        item.nodeid in tests for tests in fixture.consumers.values()
+    ):
+        return None
+    if not _ctx_users(item, resolved, fixture) and not _requester_error(fixture, error):
+        return None
+    label = state.test_context(item).answer().label
+    if label == fixture.label:
+        return None
+    scopes = {other: dict(tests) for other, tests in fixture.consumers.items()}
+    scopes.setdefault(label, {})[item.nodeid] = None
+    return _ctx_scopes_message(scopes)
+
+
+def _check_ctx(item: pytest.Item, when: str, error: BaseException | None) -> None:
+    """
+    Fail a test's setup or call (``when``) that used ``strategies_ctx`` with another
+    folder's context (``_ctx_mismatch``): when the phase passed or skipped, with the
+    guard's message. When it raised an error, which that context may have caused,
+    the message is kept for the phase's report (``pytest_runtest_makereport``), not
+    added to the error: a fixture's error is the one object that pytest raises
+    again for each test that gets the fixture from its cache.
+    """
+    if isinstance(error, pytest.exit.Exception) or (
+        error is not None and not isinstance(error, (Exception, pytest.skip.Exception))
+    ):
+        # pytest.exit(), a KeyboardInterrupt, or a failure that pytest.fail() or
+        # pytest.xfail() reported
+        return
+    message = _ctx_mismatch(item, error)
+    if message is None:
+        return
+    if error is None or isinstance(error, pytest.skip.Exception):
+        raise pytest.fail.Exception(message, pytrace=False) from None
+    item.stash.setdefault(_CTX_MESSAGES, {})[when] = message
+
+
+def _ctx_scopes_message(scopes: Mapping[str, Mapping[str, None]]) -> str:
+    """
+    Describe the contexts of the tests that use ``strategies_ctx``: their tests by
+    context label, in collection order.
+    """
+    parts = []
+    for label in sorted(scopes):
+        first, *others = scopes[label]
+        parts.append(f"{label}: {first}" + (f" and {len(others)} more" if others else ""))
+    return (
+        f"{_CTX_FIXTURE} is a session fixture, but the tests that use it have different "
+        f"contexts ({'; '.join(parts)}). In a folder with its own pytest_strategies_context, "
+        "use pytest_strategy.get_context(request.config, __file__) in that folder's "
+        "conftest.py fixtures."
+    )
 
 
 def pytest_addhooks(pluginmanager: pytest.PytestPluginManager) -> None:
@@ -1294,7 +2856,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         action="store",
         type=str,
         default="all",
-        choices=["all", "random_only", "directed_only", "mixed", "test"],
+        choices=list(get_args(VectorMode)),
         help="Vector generation mode: all, random_only, directed_only, mixed, or test",
     )
 
@@ -1315,6 +2877,20 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
     group.addoption(
+        "--strategy-constraint-off",
+        action="append",
+        type=_constraint_off_type,
+        default=None,
+        dest="strategy_constraint_off",
+        metavar="[STRATEGY:]NAME[,...]",
+        help=(
+            "Turn a named vector constraint off for this run: NAME in every strategy, "
+            "STRATEGY:NAME in that strategy only. Items are separated by commas, and the "
+            "option can be repeated"
+        ),
+    )
+
+    group.addoption(
         "--list-strategies",
         action="store_true",
         default=False,
@@ -1328,9 +2904,37 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default="100000",
     )
 
+    parser.addini(
+        "strategies_ids",
+        "Test IDs of strategy rows: names (the default: directed-zeros, rand-3, "
+        "ch=2-rand-1, the same for every seed) or values (the 3.0 format, built from "
+        "the row's values); Parameter(ids=...) overrides it",
+        type="string",
+        default="names",
+    )
 
-def pytest_configure(config: Config) -> None:
-    """Register the plugin instance and open a runtime session for this config."""
+
+@pytest.hookimpl(tryfirst=True, specname="pytest_configure")
+def pytest_configure_session(config: Config) -> None:
+    """
+    Open a runtime session for this config.
+
+    It runs before the other plugins' and the conftest.py files' pytest_configure,
+    so ``get_context()`` works there (with the conftest.py files loaded so far).
+    Until the plugin instance seeds the RNG (``pytest_configure`` below), the
+    session's seed is the one ``--rng-seed`` or the pytest-xdist controller gives,
+    or the one a ``--lf`` or ``--sw`` run reuses (``_reuse.plan``, which reads
+    pytest's cache before pytest's cache plugin sets ``config.cache``), so a context
+    computed there follows it.
+    """
+    # A bad ini value stops the run with a usage error (exit code 4), before the
+    # session starts. --help still shows the help, as it does for pytest's own
+    # ini options.
+    from ._resolver import check_ids_format
+
+    if not config.option.help:
+        check_ids_format(config)
+
     # --list-strategies prints from pytest_collection_finish and exits. Under
     # pytest-xdist only the workers collect, and a worker's exit crashes the
     # controller (INTERNALERROR), so list in-process instead, as xdist does for
@@ -1344,16 +2948,52 @@ def pytest_configure(config: Config) -> None:
     if not hasattr(config, "_strategy_plugin_instance"):
         # Push the session state BEFORE registering, so the instance's hooks
         # have a current state.
-        runtime.push(config)
+        state = runtime.push(config)
+        state.run_seed = _given_seed(config)
+        if state.run_seed is None:
+            # --lf or --sw without --rng-seed reuses the failed run's seed, which a
+            # context computed in a pytest_configure follows too
+            state.reuse = _reuse.plan(config)
+            if state.reuse is not None:
+                state.run_seed = state.reuse.seed
         # Config does not declare this attribute, so the type checker needs setattr
         setattr(config, "_strategy_plugin_instance", _plugin_instance)  # noqa: B010
+
+
+def pytest_configure(config: Config) -> None:
+    """
+    Register the plugin instance, which runs its pytest_configure at once (the hook
+    is historic): it seeds the RNG.
+
+    It is not tryfirst, so the initial conftest.py files and the plugins registered
+    after this module run their pytest_configure before it, as in 3.0: one that
+    seeds there (``RNG.seed(1234)``, or ``config.option.rng_seed = 99``) sets the
+    run's seed.
+    """
+    if hasattr(config, "_strategy_plugin_instance") and not config.pluginmanager.is_registered(
+        _plugin_instance
+    ):
         config.pluginmanager.register(_plugin_instance, "pytest-strategies")
+
+
+def _given_seed(config: Config) -> int | None:
+    """
+    Return the run's seed that ``--rng-seed`` gives, or on a pytest-xdist worker
+    without it the controller's (``pytest_configure_node``); None when neither does.
+    """
+    rng_seed: int | None = config.getoption("--rng-seed", None)
+    if rng_seed is not None:
+        return rng_seed
+    workerinput = getattr(config, "workerinput", None)
+    worker_seed: int | None = workerinput.get("pytest_strategies_seed") if workerinput else None
+    return worker_seed
 
 
 def pytest_unconfigure(config: Config) -> None:
     """Unregister the plugin instance and close this config's runtime session."""
     if hasattr(config, "_strategy_plugin_instance"):
-        config.pluginmanager.unregister(_plugin_instance, "pytest-strategies")
+        if config.pluginmanager.is_registered(_plugin_instance):
+            config.pluginmanager.unregister(_plugin_instance, "pytest-strategies")
         delattr(config, "_strategy_plugin_instance")
         runtime.pop()
         if runtime.current is None and _strategy_file_finder in sys.meta_path:

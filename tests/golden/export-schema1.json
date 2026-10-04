@@ -1,0 +1,494 @@
+{
+  "schema": 1,
+  "kind": "strategies",
+  "generator": {
+    "name": "pytest-strategies",
+    "version": "*"
+  },
+  "seed": 1,
+  "nsamples": 10,
+  "strategies": [
+    {
+      "name": "ex_broken",
+      "origin": {
+        "folder": "tests/a",
+        "file": "tests/a/bus_strategies.py",
+        "qualname": "ex_broken",
+        "line": 98
+      },
+      "context": null,
+      "error": {
+        "type": "RuntimeError",
+        "message": "boom"
+      }
+    },
+    {
+      "name": "ex_bus",
+      "origin": {
+        "folder": "tests/a",
+        "file": "tests/a/bus_strategies.py",
+        "qualname": "ex_bus",
+        "line": 93
+      },
+      "context": null,
+      "parameter": {
+        "schema": 1,
+        "arguments": [
+          {
+            "name": "addr",
+            "description": "",
+            "python_type": "int",
+            "validator": false,
+            "source": "rng",
+            "rng": {
+              "type": "RNGInteger",
+              "min": 0,
+              "max": 15,
+              "predicate": false
+            }
+          }
+        ],
+        "directed_vectors": [],
+        "test_vectors": [],
+        "constraints": [],
+        "always_include_directed": true,
+        "max_retries": 100,
+        "nsamples": null,
+        "per_sequence_samples": false,
+        "max_exhaustive": null,
+        "skip_reason": null
+      }
+    },
+    {
+      "name": "ex_bus",
+      "origin": {
+        "folder": "tests/b",
+        "file": "tests/b/bus_strategies.py",
+        "qualname": "ex_bus",
+        "line": 4
+      },
+      "context": "5fa4056b",
+      "parameter": {
+        "schema": 1,
+        "arguments": [
+          {
+            "name": "addr",
+            "description": "",
+            "python_type": "int",
+            "validator": false,
+            "source": "rng",
+            "rng": {
+              "type": "RNGInteger",
+              "min": 0,
+              "max": 15,
+              "predicate": false
+            }
+          },
+          {
+            "name": "bench",
+            "description": "",
+            "python_type": "str",
+            "validator": false,
+            "source": "value",
+            "value": "root"
+          }
+        ],
+        "directed_vectors": [],
+        "test_vectors": [],
+        "constraints": [],
+        "always_include_directed": false,
+        "max_retries": 100,
+        "nsamples": "auto",
+        "per_sequence_samples": true,
+        "max_exhaustive": null,
+        "skip_reason": null
+      }
+    },
+    {
+      "name": "ex_types",
+      "origin": {
+        "folder": "tests/a",
+        "file": "tests/a/bus_strategies.py",
+        "qualname": "ex_types",
+        "line": 43
+      },
+      "context": "05896e29",
+      "parameter": {
+        "schema": 1,
+        "arguments": [
+          {
+            "name": "integer",
+            "description": "",
+            "python_type": "int",
+            "validator": false,
+            "source": "rng",
+            "rng": {
+              "type": "RNGInteger",
+              "min": 0,
+              "max": 255,
+              "predicate": true
+            }
+          },
+          {
+            "name": "real",
+            "description": "a float",
+            "python_type": "float",
+            "validator": false,
+            "source": "rng",
+            "rng": {
+              "type": "RNGFloat",
+              "min": -1.5,
+              "max": 2.5,
+              "predicate": false
+            }
+          },
+          {
+            "name": "flag",
+            "description": "",
+            "python_type": "bool",
+            "validator": false,
+            "source": "rng",
+            "rng": {
+              "type": "RNGBoolean",
+              "true_probability": 0.25
+            }
+          },
+          {
+            "name": "data",
+            "description": "",
+            "python_type": "str",
+            "validator": false,
+            "source": "rng",
+            "rng": {
+              "type": "RNGChoice",
+              "choices": [
+                "rd",
+                {
+                  "$repr": "b'\\x00\\xff'",
+                  "$type": "bytes"
+                },
+                {
+                  "$repr": "(1, 2)",
+                  "$type": "tuple"
+                }
+              ]
+            }
+          },
+          {
+            "name": "color",
+            "description": "",
+            "python_type": "Color",
+            "validator": false,
+            "source": "rng",
+            "rng": {
+              "type": "RNGEnum",
+              "enum": "Color",
+              "members": [
+                {
+                  "$enum": "Color",
+                  "member": "RED"
+                },
+                {
+                  "$enum": "Color",
+                  "member": "GREEN"
+                },
+                {
+                  "$enum": "Color",
+                  "member": "BLUE"
+                }
+              ],
+              "weights": [
+                {
+                  "member": {
+                    "$enum": "Color",
+                    "member": "RED"
+                  },
+                  "weight": 3
+                },
+                {
+                  "member": {
+                    "$enum": "Color",
+                    "member": "BLUE"
+                  },
+                  "weight": 1
+                }
+              ],
+              "predicate": false
+            }
+          },
+          {
+            "name": "hue",
+            "description": "",
+            "python_type": "Color",
+            "validator": false,
+            "source": "rng",
+            "rng": {
+              "type": "RNGEnum",
+              "enum": "Color",
+              "members": [
+                {
+                  "$enum": "Color",
+                  "member": "RED"
+                },
+                {
+                  "$enum": "Color",
+                  "member": "GREEN"
+                },
+                {
+                  "$enum": "Color",
+                  "member": "BLUE"
+                }
+              ],
+              "weights": null,
+              "predicate": true
+            }
+          },
+          {
+            "name": "text",
+            "description": "",
+            "python_type": "str",
+            "validator": false,
+            "source": "rng",
+            "rng": {
+              "type": "RNGString",
+              "length": null,
+              "min_length": 2,
+              "max_length": 4,
+              "charset": "ab"
+            }
+          },
+          {
+            "name": "wint",
+            "description": "",
+            "python_type": "int",
+            "validator": false,
+            "source": "rng",
+            "rng": {
+              "type": "RNGWeightedInteger",
+              "ranges": [
+                {
+                  "min": 0,
+                  "max": 9,
+                  "weight": 3
+                },
+                {
+                  "min": 100,
+                  "max": 109,
+                  "weight": 1
+                }
+              ],
+              "predicate": false
+            }
+          },
+          {
+            "name": "wfloat",
+            "description": "",
+            "python_type": "float",
+            "validator": false,
+            "source": "rng",
+            "rng": {
+              "type": "RNGWeightedFloat",
+              "ranges": [
+                {
+                  "min": 0.0,
+                  "max": 1.0,
+                  "weight": 0.5
+                },
+                {
+                  "min": 10.0,
+                  "max": 11.0,
+                  "weight": 0.5
+                }
+              ],
+              "predicate": false
+            }
+          },
+          {
+            "name": "pick",
+            "description": "",
+            "python_type": "str",
+            "validator": false,
+            "source": "rng",
+            "rng": {
+              "type": "RNGSequence",
+              "sequence": [
+                "x",
+                "y"
+              ],
+              "skip_if_empty": "no picks"
+            }
+          },
+          {
+            "name": "lane",
+            "description": "",
+            "python_type": "int",
+            "validator": false,
+            "source": "rng",
+            "rng": {
+              "type": "Series",
+              "sequence": [
+                0,
+                3,
+                3
+              ],
+              "skip_if_empty": null
+            }
+          },
+          {
+            "name": "walk",
+            "description": "",
+            "python_type": null,
+            "validator": false,
+            "source": "rng",
+            "rng": {
+              "type": "Walk",
+              "attributes": {
+                "width": 8,
+                "pattern": {
+                  "$repr": "(1, 2, 4)",
+                  "$type": "tuple"
+                },
+                "tags": {
+                  "$repr": "{'bus', 'ones', 'walk'}",
+                  "$type": "set"
+                }
+              }
+            }
+          },
+          {
+            "name": "bench",
+            "description": "",
+            "python_type": "str",
+            "validator": false,
+            "source": "value",
+            "value": "a"
+          },
+          {
+            "name": "mode",
+            "description": "a value",
+            "python_type": "str",
+            "validator": true,
+            "source": "value",
+            "value": "fast"
+          }
+        ],
+        "directed_vectors": [
+          {
+            "name": "zeros",
+            "id": "directed-zeros",
+            "values": {
+              "integer": 0,
+              "real": {
+                "$float": "nan"
+              },
+              "flag": false,
+              "data": {
+                "$repr": "b'\\x00'",
+                "$type": "bytes"
+              },
+              "color": {
+                "$enum": "Color",
+                "member": "RED"
+              },
+              "hue": {
+                "$enum": "Color",
+                "member": "GREEN"
+              },
+              "text": "ab",
+              "wint": 0,
+              "wfloat": 0.0,
+              "pick": "x",
+              "lane": 0,
+              "walk": 1,
+              "bench": "a",
+              "mode": "fast"
+            }
+          },
+          {
+            "name": "marked",
+            "id": "directed-marked",
+            "values": {
+              "integer": 2,
+              "real": 1.0,
+              "flag": true,
+              "data": {
+                "$repr": "(1, 2)",
+                "$type": "tuple"
+              },
+              "color": {
+                "$enum": "Color",
+                "member": "BLUE"
+              },
+              "hue": {
+                "$enum": "Color",
+                "member": "BLUE"
+              },
+              "text": "ba",
+              "wint": 9,
+              "wfloat": 1.0,
+              "pick": "y",
+              "lane": 3,
+              "walk": 2,
+              "bench": "a",
+              "mode": "fast"
+            }
+          }
+        ],
+        "test_vectors": [
+          {
+            "name": "edges",
+            "id": "test-edges",
+            "values": {
+              "integer": 254,
+              "real": {
+                "$float": "inf"
+              },
+              "flag": true,
+              "data": {
+                "$repr": "{'a', 'b'}",
+                "$type": "set"
+              },
+              "color": {
+                "$enum": "Color",
+                "member": "GREEN"
+              },
+              "hue": {
+                "$enum": "Color",
+                "member": "BLUE"
+              },
+              "text": "bb",
+              "wint": 109,
+              "wfloat": {
+                "$float": "-inf"
+              },
+              "pick": "y",
+              "lane": 3,
+              "walk": {
+                "$repr": "frozenset({1, 3})",
+                "$type": "frozenset"
+              },
+              "bench": "a",
+              "mode": "fast"
+            }
+          }
+        ],
+        "constraints": [
+          {
+            "name": "even",
+            "enabled": true
+          },
+          {
+            "name": "small",
+            "enabled": false
+          }
+        ],
+        "always_include_directed": true,
+        "max_retries": 50,
+        "nsamples": 4,
+        "per_sequence_samples": false,
+        "max_exhaustive": 1000,
+        "skip_reason": null
+      }
+    }
+  ]
+}

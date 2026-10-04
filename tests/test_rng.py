@@ -77,14 +77,6 @@ class TestRNGSeedManagement:
 
         assert values1 == values2
 
-    def test_set_max_retries(self):
-        """Test setting max retries for constrained generation."""
-        RNG.set_max_retries(50)
-        assert RNG._max_retries == 50
-
-        # Reset to default
-        RNG.set_max_retries(100)
-
 
 # ============================================================================
 # INTEGER GENERATION TESTS
@@ -137,14 +129,10 @@ class TestRNGInteger:
     def test_integer_impossible_predicate_raises_error(self):
         """Test that impossible predicate raises RNGValueError."""
         RNG.seed(42)
-        RNG.set_max_retries(10)
 
-        with pytest.raises(RNGValueError, match="No valid value found"):
+        with pytest.raises(RNGValueError, match="No valid value found after 100 attempts"):
             # Impossible: number between 0-10 that's > 100
             RNG.integer(0, 10, predicate=lambda x: x > 100)
-
-        # Reset
-        RNG.set_max_retries(100)
 
     def test_integer_distribution(self):
         """Test that integer generation has reasonable distribution."""
@@ -202,14 +190,10 @@ class TestRNGFloat:
     def test_float_impossible_predicate_raises_error(self):
         """Test that impossible predicate raises RNGValueError."""
         RNG.seed(42)
-        RNG.set_max_retries(10)
 
         with pytest.raises(RNGValueError, match="No valid value found"):
             # Impossible: float between 0-1 that's > 10
             RNG.float(0.0, 1.0, predicate=lambda x: x > 10.0)
-
-        # Reset
-        RNG.set_max_retries(100)
 
     def test_float_precision(self):
         """Test that float values have proper precision."""
@@ -793,17 +777,6 @@ class TestRNGEdgeCases:
         # Should still generate values
         value = RNG.integer(0, 100)
         assert 0 <= value <= 100
-
-    def test_zero_max_retries(self):
-        """Test behavior with zero max retries."""
-        RNG.set_max_retries(0)
-
-        # Should fail immediately with impossible predicate
-        with pytest.raises(RNGValueError, match="No valid value found after 0 attempts"):
-            RNG.integer(0, 10, predicate=lambda x: x > 100)
-
-        # Reset
-        RNG.set_max_retries(100)
 
 
 # ============================================================================

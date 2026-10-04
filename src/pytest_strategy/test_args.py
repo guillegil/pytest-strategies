@@ -1,9 +1,10 @@
 # test_args.py
 
 import builtins
-import warnings
 from collections.abc import Callable
 from typing import Any
+
+from .rng import RNGType, RNGValueError, _NoValidValue
 
 
 class TestArg:
@@ -13,7 +14,9 @@ class TestArg:
     A TestArg can be:
     - Static (fixed value)
     - Random (generated using an RNG type)
-    - Directed (from a predefined list of values)
+
+    Fixed rows of several arguments are the Parameter's directed_vectors and
+    test_vectors.
     """
 
     # Prevent pytest from collecting this class as a test
@@ -23,12 +26,9 @@ class TestArg:
         self,
         name: str,
         rng_type: Any = None,
+        *,
         value: Any = None,
-        directed_values: list[Any] | None = None,
-        test_values: list[Any] | None = None,
         validator: Callable[[Any], bool] | None = None,
-        # Control
-        always_include_directed: bool = True,
         description: str = "",
     ) -> None:
         """
@@ -36,18 +36,19 @@ class TestArg:
 
         Args:
             name: Argument name (must match test function parameter)
-            rng_type: RNG type for random generation (required if value is None)
-            description: Human-readable description of the argument
+            rng_type: RNG type for random generation (required if value is None): an
+                RNGType, or an object with a generate() method
             value: Single static value (for directed tests)
-            directed_values: Deprecated, removed in 4.0: Parameter does not use them.
-                Use Parameter(directed_vectors=...).
-            test_values: Deprecated, removed in 4.0: Parameter does not use them.
-                Use Parameter(test_vectors=...).
-            always_include_directed: If True, directed values are always included in samples
             validator: Optional function to validate generated values
+            description: Human-readable description of the argument
+
+        The arguments after rng_type are keyword-only.
 
         Raises:
-            ValueError: If neither value, rng_type, nor directed_values are provided
+            ValueError: If neither value nor rng_type is provided
+            TypeError: If rng_type is neither an RNGType nor has a generate() method
+                (a bare function or lambda, for example), or is a class rather than
+                an instance (RNGBoolean for RNGBoolean())
 
         Examples:
             # Pure random
@@ -56,28 +57,32 @@ class TestArg:
             # Static value
             TestArg("count", value=0, description="Edge case")
         """
-        for option, given in (("directed_values", directed_values), ("test_values", test_values)):
-            if given is not None:
-                replacement = "directed_vectors" if option == "directed_values" else "test_vectors"
-                warnings.warn(
-                    f"TestArg({option}=...) is deprecated and will be removed in 4.0: strategies "
-                    f"do not use it. Use Parameter({replacement}=...) instead.",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
         self._name = name
         self._rng_type = rng_type
         self._description = description
         self._value = value
-        self._directed_values = directed_values or []
-        self._test_values = test_values or []
-        self._always_include_directed = always_include_directed
         self._validator = validator
 
-        # Validation: must have at least one way to produce values
-        if value is None and rng_type is None and not directed_values and not test_values:
-            raise ValueError(
-                f"TestArg '{name}' must have either a value, rng_type, directed_values, or test_values"
+        # Validation: must have one way to produce values
+        if value is None and rng_type is None:
+            raise ValueError(f"TestArg '{name}' must have a value or an rng_type")
+        # A callable without generate() is rejected rather than called, so that a
+        # later release can give such callables a meaning of their own. A class is
+        # rejected too: its generate() is unbound, and RNGBoolean for RNGBoolean() is
+        # the likely mistake
+        if rng_type is not None and (
+            isinstance(rng_type, type)
+            or not (isinstance(rng_type, RNGType) or callable(getattr(rng_type, "generate", None)))
+        ):
+            got = repr(rng_type)
+            if isinstance(rng_type, type) and callable(getattr(rng_type, "generate", None)):
+                got = (
+                    f"the class {rng_type.__name__} instead of an instance "
+                    f"(did you mean {rng_type.__name__}(...)?)"
+                )
+            raise TypeError(
+                f"TestArg '{name}' rng_type must be an RNGType or have a generate() method, "
+                f"got {got}"
             )
 
     def generate(self) -> Any:
@@ -88,100 +93,61 @@ class TestArg:
             Generated or static value
 
         Raises:
-            ValueError: If no rng_type is available for generation
             ValueError: If generated value fails validation
+            RNGValueError: If the rng_type's predicate rejected every draw; the
+                message names this argument
         """
         # If static value, return it
         if self._value is not None:
             return self._validate(self._value)
 
-        # If no RNG type, can't generate
-        if self._rng_type is None:
-            raise ValueError(f"Cannot generate value for '{self._name}' without rng_type")
-
         # Generate and validate
-        value = self._rng_type.generate()
+        try:
+            value = self._rng_type.generate()
+        except _NoValidValue as e:
+            raise RNGValueError(
+                f"Argument {self._name!r} could not draw a value its predicate accepts: {e}"
+            ) from e
         return self._validate(value)
 
     def to_dict(self) -> dict[str, Any]:
         """
-        Serialize the test argument metadata to a dictionary.
+        Describe the argument as a JSON-ready dict: its ``name``, ``description``,
+        ``python_type`` (the qualified name of its values' type, or None when unknown),
+        ``validator`` (whether one is set) and ``source``: ``"value"`` with the
+        ``value`` in the schema 1 value encoding, or ``"rng"`` with ``rng``, its RNG
+        type's ``to_dict()``. A fragment of ``Parameter.to_dict()``, without a schema
+        field of its own.
         """
-        from enum import Enum
+        # Imported here: the export module imports this one
+        from ._export import argument_dict
 
-        data = {
-            "name": self._name,
-            "description": self._description,
-            "has_static_value": self._value is not None,
-            "has_directed_values": bool(self._directed_values),
-            "has_test_values": bool(self._test_values),
-            "always_include_directed": self._always_include_directed,
-        }
-
-        if self._value is not None:
-            data["static_value"] = str(self._value)
-
-        if self._rng_type:
-            data["rng_type"] = self._rng_type.__class__.__name__
-            # Add RNG specific details if available
-            if hasattr(self._rng_type, "__dict__"):
-                # Filter out private attributes and callables, except Enum classes (the
-                # enum_class of an RNGEnum), which are configuration and exported by name
-                rng_details: dict[str, Any] = {}
-                for k, v in self._rng_type.__dict__.items():
-                    if k.startswith("_"):
-                        continue
-                    if isinstance(v, type) and issubclass(v, Enum):
-                        rng_details[k] = v.__name__
-                    elif not callable(v):
-                        rng_details[k] = str(v)
-                # A set predicate is a callable and left out above, so say whether one is set
-                if "predicate" in self._rng_type.__dict__:
-                    rng_details["has_predicate"] = self._rng_type.predicate is not None
-                if rng_details:
-                    data["rng_details"] = rng_details
-
-        return data
+        return argument_dict(self)
 
     def generate_samples(self, n: int) -> list[Any]:
         """
-        Generate n samples, optionally including directed values.
+        Generate n samples.
 
         Args:
             n: Number of random samples to generate
 
         Returns:
-            List of samples. If always_include_directed is True and directed_values
-            exist, the list will contain directed values + n random samples.
-            If value is set (static), returns directed values or [value].
+            List of n generated values, or [value] for a static argument.
 
         Examples:
-            # With directed values and n=10
-            arg = TestArg("x", rng_type=RNGInteger(1, 100), directed_values=[0, 1])
-            samples = arg.generate_samples(10)  # Returns 12 samples: [0, 1, ...10 random...]
+            # Random, n=10
+            arg = TestArg("x", rng_type=RNGInteger(1, 100))
+            samples = arg.generate_samples(10)  # Returns 10 random values
 
             # Static value
             arg = TestArg("x", value=42)
             samples = arg.generate_samples(10)  # Returns [42]
         """
-        samples = []
-
-        # Add directed values if configured
-        if self._always_include_directed and self._directed_values:
-            samples.extend(self._directed_values)
-
-        # If we have a static value, just return it (with directed values if any)
+        # A static value is a single sample
         if self._value is not None:
-            if not samples:  # Only add static value if no directed values
-                samples.append(self._value)
-            return samples
+            return [self._value]
 
-        # Generate random samples
-        if self._rng_type:
-            for _ in range(n):
-                samples.append(self.generate())
-
-        return samples
+        return [self.generate() for _ in range(n)]
 
     def _validate(self, value: Any) -> Any:
         """
@@ -220,15 +186,14 @@ class TestArg:
         Get the Python type of this argument.
 
         Returns:
-            Python type (int, float, str, etc.) or Any if unknown
+            Python type (int, float, str, etc.) or Any if unknown, as for an
+            rng_type with a generate() method but no python_type
         """
         if self._rng_type:
-            python_type: builtins.type = self._rng_type.python_type
+            python_type: builtins.type = getattr(self._rng_type, "python_type", Any)
             return python_type
         if self._value is not None:
             return type(self._value)
-        if self._directed_values:
-            return type(self._directed_values[0])
         return Any
 
     @property
@@ -237,24 +202,9 @@ class TestArg:
         return self._value is not None
 
     @property
-    def has_directed_values(self) -> bool:
-        """Check if this argument has directed test values"""
-        return bool(self._directed_values)
-
-    @property
     def rng_type(self) -> Any:
         """Get the RNG type for this argument"""
         return self._rng_type
-
-    @property
-    def directed_values(self) -> list[Any]:
-        """Get list of directed values."""
-        return self._directed_values
-
-    @property
-    def test_values(self) -> list[Any]:
-        """Get list of test values."""
-        return self._test_values
 
     # ====
     # String Representation
@@ -269,9 +219,6 @@ class TestArg:
 
         if self._rng_type:
             parts.append(f"type={self.type.__name__}")
-
-        if self._directed_values:
-            parts.append(f"directed={len(self._directed_values)}")
 
         return f"TestArg({', '.join(parts)})"
 
