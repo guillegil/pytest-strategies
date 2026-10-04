@@ -67,16 +67,19 @@ def export_strategies(*, format: str = "json") -> str: ...
 - `@strategy("name")` looks the name up from the test's folder upward when the test is
   collected. `@strategy(factory)` uses that factory directly; it does not need to be
   registered. Its streams are keyed by a name that the factory's own file (the
-  module that defines it) registers it under, the first in alphabetical order, so
-  the test gets the values and IDs of `@strategy("name")` where that name finds the
-  factory; without one, by the function's qualified name. A registration made by
-  any other file does not name it: an alias in another folder's strategies file or
-  `conftest.py`, in a test module, in a plugin or in a hook such as
-  `pytest_configure`, and neither does another factory registered under the name
-  nearer to the test. A `register` call in a helper function counts for the module
-  whose import called it; a `functools.partial` or `functools.wraps` wrapper counts
-  as the function it wraps, an object as its class. So the name is the same in
-  every run that collects the test, wherever the factory's file is.
+  module that defines it) registers it under when it is imported, the first in
+  alphabetical order, so the test gets the values and IDs of `@strategy("name")`
+  where that name finds the factory; without one, by the function's qualified name.
+  The `register` call is at the module level of that file, or in a helper function
+  that its import calls. A registration made by any other file does not name it:
+  an alias in another folder's strategies file or `conftest.py`, in a test module
+  or in a plugin. Neither does a call in a hook such as `pytest_configure` or in a
+  fixture, not even in the factory's own file, nor another factory registered
+  under the name nearer to the test. A `functools.partial` or `functools.wraps`
+  wrapper counts as the function it wraps, a bound method as its function, an
+  object as its class: one that its file does not register itself gets the first
+  name its file registers one of that function or class under. So the name is the
+  same in every run that collects the test, wherever the factory's file is.
 - `@strategy` only marks the test (a `strategy` marker holding the name or factory).
   The factory runs, and the test is parametrized, in `pytest_generate_tests`, so a
   missing name or a signature mismatch is reported at collection.

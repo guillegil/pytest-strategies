@@ -525,9 +525,10 @@ def test_coordinates(x, y):
    and when the function is a different one it emits a `PytestStrategiesWarning`
    and records a clash that fails the run with a usage error after collection
    (on a pytest-xdist worker, the worker runs nothing and the controller reports
-   it). A function is identified by its file, qualified name and first line,
-   looking through `functools.wraps` decorators, so re-running the same file is
-   silent.
+   it). A clash made while pytest starts, before the session does (in a plugin
+   or an initial `conftest.py`), only warns. A function is identified by its
+   file, qualified name and first line, looking through `functools.wraps`
+   decorators, so re-running the same file is silent.
 2. `@strategy(name_or_factory)` only adds a `strategy` marker to the test; it
    runs nothing when the module is imported.
 3. In `pytest_generate_tests`, the plugin resolves each `strategy` marker. A
@@ -538,23 +539,27 @@ def test_coordinates(x, y):
    factory passed directly is used as it is, under a name that keys the test's
    streams (`_factory_name()`): a name that the factory's own file registers
    it under (`registry.own_names()`), the first in alphabetical order, or else
-   the function's qualified name. `Registration.calls` holds each `register`
-   call that made a registration: the file of the module whose top-level code
-   ran it (`caller_file()`, so a helper function's call counts for the module
-   whose import called it, and a call in a hook or a fixture for no module
-   of the project) and the object it registered. A name counts when one of its
-   calls was made by the file that defines the factory (`factory_source()`,
-   through `functools.wraps` wrappers and partials, an object's class) with
-   this very object, or, when there is no such name, with another object of
-   its origin (for a partial made in a test module, the function it wraps). A
-   registration that replaces one of the same origin in its folder keeps the
-   replaced one's calls, so another file registering the factory again under
-   the same name, or the file imported again under another module name
-   (`tests.factories` and `factories`), which registers a copy, takes no name
-   away. The test holds the factory, so its module has run, with its
-   module-level `register` calls: the name is the same in every run that
-   collects the test. Calls made by other files never count, since only some
-   runs may make them, and nor does another factory registered under the
+   the function's qualified name. `Registration.own_calls` holds the
+   `register` calls of a name in a folder that the registered object's own
+   file made (`factory_source()`, through `functools.wraps` wrappers and
+   partials, a bound method's function, an object's class), with the object
+   and its origin. A call counts for the module whose top-level code ran it
+   (`caller_file()`, so a helper function's call counts for the module whose
+   import called it, and a call in a hook or a fixture for no module of the
+   project, not even in the factory's own file). A name counts when one of its
+   own calls was made with this very object (`_same_factory()`: a method bound
+   again to the same object counts), or, when there is no such name, with
+   another object of its origin (for a partial made in a test module, the
+   function it wraps). A registration that replaces another in its folder
+   keeps the other's own calls, whatever its origin, so another file
+   registering the factory again under the same name, the file imported again
+   under another module name (`tests.factories` and `factories`), which
+   registers a copy, or another factory registered under the name (a clash,
+   which only warns while pytest starts, so that only some runs make it)
+   takes no name away. The test holds the factory, so its module has run,
+   with its module-level `register` calls: the name is the same in every run
+   that collects the test. Calls made by other files never count, since only
+   some runs may make them, and nor does another factory registered under the
    name nearer to the test.
 4. `build_parametrization()` calls the factory once through
    `_factory.call_factory()`, on the factory's own stream (see

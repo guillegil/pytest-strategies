@@ -865,22 +865,24 @@ class PytestStrategyPlugin:
         random stream.
 
         The name is one that the factory's own file registers it under: a
-        registration whose ``register()`` call the module defining the factory
-        made, at its import (``StrategyRegistry.own_names``), with this very
-        object, or if there is none, with an object of its origin (a copy made by
-        the file imported again under another module name, or the function that
-        a ``functools.partial`` wraps). Of several, the first in alphabetical
-        order. Otherwise it is the function's (or the class's) qualified name:
-        never a repr with a memory address, which would change the test's random
-        stream from run to run.
+        ``register()`` call that the module defining the factory made at its
+        import (``StrategyRegistry.own_names``) with this very object (a method
+        bound again to the same object counts), or if there is none, with an
+        object of its origin (a copy made by the file imported again under
+        another module name, or the function that a ``functools.partial`` wraps).
+        Of several, the first in alphabetical order. Otherwise it is the
+        function's (or the class's) qualified name: never a repr with a memory
+        address, which would change the test's random stream from run to run.
 
         So the name is the same in every run that collects the test, its rerun
         and ``--lf`` included: the test holds the factory, so the module that
         defines it has run, and with it its own module-level ``register()``
         calls. A registration made by any other file (an alias in another
-        folder's strategy file, a ``conftest.py``, a test module, a plugin, a
-        hook) never names it, since only some runs may make it, and neither does
-        another factory's registration of the name in the test's folder.
+        folder's strategy file, a ``conftest.py``, a test module, a plugin) or
+        in a hook never names it, since only some runs may make it, and neither
+        does another factory's registration of the name, in the test's folder
+        or in place of the factory's own (a clash that only warns while pytest
+        starts).
         """
         names = registry.own_names(factory)
         if names:

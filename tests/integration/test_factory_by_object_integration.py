@@ -3,15 +3,17 @@ End-to-end tests for the name of a factory that a test passes by object
 (``@strategy(burst)``), which keys the test's random streams.
 
 The name is one that the factory's own file, the module that defines it,
-registers it under, the first in alphabetical order, or else the factory's
-qualified name. The test holds the factory, so that module has run, and with it
-its module-level ``register()`` calls, in every run that collects the test. A
-registration made by any other file (a strategy file or ``conftest.py`` of any
-folder, a test module, a module that calls a helper of the factory's file, a
-plugin, a hook) does not name it, and neither does another factory's
-registration of the same name nearer to the test. So the full run, the printed
-rerun command, ``--lf`` and a run of the test's folder give a row the same name
-and values, which each test checks for its layout with ``check_reruns``.
+registers it under when it is imported, the first in alphabetical order, or
+else the factory's qualified name. The test holds the factory, so that module
+has run, and with it its module-level ``register()`` calls, in every run that
+collects the test. A registration made by any other file (a strategy file or
+``conftest.py`` of any folder, a test module, a module that calls a helper of
+the factory's file, a plugin) or in a hook, even the factory's own file's, does
+not name it, and neither does another factory's registration of the same name,
+nearer to the test or in place of the factory's own. So the full run, the
+printed rerun command, ``--lf`` and a run of the test's folder give a row the
+same name and values, which each test checks for its layout with
+``check_reruns``.
 
 Each project's conftest.py writes the strategy name and the values of every
 collected row to ``rows.json`` in the rootdir. The printed rerun command is run
@@ -349,6 +351,130 @@ class TestOwnFile:
         assert names(full, "test_c") == {"big"}
         assert section[0].startswith("strategy  small (tests/bursts.py")
 
+    def test_a_bound_method_gets_its_own_name(self, pytester):
+        # The methods of two objects, registered by their file as "small" and
+        # "big": test_b's small.make is another bound method than the one
+        # registered, and gets "small" with the values of @strategy("small"). The
+        # method of an object that the file did not register gets the first name
+        # its file registers a method of the class under
+        path = pytester.path / "tests" / "b" / "test_b.py"
+        bursts = (
+            IMPORTS
+            + "\n\nclass Burst:\n"
+            + "    def make(self):\n"
+            + "        x = TestArg('x', rng_type=RNGInteger(0, 10**6))\n"
+            + "        return Parameter(x, nsamples=4)\n\n\n"
+            + "small, big = Burst(), Burst()\n"
+            + 'register("small")(small.make)\n'
+            + 'register("big")(big.make)\n'
+        )
+        user = (
+            IMPORTS
+            + "from bursts import Burst, small\n\nburst = small.make\n\n\n"
+            + module("test_c", "Burst().make")
+        )
+        project(
+            pytester,
+            {
+                "tests/bursts.py": bursts,
+                "tests/a/test_a.py": "def test_a():\n    pass\n",
+                "tests/b/test_b.py": module_b("bursts", prefix=user),
+            },
+        )
+
+        full, section = check_reruns(pytester, NODEID, "tests/b")
+        by_name_test = module("test_b", '"small"', fails="test_b[rand-1]")
+        path.write_text(IMPORTS + "import bursts  # noqa\n\n\n" + by_name_test, "utf-8")
+        by_name = run(pytester, ret=1)[1]
+
+        assert names(full, "test_b") == {"small"}
+        assert names(full, "test_c") == {"big"}
+        assert section[0].startswith("strategy  small (tests/bursts.py:")
+        assert {nodeid: full[nodeid] for nodeid in by_name} == by_name
+
+    def test_a_functools_wraps_wrapper_counts_as_the_function_it_wraps(self, pytester):
+        # tests/factories.py registers burst, decorated with tests/deco.py's
+        # functools.wraps decorator, as "dma", and a wrapper of other as "dma2".
+        # test_b passes the decorated burst, test_c the function other and test_d
+        # its wrapper: other gets the name its file registers a wrapper of it under
+        deco = (
+            "import functools\n\n\n"
+            "def logged(fn):\n"
+            "    @functools.wraps(fn)\n"
+            "    def wrapper(*args, **kwargs):\n"
+            "        return fn(*args, **kwargs)\n\n"
+            "    return wrapper\n"
+        )
+        factories = (
+            IMPORTS
+            + "from deco import logged\n\n\n"
+            + '@register("dma")\n@logged\n'
+            + factory("burst")
+            + "\n\n"
+            + factory("other")
+            + '\n\nwrapped = register("dma2")(logged(other))\n'
+        )
+        user = (
+            IMPORTS
+            + "from factories import burst, other, wrapped\n\n\n"
+            + module("test_c", "other")
+            + "\n\n"
+            + module("test_d", "wrapped")
+        )
+        project(
+            pytester,
+            {
+                "tests/deco.py": deco,
+                "tests/factories.py": factories,
+                "tests/a/test_a.py": "def test_a():\n    pass\n",
+                "tests/b/test_b.py": module_b("factories", prefix=user),
+            },
+        )
+
+        full, section = check_reruns(pytester, NODEID, "tests/b")
+
+        assert names(full, "test_b") == {"dma"}
+        assert names(full, "test_c") == names(full, "test_d") == {"dma2"}
+        assert section[0].startswith("strategy  dma (tests/factories.py:")
+
+    @pytest.mark.parametrize(
+        ("mode", "args"),
+        [
+            ("prepend", ()),
+            ("importlib", ()),
+            ("append", ()),
+            ("prepend", ("-n", "2")),
+        ],
+        ids=["prepend", "importlib", "append", "xdist"],
+    )
+    def test_a_test_module_names_its_own_factory(self, pytester, mode, args):
+        # tests/a/test_a.py defines and registers burst, and tests/b/test_b.py
+        # imports it as test_a. With --import-mode=importlib, pytest imports the
+        # file as tests.a.test_a, so a run that collects both makes two copies of
+        # it. The full run of the xdist case runs on two workers
+        if args:
+            pytest.importorskip("xdist")
+        project(
+            pytester,
+            {
+                "tests/a/test_a.py": (
+                    IMPORTS
+                    + '@register("dma")\n'
+                    + factory("burst")
+                    + "\n\n"
+                    + module("test_a", '"dma"')
+                ),
+                "tests/b/test_b.py": module_b("test_a"),
+            },
+            ini=f"addopts = --import-mode={mode}\n",
+            pythonpath=". tests tests/a",
+        )
+
+        full, section = check_reruns(pytester, NODEID, "tests/b", *args)
+
+        assert names(full, "test_a") == names(full, "test_b") == {"dma"}
+        assert section[0].startswith("strategy  dma (tests/a/test_a.py:")
+
     @pytest.mark.parametrize(
         ("where", "name"),
         [
@@ -651,6 +777,34 @@ class TestOtherFactories:
 
         assert names(full, "test_top") == names(full, "test_b") == {"dma"}
         assert section[0].startswith("strategy  dma (tests/common_strategies.py:")
+
+    def test_one_that_replaces_its_registration_while_pytest_starts(self, pytester):
+        # The root conftest imports tests/common_strategies.py, which registers
+        # burst as "base". tests/a/conftest.py, an initial conftest of a run
+        # without arguments (testpaths), registers another factory of tests/ as
+        # "base": that replaces burst's registration before the session starts,
+        # which only warns, in the runs that load it. burst keeps its name
+        project(
+            pytester,
+            {
+                "tests/common_strategies.py": BASE,
+                "tests/other.py": IMPORTS + factory("other"),
+                "tests/a/conftest.py": (
+                    IMPORTS + "from other import other\n\n" + 'register("base")(other)\n'
+                ),
+                "tests/a/test_a.py": "def test_a():\n    pass\n",
+                "tests/b/test_b.py": module_b("common_strategies"),
+            },
+            ini="testpaths = tests/a tests/b\n",
+        )
+        write(pytester.path, {"conftest.py": CONFTEST + "\nimport common_strategies  # noqa\n"})
+
+        full, section = check_reruns(pytester, NODEID, "tests/b")
+        result = run(pytester, ret=1)[0]
+
+        result.stdout.fnmatch_lines(["*Strategy 'base' is registered twice in the same folder*"])
+        assert names(full, "test_b") == {"base"}
+        assert section[0].startswith("strategy  base (tests/common_strategies.py:")
 
 
 class TestImportedUnderTwoNames:
@@ -993,27 +1147,35 @@ class TestPlugins:
         assert names(full, "test_b") == {"dma"}
         assert section[0].startswith("strategy  dma (tests/plugin_mod.py:")
 
-    def test_a_registration_in_a_hook_does_not_name_it(self, pytester):
-        # The root conftest's pytest_configure registers burst as "dma": no
-        # module's import makes the call, @strategy("dma") finds it
+    @pytest.mark.parametrize("where", ["root_conftest", "own_file"])
+    def test_a_registration_in_a_hook_does_not_name_it(self, pytester, where):
+        # A pytest_configure hook registers burst as "dma": the root conftest's,
+        # or that of burst's own file, a plugin module that -p in addopts loads.
+        # No module's import makes the call; @strategy("dma") finds it
         hook = (
             "\n\ndef pytest_configure(config):\n"
-            "    from common import burst\n"
+            f"    from {'common' if where == 'root_conftest' else 'plugin_mod'} import burst\n"
             "    from pytest_strategy import register\n\n"
             '    register("dma")(burst)\n'
         )
+        if where == "root_conftest":
+            files = {"conftest.py": CONFTEST + hook, "tests/common.py": COMMON}
+            source, ini = "common", ""
+        else:
+            files = {"tests/plugin_mod.py": COMMON + hook}
+            source, ini = "plugin_mod", "addopts = -p plugin_mod\n"
         project(
             pytester,
             {
-                "conftest.py": CONFTEST + hook,
-                "tests/common.py": COMMON,
+                **files,
                 "tests/a/test_a.py": IMPORTS + module("test_a", '"dma"'),
-                "tests/b/test_b.py": module_b("common"),
+                "tests/b/test_b.py": module_b(source),
             },
+            ini=ini,
         )
 
         full, section = check_reruns(pytester, NODEID, "tests/b")
 
         assert names(full, "test_a") == {"dma"}
         assert names(full, "test_b") == {"burst"}
-        assert section[0].startswith("strategy  burst (tests/common.py:")
+        assert section[0].startswith(f"strategy  burst (tests/{source}.py:")

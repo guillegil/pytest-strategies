@@ -72,9 +72,11 @@ A test can also take the factory itself, `@strategy(dma_burst)`: it then needs n
 registration and no name lookup, and editors can jump to it. To pass a factory from
 a strategies file, import it (in a package folder: `from .strategies import
 dma_burst`); the test gets the same module object the plugin loaded. Its values are
-those of a name that the factory's own file registers it under (the first in
-alphabetical order), or else of its qualified name: an alias that another file
-registers does not count.
+those of a name that the factory's own file registers it under when it is imported
+(the first in alphabetical order; for a partial, a wrapper, a bound method or an
+object that the file does not register itself, a name it registers one of that
+function or class under), or else of its qualified name: an alias that another file
+registers, or a call in a hook such as `pytest_configure`, does not count.
 
 ## How a factory is called
 

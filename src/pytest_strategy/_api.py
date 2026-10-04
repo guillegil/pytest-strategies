@@ -84,13 +84,19 @@ def strategy(name: str | Factory, *, validate_signature: bool = True) -> Callabl
     other parameter is a fixture.
 
     A test that passes the factory itself is keyed by a name that the factory's
-    own file (the module that defines it) registers it under, the first in
-    alphabetical order: it gets the values and IDs that ``@strategy("name")``
-    gives where that name finds this factory. Without such a name, it is keyed
-    by the function's (or the class's) qualified name. A registration made by
-    any other file, such as an alias in another folder's strategy file, a
-    ``conftest.py``, a test module or a plugin, does not name it, so the name is
-    the same in every run that collects the test.
+    own file (the module that defines it) registers it under when it is
+    imported, the first in alphabetical order: it gets the values and IDs that
+    ``@strategy("name")`` gives where that name finds this factory. A
+    ``functools.partial`` or ``functools.wraps`` wrapper counts as the function
+    it wraps, a bound method as its function and an object as its class: one
+    that the file does not register itself gets the first name the file
+    registers one of that function or class under. Without such a name, it is
+    keyed by the function's (or the class's) qualified name. A registration
+    made by any other file, such as an alias in another folder's strategy file,
+    a ``conftest.py``, a test module or a plugin, does not name it, nor does a
+    call made in a hook such as ``pytest_configure`` or in a fixture, not even
+    in the factory's own file. So the name is the same in every run that
+    collects the test.
 
     Usage::
 

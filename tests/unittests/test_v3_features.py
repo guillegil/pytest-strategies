@@ -134,31 +134,33 @@ class TestScopedRegistry:
         exec(compile(source, file, "exec"), vars(module))
         return module
 
-    def test_a_registration_keeps_the_calls_that_made_it(self, clean_registry):
-        namespace = {}
-        exec(compile("def f(nsamples): pass", "/virtual/tests/strategies.py", "exec"), namespace)
+    def test_a_registration_keeps_its_own_files_calls(self, clean_registry):
+        from pytest_strategy._registry import _factory_origin
+
+        namespace = {"register": register}
+        source = "def f(nsamples): pass\n\nregister('v3_calls')(f)\n"
+        exec(compile(source, "/virtual/tests/strategies.py", "exec"), namespace)
         f = namespace["f"]
-        call = "register('v3_calls')(f)"
-        for file in ("/virtual/tests/strategies.py", "/virtual/tests/b/strategies.py", "<string>"):
+        call = "register('v3_calls')(f)\nregister('v3_alias')(f)\n"
+        for file in ("/virtual/tests/b/strategies.py", "<string>"):
             exec(compile(call, file, "exec"), {"register": register, "f": f})
 
+        # Registered again by another file and by code without a file: only the
+        # call of the file that defines it is kept
         (registration,) = registry.registrations("v3_calls")
-        # The same function registered again by another file adds that file's call;
-        # code without a file adds none
-        assert registration.calls == (
-            (self.key("/virtual/tests/strategies.py"), f),
-            (self.key("/virtual/tests/b/strategies.py"), f),
-        )
+        assert registration.own_calls == ((_factory_origin(f), f),)
+        (alias,) = registry.registrations("v3_alias")
+        assert alias.own_calls == ()
+        assert registry.own_names(f) == ["v3_calls"]
 
     def test_the_registry_view_records_its_caller(self, clean_registry):
-        def factory(nsamples):
-            return Parameter(TestArg("x", value=1), nsamples=1)
+        namespace = {"view": Strategy._registry}
+        source = "def f(nsamples): pass\n\nview['v3_view_caller'] = f\n"
+        exec(compile(source, "/virtual/tests/conftest.py", "exec"), namespace)
+        # Set by this test function, which no module's import runs
+        Strategy._registry["v3_view_late"] = namespace["f"]
 
-        call = compile("view['v3_view_caller'] = f", "/virtual/tests/conftest.py", "exec")
-        exec(call, {"view": Strategy._registry, "f": factory})
-
-        (registration,) = registry.registrations("v3_view_caller")
-        assert registration.calls == ((self.key("/virtual/tests/conftest.py"), factory),)
+        assert registry.own_names(namespace["f"]) == ["v3_view_caller"]
 
     def test_a_call_in_a_helper_counts_for_the_module_whose_import_ran_it(self, clean_registry):
         helper = {"register": register}
@@ -167,16 +169,12 @@ class TestScopedRegistry:
         exec(compile("register_as('v3_helper')", "/virtual/tests/a/test_a.py", "exec"), helper)
         exec(compile("register_as('v3_helper_own')", "/virtual/tests/common.py", "exec"), helper)
         # Called from this test function, not by a module's import: the module that
-        # started the process, never the helper's file or this file
+        # started the process, never the helper's file
         helper["register_as"]("v3_helper_late")
 
-        (registration,) = registry.registrations("v3_helper")
-        assert registration.calls == ((self.key("/virtual/tests/a/test_a.py"), helper["f"]),)
-        (late,) = registry.registrations("v3_helper_late")
-        assert not {file for file, _ in late.calls} & {
-            self.key("/virtual/tests/common.py"),
-            self.key(__file__),
-        }
+        for name in ("v3_helper", "v3_helper_late"):
+            (registration,) = registry.registrations(name)
+            assert registration.own_calls == ()
         assert registry.own_names(helper["f"]) == ["v3_helper_own"]
 
     def test_own_names_are_the_names_its_file_registers_it_under(self, clean_registry, monkeypatch):
@@ -196,13 +194,15 @@ class TestScopedRegistry:
 
         assert registry.own_names(module.burst) == ["v3_own_a", "v3_own_z"]
         (registration,) = registry.registrations("v3_own_z")
-        assert [file for file, _ in registration.calls] == [
-            self.key("/virtual/tests/factories.py"),
-            self.key("/virtual/tests/b/strategies.py"),
-        ]
+        assert [registered for _, registered in registration.own_calls] == [module.burst]
 
-    def test_a_factory_of_another_origin_takes_its_name_away(self, clean_registry, monkeypatch):
-        # Another factory of the same folder registered under the name (a clash)
+    @pytest.mark.parametrize("caller", ["/virtual/tests/other.py", "/virtual/tests/a/conftest.py"])
+    def test_another_factory_that_replaces_its_registration_takes_no_name_away(
+        self, clean_registry, monkeypatch, caller
+    ):
+        # Another factory of the same folder registered under the name (a clash),
+        # by its own file or by a conftest.py that only some runs load before the
+        # session starts, where the clash only warns
         source = "from pytest_strategy import register\n\n@register('v3_taken')\ndef burst(nsamples):\n    pass\n"
         module = self.run_module(monkeypatch, "tests.factories", source)
         other = self.run_module(
@@ -211,10 +211,64 @@ class TestScopedRegistry:
             "def other(nsamples):\n    pass\n",
             "/virtual/tests/other.py",
         )
-        registry.add("v3_taken", other.other, self.key("/virtual/tests/other.py"))
+        registry.add("v3_taken", other.other, self.key(caller))
 
-        assert registry.own_names(module.burst) == []
-        assert registry.own_names(other.other) == ["v3_taken"]
+        (registration,) = registry.registrations("v3_taken")
+        assert registration.factory is other.other
+        assert registry.own_names(module.burst) == ["v3_taken"]
+        own = caller == "/virtual/tests/other.py"
+        assert registry.own_names(other.other) == (["v3_taken"] if own else [])
+
+    def test_a_method_bound_again_to_the_same_object_is_the_same_factory(
+        self, clean_registry, monkeypatch
+    ):
+        source = (
+            "from pytest_strategy import register\n\n"
+            "class Burst:\n    def make(self, nsamples):\n        pass\n\n"
+            "small, big = Burst(), Burst()\n"
+            "register('v3_small')(small.make)\n"
+            "register('v3_big')(big.make)\n"
+        )
+        module = self.run_module(monkeypatch, "tests.bursts", source, "/virtual/tests/bursts.py")
+
+        assert module.small.make is not module.small.make
+        assert registry.own_names(module.small.make) == ["v3_small"]
+        assert registry.own_names(module.big.make) == ["v3_big"]
+        # The method of an object that no register() call got: the names of the
+        # objects of its origin
+        assert registry.own_names(module.Burst().make) == ["v3_big", "v3_small"]
+
+    def test_a_wrapper_counts_as_the_function_it_wraps(self, clean_registry, monkeypatch):
+        deco = self.run_module(
+            monkeypatch,
+            "v3_deco",
+            (
+                "import functools\n\n"
+                "def logged(fn):\n"
+                "    @functools.wraps(fn)\n"
+                "    def wrapper(*args, **kwargs):\n"
+                "        return fn(*args, **kwargs)\n\n"
+                "    return wrapper\n"
+            ),
+            "/virtual/tests/deco.py",
+        )
+        source = (
+            "from pytest_strategy import register\n"
+            "from v3_deco import logged\n\n"
+            "@register('v3_logged')\n"
+            "@logged\n"
+            "def burst(nsamples):\n    pass\n\n"
+            "def other(nsamples):\n    pass\n\n"
+            "wrapped = register('v3_wrapped')(logged(other))\n"
+        )
+        module = self.run_module(monkeypatch, "tests.factories", source)
+
+        assert registry.own_names(module.burst) == ["v3_logged"]
+        assert registry.own_names(module.burst.__wrapped__) == ["v3_logged"]
+        assert registry.own_names(module.wrapped) == ["v3_wrapped"]
+        assert registry.own_names(module.other) == ["v3_wrapped"]
+        # A wrapper made by another file (this one)
+        assert registry.own_names(deco.logged(module.other)) == ["v3_wrapped"]
 
     def test_a_file_run_again_in_another_module_keeps_each_objects_names(
         self, clean_registry, monkeypatch

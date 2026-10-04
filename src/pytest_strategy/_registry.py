@@ -397,6 +397,21 @@ def _describe_factory(
     return f"{where}:{qualname or repr(fn)}"
 
 
+def _same_factory(first: Factory, second: Factory) -> bool:
+    """
+    Whether two factories are one: the same object, or the same function bound
+    to the same object (``obj.method`` makes a new bound method each time).
+    """
+    if first is second:
+        return True
+    return (
+        inspect.ismethod(first)
+        and inspect.ismethod(second)
+        and first.__self__ is second.__self__
+        and first.__func__ is second.__func__
+    )
+
+
 def _contains(directory: str, path: str) -> bool:
     """Return True if ``path`` is ``directory`` or lies below it (both normalized)."""
     try:
@@ -416,11 +431,11 @@ class Registration:
     # Normalized real path of the directory of the file that defines the factory,
     # or None when that file is unknown
     directory: str | None
-    # The register() calls that made it, oldest first: each one's file, the
-    # module whose top-level code ran the call (caller_file), and the object it
-    # registered. A call made by code without a file is left out. A registration
-    # of the same origin that it replaced passes its calls on (StrategyRegistry.add)
-    calls: tuple[tuple[str, Factory], ...] = ()
+    # The register() calls of the name in this folder that the registered
+    # objects' own files made at their import (caller_file: not a call in a hook
+    # or a fixture), oldest first: each object and its origin. The registration
+    # that replaces this one in its folder keeps them (StrategyRegistry.add)
+    own_calls: tuple[tuple[Origin, Factory], ...] = ()
 
     @property
     def file(self) -> str | None:
@@ -460,13 +475,14 @@ class StrategyRegistry:
             if existing.directory == directory:
                 replaced = entries.pop(index)
                 break
-        calls: tuple[tuple[str, Factory], ...] = ((caller, factory),) if caller else ()
-        if replaced is not None and replaced.origin == origin:
-            # The same factory registered again (by another file, or as a copy by
-            # its own file imported again under another module name), or another
-            # object of its origin: the calls that made the name stay (own_names)
-            calls = replaced.calls + calls
-        entries.append(Registration(name, factory, origin, directory, calls))
+        # The own calls of the registration it replaces stay, whoever makes this
+        # one: another file registering the factory again, its file imported again
+        # under another module name (a copy), or another factory, a clash that only
+        # some runs make (own_names)
+        own_calls = replaced.own_calls if replaced is not None else ()
+        if caller is not None and caller == origin[0]:
+            own_calls += ((origin, factory),)
+        entries.append(Registration(name, factory, origin, directory, own_calls))
         return replaced
 
     def registrations(self, name: str) -> list[Registration]:
@@ -505,31 +521,30 @@ class StrategyRegistry:
     def own_names(self, factory: Factory) -> list[str]:
         """
         Return the names that the file defining ``factory`` registers it under,
-        sorted: the names whose registrations hold a ``register()`` call that the
-        file's import made (``Registration.calls``) with ``factory`` itself, or if
-        there are none, with an object of its origin (``_factory_origin``), such
-        as the function that a ``functools.partial`` made elsewhere wraps. The file
-        is where :func:`factory_source` finds the factory: a ``functools.wraps``
+        sorted: the names of the ``register()`` calls that the file's import made
+        (``Registration.own_calls``) with ``factory`` itself, or if there are
+        none, with an object of its origin (``_factory_origin``), such as the
+        function that a ``functools.partial`` made elsewhere wraps. The file is
+        where :func:`factory_source` finds the factory: a ``functools.wraps``
         wrapper or a ``functools.partial`` counts as the function it wraps, an
-        object as its class.
+        object as its class. A method bound again to the same object counts as
+        the same factory: each ``obj.method`` makes a new bound method.
 
-        A registration that replaces one of the same origin in its folder keeps
-        the replaced one's calls: another file registering the factory again
-        under one of its names, or the file imported again under another module
-        name (which registers a copy), takes no name away.
+        A name's calls stay when another registration replaces it in its folder:
+        another file registering the factory again under the name, the file
+        imported again under another module name (which registers a copy), or
+        another factory registered under the name, a clash that only some runs
+        make, takes no name away.
         """
         origin = _factory_origin(factory)
-        own = origin[0]
         found: set[str] = set()
         same_origin: set[str] = set()
         for name, entries in self._entries.items():
             for registration in entries:
-                if own is None or registration.origin != origin:
-                    continue
-                for file, registered in registration.calls:
-                    if file == own:
+                for registered_origin, registered in registration.own_calls:
+                    if registered_origin == origin:
                         same_origin.add(name)
-                        if registered is factory:
+                        if _same_factory(registered, factory):
                             found.add(name)
         return sorted(found or same_origin)
 

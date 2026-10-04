@@ -31,8 +31,8 @@ class StrategyOptions:
     Attributes:
         strategy: The name the strategy was resolved under, as in the ``-v``
             summary: a registered name, or for a factory passed by object, a
-            name its own file registers it under, else its qualified name (see
-            ``strategy()``)
+            name its own file registers it (or another object of its function
+            or class) under, else its qualified name (see ``strategy()``)
         nsamples: The ``--nsamples`` value, ``"auto"``, or 10 without the option
         nsamples_source: Where ``nsamples`` came from: ``"--nsamples"`` or ``"default"``
         mode: The ``--vector-mode`` value
