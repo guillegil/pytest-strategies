@@ -1930,16 +1930,20 @@ docstring says.
 ## Releasing
 
 1. Set the version in `pyproject.toml`, in `__version__` in
-   `src/pytest_strategy/__init__.py` and in the "Documents pytest-strategies
+   `src/pytest_strategy/__init__.py`, in the "Documents pytest-strategies
    X.Y.Z." line at the top of
-   `src/pytest_strategy/skill/pytest-strategies/SKILL.md` (tests check that the
-   three match). Turn `## [Unreleased]` in `CHANGELOG.md` into
+   `src/pytest_strategy/skill/pytest-strategies/SKILL.md` and in the README's
+   install command (`pytest-strategies.git@vX.Y.Z`); tests check that the four
+   match. Turn `## [Unreleased]` in `CHANGELOG.md` into
    `## [X.Y.Z] - <date>` with a new empty `[Unreleased]` above it and a
    comparison link at the bottom. From 4.0.0 on, a major release's section
    starts with `### Migrating from <previous major>.x`, which names every API
-   the release removes: `tests/unittests/test_fix_docs.py` checks it against the
-   APIs its `REMOVED_IN_MAJOR` lists for that major.
-2. Merge into `main` once CI is green.
+   the release removes: `tests/unittests/test_fix_docs.py` checks it against
+   the APIs its `REMOVED_IN_MAJOR` lists for that major.
+2. Set the date of the `## [X.Y.Z]` heading to the release day: when the
+   release waited after step 1, for a review or an approval, change it in a
+   last commit before the merge, since no check compares it with the tag. Merge
+   into `main` once CI is green.
 3. Tag that commit and push the tag:
    `git tag -a vX.Y.Z -m "pytest-strategies X.Y.Z" && git push origin vX.Y.Z`.
    Alternatively, run the Release workflow by hand on `main` with the version;

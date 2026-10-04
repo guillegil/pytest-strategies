@@ -336,7 +336,13 @@ class TestExampleCommands:
 
     @pytest.mark.parametrize(("example", "args"), _example_commands())
     def test_command_runs(self, pytester, example, args):
-        """A command without --rng-seed runs with seed 1, so the test is deterministic."""
+        """
+        A command without --rng-seed runs with seed 1, so the test is deterministic.
+
+        A command that names one file collects only part of the suite, so a
+        --strategy-constraint-off name that matches no constraint is only printed
+        and the run passes: the output is checked for it.
+        """
         pytester.makefile(".toml", pyproject=(REPO_ROOT / "pyproject.toml").read_text("utf-8"))
         pytester.mkdir("examples")
         (pytester.path / "examples" / example.name).write_text(
@@ -348,6 +354,7 @@ class TestExampleCommands:
         result = pytester.runpytest(*args)
 
         assert result.ret == pytest.ExitCode.OK, result.stdout.str()
+        assert "matched no constraint" not in result.stdout.str()
         outcomes = result.parseoutcomes()
         if "::" in args[0]:
             assert outcomes.get("passed") == 1 and "deselected" not in outcomes

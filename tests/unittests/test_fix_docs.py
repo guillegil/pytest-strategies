@@ -317,6 +317,14 @@ class TestPackagingMetadata:
         if re.fullmatch(r"\d+\.\d+\.\d+", version):
             assert f"\n## [{version}] - " in _read("CHANGELOG.md")
 
+    def test_readme_installs_the_final_version(self, pyproject):
+        """The README's install command pins the release tag, a fourth copy of the version."""
+        version = pyproject["project"]["version"]
+        pins = re.findall(r"pytest-strategies\.git@v([^\s\"'`]+)", _read("README.md"))
+        assert pins, "README.md has no install command pinned to a release tag"
+        if re.fullmatch(r"\d+\.\d+\.\d+", version):
+            assert pins == [version] * len(pins)
+
     def test_changelog_agrees_with_the_development_status(self, pyproject):
         """The 2.0.0 notes said "development status is Alpha" for a Production/Stable package."""
         project = pyproject["project"]
