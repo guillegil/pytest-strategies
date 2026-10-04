@@ -9,7 +9,8 @@ an installed package or a plugin gets the name its own file or a plugin module
 registers. Otherwise it is the factory's qualified name. So the full run, the
 printed rerun command, ``--lf`` and a run of the test's folder alone give a row
 the same values, and a registration in another folder or another test module
-does not change them.
+does not change them, nor does a copy of the factory made by importing its file
+under another module name.
 
 Each project's conftest.py writes the strategy name and the values of every
 collected row to ``rows.json`` in the rootdir. The printed rerun command is run
@@ -292,6 +293,86 @@ class TestRegisteredInSomeRuns:
         assert section[0].startswith(f"strategy  {name} (tests/")
 
 
+class TestAliasedBySiblingFolder:
+    """A helper factory on the test's path that only a sibling folder registers."""
+
+    @pytest.mark.parametrize(
+        ("caller", "ini"),
+        [
+            # Loaded with tests/a's tests: only the runs that collect them load it
+            ("tests/a/strategies.py", ""),
+            # pytest loads it for tests/a's tests, not for tests/b's
+            ("tests/a/conftest.py", ""),
+            # An initial conftest of a run without arguments, loaded before the
+            # plugins are counted, but not by a run of tests/b or of a node ID
+            ("tests/a/conftest.py", "testpaths = tests/a tests/b\n"),
+        ],
+        ids=["strategy_file", "conftest", "conftest_in_testpaths"],
+    )
+    def test_it_keeps_its_qualified_name(self, pytester, caller, ini):
+        # tests/common.py is in tests/, above tests/b, but registers nothing: the
+        # alias as "dma" is made by a file of tests/a only
+        nodeid = "tests/b/test_b.py::test_b[rand-1]"
+        project(
+            pytester,
+            {
+                "tests/common.py": IMPORTS + factory("burst"),
+                caller: (
+                    IMPORTS
+                    + "from common import burst\n\n"
+                    + 'register("dma")(burst)\n\n'
+                    + '@register("a_other")\n'
+                    + factory("a_other", "y")
+                ),
+                "tests/a/test_a.py": IMPORTS + module("test_a", '"dma"'),
+                "tests/b/test_b.py": (
+                    IMPORTS
+                    + "from common import burst\n\n"
+                    + module("test_b", "burst", fails="test_b[rand-1]")
+                ),
+            },
+        )
+        pytester.makeini(f"[pytest]\npythonpath = . tests\n{ini}")
+
+        full, section, _ = check_reruns(pytester, nodeid, "tests/b")
+
+        assert names(full, "test_b") == {"burst"}
+        assert names(full, "test_a") == {"dma"}
+        assert section[0].startswith("strategy  burst (tests/common.py:")
+
+
+class TestImportedUnderTwoNames:
+    """A factory's file that test modules import under two module names."""
+
+    def test_the_copy_that_replaced_its_registration_still_names_it(self, pytester):
+        # With tests/ and the top on sys.path, tests/factories.py is the module
+        # tests.factories for test_a.py and test_d.py, and factories for
+        # test_c.py. The second import runs the file again: its register() call
+        # replaces the registration of the copy test_d.py holds, in the runs that
+        # collect test_c.py only
+        nodeid = "tests/b/test_d.py::test_d[rand-1]"
+        project(
+            pytester,
+            {
+                "tests/factories.py": IMPORTS + '@register("dma")\n' + factory("burst"),
+                "tests/a/test_a.py": (
+                    "from tests.factories import burst\n\n\ndef test_a():\n    pass\n"
+                ),
+                "tests/a/test_c.py": "from factories import burst\n\n\ndef test_c():\n    pass\n",
+                "tests/b/test_d.py": (
+                    IMPORTS
+                    + "from tests.factories import burst\n\n"
+                    + module("test_d", "burst", fails="test_d[rand-1]")
+                ),
+            },
+        )
+
+        full, section, _ = check_reruns(pytester, nodeid, "tests/b")
+
+        assert names(full, "test_d") == {"dma"}
+        assert section[0].startswith("strategy  dma (tests/factories.py:")
+
+
 class TestInstalled:
     """A factory of an installed package, or of a plugin, as @strategy("dma_burst") finds it."""
 
@@ -354,6 +435,33 @@ class TestInstalled:
         assert names(factory_rows, "test_x") == {"dma_burst"}
         assert factory_rows == name_rows
         assert len(factory_rows) == 4
+
+    def test_a_name_another_factory_has_in_the_test_folder_does_not_name_it(self, pytester):
+        # tests/b registers "dma_burst" for another factory: @strategy("dma_burst")
+        # there finds that one, so the package's factory keeps its qualified name
+        site = pytester.path / ".venv" / "lib" / "site-packages"
+        self.package(site, "factories.py")
+        project(
+            pytester,
+            {
+                "tests/b/b_strategies.py": IMPORTS + '@register("dma_burst")\n' + factory("local"),
+                "tests/b/test_b.py": (
+                    IMPORTS
+                    + "from ps_kit.factories import burst\n\n"
+                    + module("test_b", "burst")
+                    + "\n\n"
+                    + module("test_local", '"dma_burst"')
+                ),
+            },
+        )
+        pytester.makeini(f"[pytest]\npythonpath = . tests {site.as_posix()}\n")
+
+        full = rows(pytester)
+        folder = rows(pytester, "tests/b")
+
+        assert names(full, "test_b") == {"burst"}
+        assert names(full, "test_local") == {"dma_burst"}
+        assert same_rows(folder, full)
 
     def test_a_plugin_that_a_test_module_loads_does_not_name_it(self, pytester):
         # pytest loads a test module's pytest_plugins when it collects the module:

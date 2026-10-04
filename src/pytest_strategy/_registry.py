@@ -427,6 +427,54 @@ class Registration:
         """Normalized real path of the file that defines the factory, if known."""
         return self.origin[0]
 
+    def holds(self, factory: Factory, origin: Origin | None = None) -> bool:
+        """
+        Whether the registration is of ``factory``: the same object, or its copy
+        made by its file run again as another module (``tests/factories.py``
+        imported as ``tests.factories`` and as ``factories``), whose
+        ``register()`` call replaced it without a clash. A copy has the same
+        origin and is bound to the same name in the other module (``burst``).
+        Other factories of one origin (closures, partials, objects of one class)
+        stay apart.
+
+        Args:
+            factory: The factory
+            origin: Its ``_factory_origin``, computed when not given
+        """
+        if self.factory is factory:
+            return True
+        file = self.origin[0]
+        if not file or os.path.basename(file).startswith("<"):
+            # No file (exec'd text): nothing tells two runs of it apart
+            return False
+        if self.origin != (origin or _factory_origin(factory)):
+            return False
+        mine, theirs = _namespace(self.factory), _namespace(factory)
+        if mine is None or theirs is None or mine is theirs:
+            return False
+        return any(
+            value is self.factory and theirs.get(name) is factory
+            for name, value in list(mine.items())
+        )
+
+
+def _namespace(fn: Factory) -> dict[str, Any] | None:
+    """
+    The namespace of the module that defined a factory, through wrappers and
+    partials: its function's globals, or its class's module's. None if unknown.
+    """
+    fn = _unwrap(fn)
+    while isinstance(fn, functools.partial):
+        fn = _unwrap(fn.func)
+    if getattr(fn, "__code__", None) is not None:
+        namespace = getattr(fn, "__globals__", None)
+    else:
+        cls = fn if isinstance(fn, type) else type(fn)
+        namespace = getattr(
+            sys.modules.get(getattr(cls, "__module__", None) or ""), "__dict__", None
+        )
+    return namespace if isinstance(namespace, dict) else None
+
 
 class StrategyRegistry:
     """
@@ -461,7 +509,7 @@ class StrategyRegistry:
                 replaced = entries.pop(index)
                 break
         callers = frozenset([caller] if caller else [])
-        if replaced is not None and replaced.factory is factory:
+        if replaced is not None and replaced.holds(factory, origin):
             callers |= replaced.callers
         entries.append(Registration(name, factory, origin, directory, callers))
         return replaced
@@ -508,11 +556,12 @@ class StrategyRegistry:
         return best
 
     def names_of(self, factory: Factory) -> list[str]:
-        """Return the names ``factory`` is registered under."""
+        """Return the names ``factory`` is registered under (``Registration.holds``)."""
+        origin = _factory_origin(factory)
         return [
             name
             for name, entries in self._entries.items()
-            if any(registration.factory is factory for registration in entries)
+            if any(registration.holds(factory, origin) for registration in entries)
         ]
 
     def remove(self, name: str) -> None:

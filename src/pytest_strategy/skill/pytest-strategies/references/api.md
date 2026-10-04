@@ -67,12 +67,15 @@ def export_strategies(*, format: str = "json") -> str: ...
 - `@strategy("name")` looks the name up from the test's folder upward when the test is
   collected. `@strategy(factory)` uses that factory directly; it does not need to be
   registered. When the registration is in the test's folder or above (the factory's
-  file is there, and so is the `register` call, made when that file, the test module,
-  or a strategies file or `conftest.py` there is imported), the test gets the same
-  values and IDs as with the name. So does a factory of an installed package or a
-  plugin registered in its own file or by a plugin module, when the test's folder and
-  those above it do not register the name. Otherwise its values are keyed by the
-  function's qualified name, and are the same in every run.
+  file is there, and the `register` call is in that file, the test module, or a
+  strategies file or `conftest.py` there; a call in a helper function counts for the
+  file whose import called it, a call in a module these files import does not), the
+  test gets the same values and IDs as with the name. So does a factory of an
+  installed package or a plugin (outside the rootdir or in a `site-packages`
+  folder), registered in its own file or by a plugin module, when the test's folder
+  and those above it do not register the name. Otherwise its values are keyed by the
+  function's qualified name, and are the same in every run: also for a plugin inside
+  the rootdir, and for a `register` call made in a hook such as `pytest_configure`.
 - `@strategy` only marks the test (a `strategy` marker holding the name or factory).
   The factory runs, and the test is parametrized, in `pytest_generate_tests`, so a
   missing name or a signature mismatch is reported at collection.
@@ -712,9 +715,10 @@ def pytest_strategies_context(config):
   `Strategy factory '<name>' has a 'ctx' parameter, but the pytest_strategies_context
   hook raised <error>`, so none of the module's tests run, those without `ctx`
   included. For a method of a test class, the class fails collection instead, and
-  the module's other tests run. `pytest.fail()` is reported as is, and
-  `pytest.skip(..., allow_module_level=True)` skips those modules or classes (all
-  their tests).
+  the module's other tests are still collected (pytest runs them with
+  `--continue-on-collection-errors`; by default a collection error stops the run).
+  `pytest.fail()` is reported as is, and `pytest.skip(..., allow_module_level=True)`
+  skips those modules or classes (all their tests).
 - When a factory fails with `ctx` None while a `conftest.py` in another folder
   implements the hook, the error says where: `ctx is None for tests/b: no
   pytest_strategies_context implementation in this folder or above answered
@@ -941,8 +945,9 @@ class VectorInfo:
   `pytest-strategies: seed reused from the failed run for --lf (--rng-seed
   overrides)`, ending with `; recorded with --nsamples=13` when the recorded
   options differ (they are not applied; `-o empty_parameter_set_mark` is not
-  compared). Failed rows recorded under another seed
-  are deselected (pytest keeps them in its last-failed set) and the run ends with
+  compared, and is named only with other recorded options). Failed rows recorded
+  under another seed are deselected (pytest keeps them in its last-failed set) and
+  the run ends with
   `pytest-strategies: deselected 2 failed rows recorded under another seed; run
   them with:` and `  pytest --lf --rng-seed=S1 tests/a/test_dma.py  # 2 rows`
   (their files, or their node IDs when a file holds other failed tests). A row

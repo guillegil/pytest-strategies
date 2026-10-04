@@ -54,6 +54,7 @@ from ._registry import (
     Registration,
     _contains,
     _describe_factory,
+    _factory_origin,
     display_path,
     factory_source,
     matches_pattern,
@@ -887,6 +888,9 @@ class PytestStrategyPlugin:
         stream from run to run. So a registration in another folder of the
         rootdir, or one made because another test module or another folder's
         strategy file was imported, neither names it nor hides one of its names.
+        A copy of the factory, made by its file imported again under another
+        module name, counts as the factory (``Registration.holds``): its
+        registration replaces the factory's own in some runs only.
         """
         directory = _file_key(test_path.parent)
         chain: set[str] = set()
@@ -906,6 +910,7 @@ class PytestStrategyPlugin:
         # The test holds the factory, so the file that defines it ran
         source = factory_source(factory)[0]
         own = _file_key(source) if source else None
+        origin = _factory_origin(factory)
 
         def depth(registration: Registration) -> int:
             # The deepest folder on the test's path whose file's register() call made
@@ -926,7 +931,7 @@ class PytestStrategyPlugin:
         for name in registry.names_of(factory):
             found = registry.nearest(name, directory, lambda r: depth(r) >= 0)
             if found is not None:
-                if found.factory is factory:
+                if found.holds(factory, origin):
                     candidates.append((-depth(found), name))
                 continue
             # No folder on the test's path registers the name: as for a name, the
@@ -939,7 +944,7 @@ class PytestStrategyPlugin:
                 and (not _inside(r, rootpath) or _installed(r))
                 and depth(r) >= 0
             ]
-            if len(elsewhere) == 1 and elsewhere[0].factory is factory:
+            if len(elsewhere) == 1 and elsewhere[0].holds(factory, origin):
                 outside.append(name)
         if candidates:
             # A factory's registrations are all in the folder of its file. Of its

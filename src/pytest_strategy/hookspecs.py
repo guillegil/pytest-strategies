@@ -110,10 +110,12 @@ def pytest_strategies_context(config: pytest.Config) -> Any:
     whose folder asks it before any other implementation answers, and that uses
     a factory with ``ctx``, with a message naming the strategy, so the module's
     other tests do not run either. For a method of a test class, the class fails
-    collection instead, and the module's other tests run. ``pytest.fail()`` is
-    reported as it is, and ``pytest.skip(..., allow_module_level=True)`` skips
-    those modules or classes. ``strategies_ctx`` and ``get_context()`` raise it
-    again as it is, so a skip there skips the tests that use them.
+    collection instead, and the module's other tests are still collected (pytest
+    runs them with ``--continue-on-collection-errors``; by default a collection
+    error stops the run). ``pytest.fail()`` is reported as it is, and
+    ``pytest.skip(..., allow_module_level=True)`` skips those modules or classes.
+    ``strategies_ctx`` and ``get_context()`` raise it again as it is, so a skip
+    there skips the tests that use them.
 
     Args:
         config: The pytest config object.

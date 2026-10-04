@@ -85,12 +85,15 @@ def strategy(name: str | Factory, *, validate_signature: bool = True) -> Callabl
 
     A test that passes a registered factory gets the same values and IDs as with
     its name when the registration is in the test's folder or above: the
-    factory's file is there, and the ``register`` call runs when that file, the
-    test module, or a strategy file or ``conftest.py`` there is imported. So does
-    a factory of an installed package or a plugin registered by its own file or a
-    plugin module, when no folder on the test's path registers the name.
-    Otherwise the test's values are keyed by the function's qualified name, and
-    are the same in every run.
+    factory's file is there, and the ``register`` call is in that file, the test
+    module, or a strategy file or ``conftest.py`` there (a call in a helper
+    function counts for the file whose import called it; a call in a module these
+    files import does not). So does a factory of an installed package or a plugin
+    (outside the rootdir or in a ``site-packages`` folder), registered by its own
+    file or a plugin module, when no folder on the test's path registers the
+    name. Otherwise the test's values are keyed by the function's qualified name,
+    and are the same in every run: also for a plugin inside the rootdir, and for
+    a ``register`` call made in a hook such as ``pytest_configure``.
 
     Usage::
 

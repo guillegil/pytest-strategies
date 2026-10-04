@@ -542,7 +542,10 @@ def differences(
     it off in their strategy or everywhere. The run's own items are not compared:
     which strategies a bare name reaches is known only once the tests are collected.
     Nor is a ``-o empty_parameter_set_mark`` override, which decides no row's
-    values (``_deciding``).
+    values (``_deciding``); but one the rows were recorded with, and the run does
+    not give, is named with the other recorded options it names: a recorded
+    ``--vector-name`` may need it to collect the rows' modules, as under an ini
+    file's ``empty_parameter_set_mark = fail_at_collect``.
 
     Args:
         rows: The reused rows' entries, newest last
@@ -554,15 +557,22 @@ def differences(
         where: Write a path relative to the rootdir as the folder pytest was
             started in gives it, for the ``-c`` and ``--rootdir`` named
     """
-    recorded = _deciding(_split(rows[-1].options)[0])
+    options = _split(rows[-1].options)[0]
+    recorded = _deciding(options)
+    run = _split(current)[0]
     off = dict.fromkeys(item for row in rows for item in _split(row.options)[1])
-    units = _matched(recorded, _deciding(_split(current)[0]), own)
+    units = _matched(recorded, _deciding(run), own)
     missing = [
         (strategy, name)
         for strategy, name in off
         if (strategy, name) not in current_off and (None, name) not in current_off
     ]
     extra = [unit for unit in recorded if unit not in units]
+    if extra or missing:
+        # With the recorded empty_parameter_set_mark, in its place
+        extra = [
+            unit for unit in options if unit in extra or (unit not in recorded and unit not in run)
+        ]
     if missing:
         extra.append(_off_unit(missing))
     absent = [unit for unit in units if unit not in recorded]

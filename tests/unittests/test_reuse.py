@@ -673,6 +673,38 @@ class TestDifferences:
 
         assert differences(rows, ["--nsamples=13", *current], ()) is None
 
+    @pytest.mark.parametrize(
+        ("current", "expected"),
+        [
+            ([], "with --vector-mode=test -o empty_parameter_set_mark=skip"),
+            (["-o", "empty_parameter_set_mark=skip"], "with --vector-mode=test"),
+            (
+                ["-o", "empty_parameter_set_mark=xfail"],
+                "with --vector-mode=test -o empty_parameter_set_mark=skip",
+            ),
+        ],
+        ids=["not_given", "given", "another_given"],
+    )
+    def test_the_recorded_empty_parameter_set_mark_is_named_with_other_options(
+        self, current, expected
+    ):
+        # A --vector-* option may need the mark to collect the rows' modules
+        rows = self.rows(["--vector-mode=test", "-o", "empty_parameter_set_mark=skip"])
+
+        assert differences(rows, current, ()) == expected
+
+    def test_the_recorded_empty_parameter_set_mark_is_named_with_a_constraint(self):
+        rows = self.rows(["-o", "empty_parameter_set_mark=skip", "--strategy-constraint-off=dma:c"])
+
+        assert differences(rows, [], ()) == (
+            "with -o empty_parameter_set_mark=skip --strategy-constraint-off=dma:c"
+        )
+
+    def test_the_recorded_empty_parameter_set_mark_is_not_named_with_the_run_s_options(self):
+        rows = self.rows(["-o", "empty_parameter_set_mark=skip"])
+
+        assert differences(rows, ["--nsamples=13"], ()) == "without --nsamples=13"
+
     def test_the_run_s_options_that_were_not_recorded(self):
         assert differences(self.rows([]), ["--vector-mode=test"], ()) == (
             "without --vector-mode=test"

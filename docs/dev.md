@@ -550,8 +550,12 @@ def test_coordinates(x, y):
    `Registration.callers` holds the files of the calls: each is the module
    whose top-level code ran the call (`caller_file()`), so a helper
    function's call counts for the module whose import called it, and a call
-   in a hook or a fixture for none of these files. So the name does not
-   depend on the other strategy files or test modules a run imported.
+   in a hook or a fixture for none of these files. A file imported again
+   under another module name (`tests.factories` and `factories`) makes a copy
+   of the factory, whose `register` call replaces the factory's registration
+   without a clash: `Registration.holds()` counts a copy (the same origin,
+   bound to the same name in the other module) as the factory. So the name does
+   not depend on the other strategy files or test modules a run imported.
 4. `build_parametrization()` calls the factory once through
    `_factory.call_factory()`, on the factory's own stream (see
    [Reproducibility](#reproducibility)). The rows draw from streams keyed by
@@ -1355,15 +1359,17 @@ file the recording run found is not known, while a `--rootdir` the run gives
 agrees with rows recorded without it, as they were recorded under the rootdir
 whose cache holds them). Both leave a `-o empty_parameter_set_mark` unit out of
 the comparison (`_deciding()`): it decides no row's values, and the commands
-keep it. The makereport wrapper takes a passing row's options
-(`generation_options(..., start=rootpath)`) from a passing call report, only for
-the items in `SessionState.recorded`, the node IDs of the map's entries under the
-run's seed, and keeps them in the item's stash until the teardown report: they
-go to `SessionState.passed_rows` only when the teardown did not fail, as pytest's
-own `--lf` keeps a test whose teardown failed in its last-failed set. A
-pytest-xdist worker gets `recorded`, `deselect` and `reused` through
-`workerinput` and sends its passed rows' options and the reused rows it
-collected through `workeroutput`, which `pytest_testnodedown` keeps in
+keep it. `differences()` still names a recorded one the run does not give
+when it names other recorded options, which may need it to collect the rows'
+modules (`--vector-name` under `fail_at_collect`). The makereport wrapper takes
+a passing row's options (`generation_options(..., start=rootpath)`) from a
+passing call report, only for the items in `SessionState.recorded`, the node IDs
+of the map's entries under the run's seed, and keeps them in the item's stash
+until the teardown report: they go to `SessionState.passed_rows` only when the
+teardown did not fail, as pytest's own `--lf` keeps a test whose teardown failed
+in its last-failed set. A pytest-xdist worker gets `recorded`, `deselect` and
+`reused` through `workerinput` and sends its passed rows' options and the reused
+rows it collected through `workeroutput`, which `pytest_testnodedown` keeps in
 `SessionState.worker_reuse`. The map is written only when it changed, so a run
 that never failed creates nothing. With `--lf`, `--sw` or `--sw-skip` (not
 `--sw-reset`) and no seed given, the tryfirst `pytest_configure` calls

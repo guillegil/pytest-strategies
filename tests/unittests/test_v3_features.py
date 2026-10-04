@@ -187,6 +187,82 @@ class TestScopedRegistry:
         assert found is not None and found.factory is top_ns["f"]
         assert registry.nearest("v3_accept", directory, lambda r: False) is None
 
+    def run_module(self, monkeypatch, name, source):
+        """Run ``source`` as the module ``name`` of the file /virtual/tests/factories.py."""
+        import sys
+        import types
+
+        module = types.ModuleType(name)
+        module.__file__ = "/virtual/tests/factories.py"
+        monkeypatch.setitem(sys.modules, name, module)
+        exec(compile(source, module.__file__, "exec"), vars(module))
+        return module
+
+    def test_a_file_run_again_in_another_module_registers_the_same_factory(
+        self, clean_registry, monkeypatch
+    ):
+        # tests/factories.py imported as tests.factories and as factories: the
+        # second module's register() calls replace the first's registrations
+        # without a clash, and still hold the first module's factories, which
+        # are bound to the same names
+        source = (
+            "import functools\n\n"
+            "from pytest_strategy import register\n\n"
+            "@register('v3_copy')\n"
+            "def burst(nsamples):\n    pass\n\n"
+            "def make(n):\n    def f(nsamples):\n        pass\n\n    return f\n\n"
+            "class Maker:\n    def __call__(self, nsamples):\n        pass\n\n"
+            "closure = register('v3_copy_closure')(make(1))\n"
+            "half = register('v3_copy_partial')(functools.partial(make, 2))\n"
+            "maker = register('v3_copy_object')(Maker())\n"
+        )
+        first = self.run_module(monkeypatch, "tests.factories", source)
+        second = self.run_module(monkeypatch, "factories", source)
+
+        (registration,) = registry.registrations("v3_copy")
+        assert registration.factory is second.burst
+        assert registration.holds(first.burst)
+        assert registry.names_of(first.burst) == ["v3_copy"]
+        assert registry.names_of(first.closure) == ["v3_copy_closure"]
+        assert registry.names_of(first.half) == ["v3_copy_partial"]
+        assert registry.names_of(first.maker) == ["v3_copy_object"]
+        # Made by neither module's statements
+        assert registry.names_of(first.make(1)) == []
+        assert registry.names_of(first.Maker()) == []
+
+    def test_factories_one_module_builds_from_one_definition_stay_apart(
+        self, clean_registry, monkeypatch
+    ):
+        source = (
+            "import functools\n\n"
+            "def make(n):\n    def f(nsamples):\n        pass\n\n    return f\n\n"
+            "def g(nsamples, n):\n    pass\n\n"
+            "class Maker:\n    def __call__(self, nsamples):\n        pass\n\n"
+            "closures = make(1), make(2)\n"
+            "partials = functools.partial(g, n=1), functools.partial(g, n=2)\n"
+            "objects = Maker(), Maker()\n"
+        )
+        module = self.run_module(monkeypatch, "tests.factories", source)
+        pairs = {
+            "v3_closure": module.closures,
+            "v3_partial": module.partials,
+            "v3_object": module.objects,
+        }
+        for name, (registered, _) in pairs.items():
+            registry.add(name, registered)
+
+        for name, (registered, other) in pairs.items():
+            assert registry.names_of(registered) == [name]
+            assert registry.names_of(other) == []
+
+    def test_code_without_a_file_run_twice_registers_two_factories(self, clean_registry):
+        first, second = {}, {}
+        for namespace in (first, second):
+            exec(compile("def f(nsamples): pass", "<string>", "exec"), namespace)
+        registry.add("v3_no_file", first["f"])
+
+        assert registry.names_of(second["f"]) == []
+
 
 class TestErrorMessages:
     def test_rng_value_error_is_a_value_error(self):
