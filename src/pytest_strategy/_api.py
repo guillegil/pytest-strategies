@@ -50,8 +50,8 @@ def register(name: str) -> Callable[[_F], _F]:
         raise TypeError(f"register() takes a strategy name, got {name!r}")
 
     def decorate(fn: _F) -> _F:
-        # The module whose import made the call, for the name of a factory passed
-        # by object (plugin._factory_name)
+        # The module whose import made the call: a factory passed by object is
+        # named by its own file's registrations (StrategyRegistry.own_names)
         replaced = registry.add(name, fn, caller_file(sys._getframe(1)))
         if replaced is not None and replaced.origin != registry.registrations(name)[-1].origin:
             message = (
@@ -83,21 +83,14 @@ def strategy(name: str | Factory, *, validate_signature: bool = True) -> Callabl
     parameter annotated with a dataclass whose fields are those arguments; any
     other parameter is a fixture.
 
-    A test that passes a registered factory gets the same values and IDs as with
-    a name it is registered under when every run that collects the test makes
-    that registration first: the ``register`` call is in the factory's own file,
-    the test module, a strategy file or ``conftest.py`` of the test's folder or
-    above, or a module that every run loads as a plugin (an entry point, ``-p``
-    in ``addopts`` or ``PYTEST_ADDOPTS``, ``PYTEST_PLUGINS``, or
-    ``pytest_plugins`` in such a ``conftest.py``). A call in a
-    helper function counts for the file whose import called it; a call in a
-    module these files import, in a plugin that only ``-p`` on the command line
-    loads, or in a hook such as ``pytest_configure`` does not. A folder on the
-    test's path that registers the name for another factory, or a second such
-    registration elsewhere, hides it. Where the factory's file is does not
-    matter: another folder, or a package, installed or checked out. Otherwise the
-    test's values are keyed by the function's qualified name, and are the same
-    in every run.
+    A test that passes the factory itself is keyed by a name that the factory's
+    own file (the module that defines it) registers it under, the first in
+    alphabetical order: it gets the values and IDs that ``@strategy("name")``
+    gives where that name finds this factory. Without such a name, it is keyed
+    by the function's (or the class's) qualified name. A registration made by
+    any other file, such as an alias in another folder's strategy file, a
+    ``conftest.py``, a test module or a plugin, does not name it, so the name is
+    the same in every run that collects the test.
 
     Usage::
 

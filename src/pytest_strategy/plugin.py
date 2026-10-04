@@ -23,12 +23,10 @@ import importlib.util
 import itertools
 import os
 import re
-import shlex
 import sys
 import traceback
 from collections.abc import (
     Callable,
-    Collection,
     Generator,
     Iterable,
     Iterator,
@@ -55,7 +53,6 @@ from ._registry import (
     Registration,
     _contains,
     _describe_factory,
-    _factory_origin,
     display_path,
     factory_source,
     matches_pattern,
@@ -74,10 +71,6 @@ _PACKAGE_DIR = os.path.normcase(os.path.realpath(os.path.dirname(__file__)))
 # A test's record parameters that its strategies, in named mode, leave to fixtures:
 # (parameter, error) pairs, checked once the test is parametrized
 _UNFILLED_RECORDS = pytest.StashKey[list[tuple[str, str]]]()
-
-# The files of the modules that every run of the project loads as plugins
-# (_every_run_plugins), noted before pytest loads the initial conftest.py files
-_EVERY_RUN_PLUGINS = pytest.StashKey[frozenset[str]]()
 
 # The function of the fixture pytest makes for each argument of a parametrization
 # (private API; None if a pytest moves it): it returns the argument's value and runs
@@ -307,8 +300,7 @@ class PytestStrategyPlugin:
         first, with its own random stream: values a strategy file draws when it is
         imported do not depend on which test modules were collected before.
         """
-        state = runtime.current
-        if isinstance(collector, pytest.Module) and state is not None:
+        if isinstance(collector, pytest.Module) and runtime.current is not None:
             self._load_directories(collector.config, collector.path.parent)
 
     @pytest.hookimpl(wrapper=True)
@@ -840,7 +832,7 @@ class PytestStrategyPlugin:
                 directories that are not above the test register it
         """
         if not isinstance(ref, str):
-            return self._factory_name(ref, test_path, config), ref
+            return self._factory_name(ref), ref
 
         directory = _file_key(test_path.parent)
         if config is not None:
@@ -867,83 +859,32 @@ class PytestStrategyPlugin:
             raise ValueError(_ambiguous_message(ref, test_path, candidates))
         raise ValueError(strategy_not_found_message(ref, directory, rootpath))
 
-    def _factory_name(
-        self, factory: Callable[..., Any], test_path: Path, config: Config | None
-    ) -> str:
+    def _factory_name(self, factory: Callable[..., Any]) -> str:
         """
         Name a factory that a test passes by object, for messages and the test's
         random stream.
 
-        The name is one that ``@strategy("name")`` in the test's folder finds the
-        factory under, as for a name: the nearest registration on the test's
-        path, or else the only one elsewhere, wherever the factory's file is (in
-        another folder, or in a package, installed or checked out). Only the
-        registrations that every run collecting the test makes before the test's
-        strategy is resolved count (``_made_with``), those of other factories
-        under the same name too: the test then gets the values and IDs of that
-        name in every run, its rerun and ``--lf`` included. Otherwise it is the
-        function's (or the class's) qualified name: never a repr with a memory
-        address, which would change the test's random stream from run to run. So
-        a registration made because another test module or another folder's
-        strategy file was imported neither names it nor hides one of its names.
-        A copy of the factory, made by its file imported again under another
-        module name, counts as the factory (``Registration.holds``): its
-        registration replaces the factory's own in some runs only.
+        The name is one that the factory's own file registers it under: a
+        registration whose ``register()`` call the module defining the factory
+        made, at its import (``StrategyRegistry.own_names``), with this very
+        object, or if there is none, with an object of its origin (a copy made by
+        the file imported again under another module name, or the function that
+        a ``functools.partial`` wraps). Of several, the first in alphabetical
+        order. Otherwise it is the function's (or the class's) qualified name:
+        never a repr with a memory address, which would change the test's random
+        stream from run to run.
+
+        So the name is the same in every run that collects the test, its rerun
+        and ``--lf`` included: the test holds the factory, so the module that
+        defines it has run, and with it its own module-level ``register()``
+        calls. A registration made by any other file (an alias in another
+        folder's strategy file, a ``conftest.py``, a test module, a plugin, a
+        hook) never names it, since only some runs may make it, and neither does
+        another factory's registration of the name in the test's folder.
         """
-        directory = _file_key(test_path.parent)
-        chain: set[str] = set()
-        plugins: frozenset[str] = frozenset()
-        if config is not None:
-            # As for a name: the strategy files of the test's folder and above
-            self._load_directories(config, test_path.parent)
-            chain = {
-                os.path.normcase(folder)
-                for folder in self._directories_up(config, os.path.realpath(test_path.parent))
-            }
-            plugins = _plugin_files(config, directory)
-        state = runtime.current
-        loaded = state.loaded_files if state is not None else set()
-        module = _file_key(test_path)
-        # The test holds the factory, so the file that defines it ran
-        source = factory_source(factory)[0]
-        own = _file_key(source) if source else None
-        origin = _factory_origin(factory)
-
-        def depth(registration: Registration) -> int:
-            # The deepest folder on the test's path whose file's register() call made
-            # the registration in every run (the longest path is the deepest), 0 for
-            # a call elsewhere (the factory's own file in another folder, a plugin's),
-            # -1 for none
-            return max(
-                (
-                    len(folder) if _contains(folder, directory) else 0
-                    for caller in registration.callers
-                    if _made_with(caller, own, module, directory, chain, loaded, plugins)
-                    for folder in [os.path.dirname(caller)]
-                ),
-                default=-1,
-            )
-
-        candidates = []
-        for name in registry.names_of(factory):
-            found = registry.nearest(name, directory, lambda r: depth(r) >= 0)
-            if found is None:
-                # No folder on the test's path registers the name: as for a name, the
-                # only registration elsewhere (another folder, a package)
-                elsewhere = [
-                    r
-                    for r in registry.registrations(name)
-                    if not _on_path(r, directory) and depth(r) >= 0
-                ]
-                found = elsewhere[0] if len(elsewhere) == 1 else None
-            if found is not None and found.holds(factory, origin):
-                candidates.append((-depth(found), name))
-        if candidates:
-            # A factory's registrations are all in the folder of its file. Of its
-            # names, the one whose register() call is in the deepest folder of the
-            # test's path wins, then the first in alphabetical order, whatever order
-            # the files ran in.
-            return min(candidates)[1]
+        names = registry.own_names(factory)
+        if names:
+            return names[0]
         return factory_source(factory)[1] or type(factory).__qualname__
 
     def _load_directories(self, config: Config, folder: Path) -> None:
@@ -1818,143 +1759,6 @@ def _user_traceback(error: BaseException) -> str:
 def _on_path(registration: Registration, directory: str) -> bool:
     """Return True if a registration is in ``directory`` or a directory above it."""
     return registration.directory is not None and _contains(registration.directory, directory)
-
-
-def _made_with(
-    caller: str,
-    own: str | None,
-    module: str,
-    directory: str,
-    chain: Collection[str],
-    loaded: Collection[str],
-    plugins: Collection[str],
-) -> bool:
-    """
-    Whether every run that collects the test module ``module`` makes a
-    registration with the ``register()`` call of the file ``caller`` (the module
-    whose import ran it, ``caller_file``) before the test's strategy is resolved:
-    a call in the file ``own`` that defines the factory the test passes (the test
-    holds the factory, so that file ran), in the test module, in a module that
-    every run loads as a plugin before it collects the test (in ``plugins``, see
-    ``_plugin_files``), in a ``conftest.py`` in the test's folder ``directory`` or
-    above (pytest loads them first), or in a strategy file that the plugin loads
-    with the test's folders (in ``chain`` and in ``loaded``). A call in another
-    file (another factory's file, another folder's strategy file or
-    ``conftest.py``, another test module, a helper module) runs only in the runs
-    that import that file. All paths are ``_file_key``s.
-    """
-    if caller in (own, module) or caller in plugins:
-        return True
-    folder = os.path.dirname(caller)
-    if os.path.basename(caller) == "conftest.py":
-        return _contains(folder, directory)
-    return folder in chain and caller in loaded
-
-
-def _plugin_files(config: Config, directory: str) -> frozenset[str]:
-    """
-    Return the ``_file_key``s of the modules that every run collecting a test in
-    ``directory`` loads as plugins before it collects the test: those that every
-    run of the project loads (``_every_run_plugins``), and those that the
-    ``pytest_plugins`` of a ``conftest.py`` in ``directory`` or above load. pytest
-    loads a ``conftest.py`` of another folder only in the runs whose paths reach
-    it, and a test module's ``pytest_plugins`` only in the runs that collect it.
-    ``conftest.py`` files are left out.
-    """
-    conftests = [
-        plugin
-        for plugin in config.pluginmanager.get_plugins()
-        if isinstance(plugin, ModuleType)
-        and isinstance(file := getattr(plugin, "__file__", None), str)
-        and os.path.basename(file) == "conftest.py"
-        and _contains(os.path.dirname(_file_key(file)), directory)
-    ]
-    found = _module_files(_requested_plugins(config.pluginmanager, conftests))
-    return config.stash.get(_EVERY_RUN_PLUGINS, frozenset()) | found
-
-
-def _every_run_plugins(config: Config) -> frozenset[str]:
-    """
-    Return the ``_file_key``s of the modules registered as plugins before pytest
-    loads the initial ``conftest.py`` files (which depend on the run's paths), as
-    every run of the project loads them: those of entry points, of ``-p`` in
-    ``addopts`` or ``PYTEST_ADDOPTS``, of ``PYTEST_PLUGINS``, and the modules their
-    ``pytest_plugins`` load. A module that only a ``-p`` given on the command line
-    loads, and what only its ``pytest_plugins`` load, are left out: the printed
-    rerun command does not carry the option. A module of an entry point stays, as
-    pytest loads it in every run.
-    """
-    manager = config.pluginmanager
-    every = _plugin_options(shlex.split(os.environ.get("PYTEST_ADDOPTS", "")))
-    every |= _plugin_options(config.getini("addopts"))
-    entry_points = {id(plugin) for plugin, _ in manager.list_plugin_distinfo()}
-    alone = [
-        plugin
-        for name in _plugin_options(config.invocation_params.args) - every
-        if isinstance(plugin := manager.get_plugin(name), ModuleType)
-        and id(plugin) not in entry_points
-    ]
-    dropped = _requested_plugins(manager, alone)
-    modules = [
-        plugin
-        for plugin in manager.get_plugins()
-        if isinstance(plugin, ModuleType) and plugin not in dropped
-    ]
-    # A module that a kept plugin's pytest_plugins loads stays, dropped or not
-    return _module_files(_requested_plugins(manager, modules))
-
-
-def _plugin_options(args: Iterable[object]) -> set[str]:
-    """
-    Return the names of the plugins that ``-p NAME`` or ``-pNAME`` options in
-    ``args`` load, as pytest reads them (``-p no:NAME`` blocks one instead).
-    """
-    names = set()
-    items = iter(args)
-    for arg in items:
-        if arg == "-p":
-            following = next(items, None)
-            name = following if isinstance(following, str) else ""
-        elif isinstance(arg, str) and arg.startswith("-p"):
-            name = arg[2:]
-        else:
-            continue
-        name = name.strip()
-        if name and not name.startswith("no:"):
-            names.add(name)
-    return names
-
-
-def _requested_plugins(manager: Any, modules: Iterable[ModuleType]) -> set[ModuleType]:
-    """
-    Return ``modules``, the plugin modules their ``pytest_plugins`` load, and those
-    that these load in turn, as pytest registered them (by the names listed).
-    """
-    found: set[ModuleType] = set()
-    pending = list(modules)
-    while pending:
-        module = pending.pop()
-        if module in found:
-            continue
-        found.add(module)
-        spec = getattr(module, "pytest_plugins", ())
-        names = spec.split(",") if isinstance(spec, str) else spec
-        if isinstance(names, (list, tuple)):
-            for name in names:
-                plugin = manager.get_plugin(name) if isinstance(name, str) else None
-                if isinstance(plugin, ModuleType):
-                    pending.append(plugin)
-    return found
-
-
-def _module_files(modules: Iterable[ModuleType]) -> frozenset[str]:
-    """Return the ``_file_key``s of the modules' files, ``conftest.py`` files left out."""
-    files = set()
-    for module in modules:
-        file = getattr(module, "__file__", None)
-        if isinstance(file, str) and os.path.basename(file) != "conftest.py":
-            files.add(_file_key(file))
-    return frozenset(files)
 
 
 def _inside(registration: Registration, rootpath: str | None) -> bool:
@@ -3194,18 +2998,6 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         type="string",
         default="names",
     )
-
-
-@pytest.hookimpl(tryfirst=True)
-def pytest_load_initial_conftests(early_config: Config) -> None:
-    """
-    Note the modules that every run of the project loads as plugins
-    (``_every_run_plugins``), before pytest loads the initial ``conftest.py``
-    files: which of those it loads, and the plugins their ``pytest_plugins``
-    load, depends on the run's paths. A register() call in such a module names a
-    factory a test passes by object (``_made_with``).
-    """
-    early_config.stash[_EVERY_RUN_PLUGINS] = _every_run_plugins(early_config)
 
 
 @pytest.hookimpl(tryfirst=True, specname="pytest_configure")

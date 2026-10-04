@@ -30,8 +30,8 @@ class StrategyOptions:
 
     Attributes:
         strategy: The name the strategy was resolved under, as in the ``-v``
-            summary: a registered name, or the qualified name of a factory
-            passed by object that no registration names for the test (see
+            summary: a registered name, or for a factory passed by object, a
+            name its own file registers it under, else its qualified name (see
             ``strategy()``)
         nsamples: The ``--nsamples`` value, ``"auto"``, or 10 without the option
         nsamples_source: Where ``nsamples`` came from: ``"--nsamples"`` or ``"default"``

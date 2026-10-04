@@ -71,7 +71,10 @@ run.
 A test can also take the factory itself, `@strategy(dma_burst)`: it then needs no
 registration and no name lookup, and editors can jump to it. To pass a factory from
 a strategies file, import it (in a package folder: `from .strategies import
-dma_burst`); the test gets the same module object the plugin loaded.
+dma_burst`); the test gets the same module object the plugin loaded. Its values are
+those of a name that the factory's own file registers it under (the first in
+alphabetical order), or else of its qualified name: an alias that another file
+registers does not count.
 
 ## How a factory is called
 

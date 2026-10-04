@@ -16,7 +16,7 @@ import inspect
 import os
 import sys
 from collections.abc import Callable, Collection, Iterable, Iterator, MutableMapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path, PurePath
 from types import FrameType
 from typing import Any
@@ -416,82 +416,16 @@ class Registration:
     # Normalized real path of the directory of the file that defines the factory,
     # or None when that file is unknown
     directory: str | None
-    # The file whose register() call made it, as a normalized real path: the
-    # module whose top-level code ran the call (caller_file); none for code
-    # without a file
-    calls: frozenset[str] = frozenset()
-    # The registration of the same origin it replaced, if any (see callers)
-    replaced: Registration | None = field(default=None, repr=False, compare=False)
+    # The register() calls that made it, oldest first: each one's file, the
+    # module whose top-level code ran the call (caller_file), and the object it
+    # registered. A call made by code without a file is left out. A registration
+    # of the same origin that it replaced passes its calls on (StrategyRegistry.add)
+    calls: tuple[tuple[str, Factory], ...] = ()
 
     @property
     def file(self) -> str | None:
         """Normalized real path of the file that defines the factory, if known."""
         return self.origin[0]
-
-    @property
-    def callers(self) -> frozenset[str]:
-        """
-        Normalized real paths of the files whose register() calls made the
-        registration: its own call's file, and those of the registration it
-        replaced when that one holds the same factory (``holds``). So the same
-        function registered again under the name in its folder, by another file,
-        adds that file, and so does a copy of it, made by its file run again as
-        another module. That is checked here, not when the copy registers: the
-        module binds a decorated function's name after the decorator's call.
-        """
-        callers = self.calls
-        replaced = self.replaced
-        if replaced is not None and replaced.holds(self.factory, self.origin):
-            callers |= replaced.callers
-        return callers
-
-    def holds(self, factory: Factory, origin: Origin | None = None) -> bool:
-        """
-        Whether the registration is of ``factory``: the same object, or its copy
-        made by its file run again as another module (``tests/factories.py``
-        imported as ``tests.factories`` and as ``factories``), whose
-        ``register()`` call replaced it without a clash. A copy has the same
-        origin and is bound to the same name in the other module (``burst``).
-        Other factories of one origin (closures, partials, objects of one class)
-        stay apart.
-
-        Args:
-            factory: The factory
-            origin: Its ``_factory_origin``, computed when not given
-        """
-        if self.factory is factory:
-            return True
-        file = self.origin[0]
-        if not file or os.path.basename(file).startswith("<"):
-            # No file (exec'd text): nothing tells two runs of it apart
-            return False
-        if self.origin != (origin or _factory_origin(factory)):
-            return False
-        mine, theirs = _namespace(self.factory), _namespace(factory)
-        if mine is None or theirs is None or mine is theirs:
-            return False
-        return any(
-            value is self.factory and theirs.get(name) is factory
-            for name, value in list(mine.items())
-        )
-
-
-def _namespace(fn: Factory) -> dict[str, Any] | None:
-    """
-    The namespace of the module that defined a factory, through wrappers and
-    partials: its function's globals, or its class's module's. None if unknown.
-    """
-    fn = _unwrap(fn)
-    while isinstance(fn, functools.partial):
-        fn = _unwrap(fn.func)
-    if getattr(fn, "__code__", None) is not None:
-        namespace = getattr(fn, "__globals__", None)
-    else:
-        cls = fn if isinstance(fn, type) else type(fn)
-        namespace = getattr(
-            sys.modules.get(getattr(cls, "__module__", None) or ""), "__dict__", None
-        )
-    return namespace if isinstance(namespace, dict) else None
 
 
 class StrategyRegistry:
@@ -526,10 +460,13 @@ class StrategyRegistry:
             if existing.directory == directory:
                 replaced = entries.pop(index)
                 break
-        calls = frozenset([caller] if caller else [])
-        # A registration of the same origin may be of a copy (Registration.callers)
-        earlier = replaced if replaced is not None and replaced.origin == origin else None
-        entries.append(Registration(name, factory, origin, directory, calls, earlier))
+        calls: tuple[tuple[str, Factory], ...] = ((caller, factory),) if caller else ()
+        if replaced is not None and replaced.origin == origin:
+            # The same factory registered again (by another file, or as a copy by
+            # its own file imported again under another module name), or another
+            # object of its origin: the calls that made the name stay (own_names)
+            calls = replaced.calls + calls
+        entries.append(Registration(name, factory, origin, directory, calls))
         return replaced
 
     def registrations(self, name: str) -> list[Registration]:
@@ -546,12 +483,7 @@ class StrategyRegistry:
     def __len__(self) -> int:
         return len(self._entries)
 
-    def nearest(
-        self,
-        name: str,
-        directory: str | None,
-        accept: Callable[[Registration], bool] | None = None,
-    ) -> Registration | None:
+    def nearest(self, name: str, directory: str | None) -> Registration | None:
         """
         Return the registration of ``name`` in ``directory`` or the nearest directory
         above it, or None if there is none on that path.
@@ -559,7 +491,6 @@ class StrategyRegistry:
         Args:
             name: Strategy name
             directory: Normalized real path of the test's directory
-            accept: If given, only the registrations it accepts count
         """
         if directory is None:
             return None
@@ -567,20 +498,40 @@ class StrategyRegistry:
         for registration in self._entries.get(name, ()):
             if registration.directory is None or not _contains(registration.directory, directory):
                 continue
-            if accept is not None and not accept(registration):
-                continue
             if best is None or len(registration.directory) > len(best.directory or ""):
                 best = registration
         return best
 
-    def names_of(self, factory: Factory) -> list[str]:
-        """Return the names ``factory`` is registered under (``Registration.holds``)."""
+    def own_names(self, factory: Factory) -> list[str]:
+        """
+        Return the names that the file defining ``factory`` registers it under,
+        sorted: the names whose registrations hold a ``register()`` call that the
+        file's import made (``Registration.calls``) with ``factory`` itself, or if
+        there are none, with an object of its origin (``_factory_origin``), such
+        as the function that a ``functools.partial`` made elsewhere wraps. The file
+        is where :func:`factory_source` finds the factory: a ``functools.wraps``
+        wrapper or a ``functools.partial`` counts as the function it wraps, an
+        object as its class.
+
+        A registration that replaces one of the same origin in its folder keeps
+        the replaced one's calls: another file registering the factory again
+        under one of its names, or the file imported again under another module
+        name (which registers a copy), takes no name away.
+        """
         origin = _factory_origin(factory)
-        return [
-            name
-            for name, entries in self._entries.items()
-            if any(registration.holds(factory, origin) for registration in entries)
-        ]
+        own = origin[0]
+        found: set[str] = set()
+        same_origin: set[str] = set()
+        for name, entries in self._entries.items():
+            for registration in entries:
+                if own is None or registration.origin != origin:
+                    continue
+                for file, registered in registration.calls:
+                    if file == own:
+                        same_origin.add(name)
+                        if registered is factory:
+                            found.add(name)
+        return sorted(found or same_origin)
 
     def remove(self, name: str) -> None:
         """Remove every registration of a name."""
