@@ -589,8 +589,9 @@ Each row's test ID names it; the same for every seed in the default `names` form
   `-k "not rand"` no random row. `-k "rand-3"` also matches `rand-30`: use
   `-k "test_w[rand-3]"` or the node ID. `-k` cannot contain `=`, so select a
   sequence value's rows by node ID (`pytest "tests/test_esm.py::test_esm[ch=2-rand-1]"`).
-  It cannot express whitespace, brackets or commas either, and a non-ASCII name
-  needs pytest's escaped form (`-k 'caf\xe9'`): give vectors identifier-like names.
+  A name in it can hold only letters, digits and `_ - . : / + \ [ ]` (not
+  whitespace, parentheses, commas or quotes), and a non-ASCII name needs
+  pytest's escaped form (`-k 'caf\xe9'`): give vectors identifier-like names.
 - **A node ID** with the run's seed reruns that row with the values it had, for any
   `--nsamples` that still generates it (`rand-12` with 10 rows gives pytest's "not
   found"; give the same `--nsamples`).

@@ -726,7 +726,7 @@ Each row's test ID names the row instead of showing its values, so a row keeps i
 - `-k zeros` selects the directed vector `zeros`, `-k directed` every directed row, and `-k "not rand"` leaves out the random rows.
 - `-k "rand-3"` also matches `rand-30` to `rand-39`. To select one random row, use `-k "test_write[rand-3]"` or its node ID.
 - `-k` cannot contain `=` (pytest's grammar), so select the rows of a sequence value by node ID: `pytest "tests/test_esm.py::test_esm[ch=2-rand-1]"`.
-- Directed and test vector names can be any non-empty string, but `-k` cannot express whitespace, `=`, brackets or commas, and a non-ASCII name needs pytest's escaped form (`-k 'caf\xe9'`): identifier-like names are easiest to select.
+- Directed and test vector names can be any non-empty string, but a name in `-k` can hold only letters, digits and `_ - . : / + \ [ ]` (not whitespace, `=`, parentheses, commas or quotes), and a non-ASCII name needs pytest's escaped form (`-k 'caf\xe9'`): identifier-like names are easiest to select.
 
 **Rerunning one row.** `pytest "tests/test_dma.py::test_write[rand-3]" --rng-seed=S` runs that row with the values it had in the run with seed `S`, for any `--nsamples` that still generates it: rows keep their values when there are more rows or fewer. A row the run does not generate (`rand-12` with the default of 10 rows) gives pytest's own "not found" error, so give the same `--nsamples` as the run. When a test fails, the plugin prints this command for each failed row (see [Reproducing a failure](#reproducing-a-failure)), and `--lf` reruns the failed rows with their seed (see [Rerunning failures with `--lf` and `--sw`](#rerunning-failures-with---lf-and---sw)).
 

@@ -108,8 +108,9 @@ Each row is named in the test ID, the same for every seed:
 - `-k "rand-3"` also matches `rand-30`: for one row use `-k "test_burst[rand-3]"`
   or the node ID. `-k` cannot contain `=`, so select a sequence value's rows by
   node ID: `pytest "tests/test_esm.py::test_esm[ch=2-rand-1]"`.
-- Name vectors like identifiers (`bug_1234`, `page_end`): `-k` cannot express
-  spaces, `=`, brackets or commas.
+- Name vectors like identifiers (`bug_1234`, `page_end`): a name in `-k` can
+  hold only letters, digits and `_ - . : / + \ [ ]`, not spaces, `=`,
+  parentheses or commas.
 - The IDs show no drawn values. `-o strategies_ids=values` (or the ini option)
   brings back the 3.0 IDs built from the values, which change with the seed;
   `Parameter(ids="values")` does it for one strategy, and `ids=fn` builds IDs from

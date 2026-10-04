@@ -35,7 +35,11 @@ def _read(relative_path: str) -> str:
 
 def _python_blocks(relative_path: str):
     """Yield (line, source) for every ```python block of a Markdown file."""
-    text = _read(relative_path)
+    yield from _python_blocks_of(_read(relative_path))
+
+
+def _python_blocks_of(text: str):
+    """Yield (line, source) for every ```python block of a Markdown text."""
     for match in re.finditer(r"```python\n(.*?)```", text, re.S):
         yield text[: match.start()].count("\n") + 2, match.group(1)
 
@@ -90,8 +94,12 @@ REMOVED_APIS = {
     "TestArg test_values": r"(?<![\w/-])(?:has_)?test_values\b(?![-.])",
     "TestArg always_include_directed": (
         r"TestArg\((?:[^()]|\([^()]*\))*?\balways_include_directed\b"
+        r"|\bTestArg`?(?:'s\s+`?|\.)always_include_directed\b"
     ),
 }
+
+# The decorators that register a strategy factory, whose 3.x form returned a tuple
+REGISTER_DECORATORS = {"register", "Strategy.register", "pytest_strategy.register"}
 
 # The documents D21 keeps free of removed APIs outside their upgrade sections
 SKILL_DIR = "src/pytest_strategy/skill/pytest-strategies"
@@ -129,8 +137,56 @@ def _upgrade_lines(text: str) -> list[bool]:
     return flags
 
 
+def _dotted(node: ast.expr) -> str | None:
+    """The dotted name of a name or an attribute chain (``Strategy.register``), else None."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute) and (base := _dotted(node.value)) is not None:
+        return f"{base}.{node.attr}"
+    return None
+
+
+def _returns(function: ast.FunctionDef | ast.AsyncFunctionDef):
+    """Yield the return statements of a function, not those of the functions it defines."""
+    pending = list(function.body)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, ast.Return):
+            yield node
+        elif not isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+        ):
+            pending.extend(ast.iter_child_nodes(node))
+
+
+def _tuple_factories(source: str) -> list[int]:
+    """
+    The lines of the factories a python block registers that return a tuple, the 3.x
+    ``(argnames, samples)`` idiom. A block that does not parse has none.
+    """
+    try:
+        tree = ast.parse(textwrap.dedent(source))
+    except SyntaxError:
+        return []
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(
+            _dotted(decorator.func if isinstance(decorator, ast.Call) else decorator)
+            in REGISTER_DECORATORS
+            for decorator in node.decorator_list
+        )
+        and any(isinstance(statement.value, ast.Tuple) for statement in _returns(node))
+    ]
+
+
 def _removed_api_mentions(text: str) -> list[str]:
-    """Return ``line: API`` for each removed API mentioned outside an upgrade section."""
+    """
+    Return ``line: API`` for each removed API mentioned outside an upgrade section: in
+    words, matched by ``REMOVED_APIS``, or in a python block that registers a factory
+    returning a tuple.
+    """
     in_upgrade = _upgrade_lines(text)
     found = []
     for api, pattern in REMOVED_APIS.items():
@@ -138,6 +194,11 @@ def _removed_api_mentions(text: str) -> list[str]:
             line = text.count("\n", 0, match.start())
             if not in_upgrade[line]:
                 found.append(f"{line + 1}: {api}")
+    for start, source in _python_blocks_of(text):
+        if not in_upgrade[start - 1]:
+            found.extend(
+                f"{start + line - 1}: tuple factories" for line in _tuple_factories(source)
+            )
     return sorted(found, key=lambda entry: int(entry.split(":")[0]))
 
 
@@ -186,12 +247,27 @@ class TestRemovedApisInDocs:
             "TestArg('x', value=1, test_values=[2])",
             "`has_test_values` is False",
             "TestArg(\n    'x',\n    rng_type=RNGInteger(0, 9),\n    always_include_directed=False,\n)",
+            "TestArg's `always_include_directed` option.",
+            "`TestArg.always_include_directed`",
+            '```python\n@register("legacy")\ndef legacy(nsamples):\n    return ["x"], [(1,), (2,)]\n```',
+            '```python\n@Strategy.register("legacy")\ndef legacy(nsamples):\n'
+            '    return (("a", "b"), [(1, 2)])\n```',
+            '1. Register it:\n\n    ```python\n    @register("legacy")\n    def legacy(nsamples):\n'
+            "        samples = [(1,), (2,)]\n        if nsamples:\n"
+            '            return ["x"], samples[:nsamples]\n'
+            "        return Parameter(TestArg('x', value=1))\n    ```",
         ],
     )
     def test_a_removed_api_outside_an_upgrade_section_is_found(self, snippet):
         text = f"# Guide\n\n## Usage\n\n{snippet}\n\n## Upgrading from 3.x\n\n{snippet}\n"
         found = _removed_api_mentions(text)
-        assert found and all(entry.startswith("5: ") for entry in found)
+        usage = range(5, 5 + snippet.count("\n") + 1)
+        assert found and all(int(entry.split(":")[0]) in usage for entry in found)
+
+    def test_a_tuple_factory_is_found_at_its_def_line(self):
+        text = '## Usage\n\n```python\n@register("legacy")\ndef legacy(nsamples):\n'
+        text += '    return ["x"], [(1,), (2,)]\n```\n'
+        assert _removed_api_mentions(text) == ["5: tuple factories"]
 
     @pytest.mark.parametrize(
         "snippet",
@@ -202,6 +278,14 @@ class TestRemovedApisInDocs:
             "Parameter(max_retries=50, directed_vectors={'zero': (0,)})",
             "test_vectors={'max': (9,)} and directed values",
             "A tuple of values; `request.config.getoption('--rng-seed')`",
+            "In `mixed` mode they run when `always_include_directed` is set (the default).",
+            '```python\n@register("ok")\ndef ok(nsamples):\n'
+            "    return Parameter(TestArg('x', value=1))\n```",
+            "```python\ndef pair():\n    return 1, 2\n```",
+            '```python\n@register("ok")\ndef ok(nsamples):\n    def pair():\n        return 1, 2\n'
+            "    return Parameter(TestArg('x', value=pair()))\n```",
+            '```python\n@strategy("ok")\ndef test_ok(x):\n    return x, x\n```',
+            "```python\n@register(\n```",
         ],
     )
     def test_current_apis_are_not_mistaken_for_removed_ones(self, snippet):
@@ -335,6 +419,28 @@ class TestPackagingMetadata:
             assert (
                 claimed.lower() in status.lower()
             ), f"CHANGELOG says {claimed!r}, pyproject {status!r}"
+
+    def test_the_sdist_holds_the_workflows_the_tests_read(self):
+        """
+        MANIFEST.in ships what the suite needs, but 4.0.0's tests read release.yml,
+        which it left out: run from the sdist, two of them failed.
+        """
+        sources = [*REPO_ROOT.glob("tests/**/*.py"), *REPO_ROOT.glob("benchmarks/**/*.py")]
+        read = {
+            f".github/workflows/{name}"
+            for path in sources
+            for name in re.findall(
+                r"workflows\W{1,6}([\w-]+\.ya?ml)", path.read_text(encoding="utf-8")
+            )
+        }
+        included = {
+            name
+            for line in _read("MANIFEST.in").splitlines()
+            if line.startswith("include ")
+            for name in line.split()[1:]
+        }
+        assert {".github/workflows/tests.yml", ".github/workflows/release.yml"} <= read
+        assert sorted(read - included) == []
 
     def test_license_is_the_same_everywhere(self, pyproject):
         """LICENSE said GPL-3.0, the metadata Apache-2.0 and the README MIT."""
