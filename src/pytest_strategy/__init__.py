@@ -81,7 +81,7 @@ CLI Options:
     pytest --strategy-constraint-off=addition_strategy:bounded  # Turn a constraint off
 """
 
-__version__ = "4.0.0"
+__version__ = "4.1.0"
 __author__ = "Guillermo Gil"
 __email__ = "guillegil@proton.me"
 

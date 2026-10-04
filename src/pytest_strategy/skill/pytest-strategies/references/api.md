@@ -219,6 +219,26 @@ class Parameter:
     def remove_constraint(self, name: str) -> None: ...      # KeyError lists the names
     def clear_constraints(self) -> None: ...
 
+    # A new Parameter built on this one (this one does not change)
+    def extend(
+        self,
+        *test_args: TestArg,
+        directed_vectors: Mapping[str, Iterable[Any] | None] | None = None,
+        test_vectors: Mapping[str, Iterable[Any] | None] | None = None,
+        vector_constraints: (
+            Mapping[str, Callable[[Vector], object] | None]
+            | Iterable[Callable[[Vector], object]]
+            | None
+        ) = None,
+        defaults: Mapping[str, Any] | None = None,
+        always_include_directed: bool | _Keep = _KEEP,
+        max_retries: int | _Keep = _KEEP,
+        nsamples: int | str | None | _Keep = _KEEP,
+        per_sequence_samples: bool | _Keep = _KEEP,
+        max_exhaustive: int | None | _Keep = _KEEP,
+        ids: Literal["names", "values"] | Callable[[VectorInfo], str | None] | None | _Keep = _KEEP,
+    ) -> Parameter: ...
+
     # Generation outside the plugin, and the export
     def generate_vectors(
         self,
@@ -290,6 +310,17 @@ class Parameter:
   mypy a field is `Any`, so a constraint annotated `-> bool` returns `bool(...)`.
   The `get_*_vector()` methods return a `pytest.param(...)` vector as the
   `pytest.param` whose `.values` is the Vector.
+- `extend()` (4.1) returns a new `Parameter`; the base does not change. A `TestArg`
+  whose name the base has replaces that argument in its place (the vectors keep
+  their values); a new name is added last, and every kept vector takes its value
+  from `defaults[name]`, else from the `TestArg`'s fixed `value=`, else the call
+  raises `RNGValueError: The directed vector 'zeros' has no value for the added
+  argument 'prio': ...`. Vectors and constraints given as a dict are added (new
+  name), replaced in place (known name) or removed (`None`; an unknown name
+  raises); a list of constraints is appended, named as `add_constraint()` names
+  them. Vectors are written for the new argument list; a `pytest.param` vector
+  keeps its marks. Settings left out (`_KEEP`) are the base's. A `defaults` key
+  that names no added argument raises.
 - `generate_vectors()` and the other generators called directly (outside a test)
   draw from streams keyed by the seed and 128 bits of `RNG.generator()`, so
   consecutive calls differ and `RNG.seed(s)` repeats them.
@@ -543,6 +574,7 @@ usage error listing each strategy's directed vectors.
 | `--vector-name=NAME` | only the directed vector named NAME |
 | `--vector-index=I` | only the directed vector at index I |
 | `--strategy-constraint-off=[S:]NAME[,...]` | turn the constraint NAME off for this run, in every strategy or only in strategy S (its resolved name, as in the `-v` summary); repeatable. An item that matches no constraint of a resolved strategy is a usage error in a whole-suite run (with "did you mean" and the constraints by strategy), and a red line in a run narrowed by paths, node IDs, `--lf`, `--sw`, `--ignore` or a start below the rootdir, or with a module that was skipped or failed to collect |
+| `--strategy-details` | (4.1) give each failed strategy row a `pytest-strategies` section under its traceback (section 16); off by default; not part of rerun commands |
 | `--list-strategies` | collect the tests as usual (which calls their factories, and the context hook for those with `ctx`), load every strategies file, list the registered names and exit; exit code 2 when the collection had errors |
 
 | ini option | Meaning |
@@ -897,7 +929,8 @@ class VectorInfo:
   or call failed, the command that reruns it with the same values, run from the
   same folder, and what the row is (`  pytest 'tests/t.py::test_w[rand-3]'
   --rng-seed=S  # burst random 3`): at most 10 below `-v` (`... and N more`),
-  none under `-qq`. The command adds the run's `--nsamples`, `--vector-mode`,
+  none under `-qq`. Without `--strategy-details` a last line says
+  `  (--strategy-details shows each row's values below its traceback)`. The command adds the run's `--nsamples`, `--vector-mode`,
   `--vector-name`, `--vector-index`, `-o strategies_*`, `-o
   empty_parameter_set_mark` (the rerun collects the whole module, where a strategy
   without the selected vector has an empty parameter set), `-c`, `--rootdir`, and
@@ -907,7 +940,8 @@ class VectorInfo:
   character is in a path or a test's class or function name (raw in its node ID),
   in `--vector-name`, in a `STRATEGY:NAME` item or in an `-o` value, which then
   reaches pytest escaped.
-- Each failed row also gets a `pytest-strategies` section under its traceback:
+- With `--strategy-details` (4.1; 4.0 always printed it), each failed row also
+  gets a `pytest-strategies` section under its traceback, one per failed row:
 
   ```text
   ------------------------------ pytest-strategies -------------------------------
@@ -934,7 +968,8 @@ class VectorInfo:
   row, a `note` line says to pass a `--rootdir` that contains the tests.
 - What shapes the context (an environment variable, an option of your own) is not in
   the command: compare the `context` lines. Compare the `rootdir:` lines too.
-- With `--junitxml`, each failed row's failure text ends with that section, and
+- With `--junitxml`, each failed row's failure text ends with that section (with
+  `--strategy-details`), and
   the test suite gets the properties `pytest_strategies.seed` and
   `pytest_strategies.failed.<i>` (the failed rows' commands, from 0). With
   `junit_family = xunit1` or `legacy`, a failed row's test case also gets

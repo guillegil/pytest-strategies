@@ -14,7 +14,7 @@
 
 - **Hybrid Generation**: mix **randomly generated** rows with **directed** (hardcoded) edge cases and **test** vectors that run on request.
 - **Stable Test IDs**: rows are named, not spelled out by their values: `test_write[directed-zeros]`, `test_write[rand-3]`. The IDs are the same for every seed, so `-k zeros`, `--deselect`, CI history and node-ID reruns keep working.
-- **Reproducible Failures**: each failed row shows its values, the seed and the command that runs it alone, in the terminal and in JUnit XML, and `--lf` reruns the failed rows with the values they failed with.
+- **Reproducible Failures**: a failed run prints the seed and the command that reruns each failed row alone (`--strategy-details` adds each row's values under its traceback), and `--lf` reruns the failed rows with the values they failed with.
 - **Row-Stable Random Streams**: a row's values depend on the seed, the test and the row, not on `--nsamples`, the other rows, the collection order or pytest-xdist.
 - **Sequence Testing**: use `Series` for **deterministic, ordered** value sequences (Cartesian product) or `RNGSequence` for a **randomized permutation** of the same values.
 - **Type-Safe RNG**: built-in generators for Integers, Floats, Booleans, Strings, Choices, Sequences, and **Enums**.
@@ -24,6 +24,7 @@
 - **Fixture Integration**: works out-of-the-box with standard pytest fixtures (custom, parametrized, or built-in), and a test can take the whole row as one dataclass.
 - **CLI Control**: filter vectors, change generation modes, or increase sample sizes directly from the command line.
 - **Per-Strategy Sample Count**: let a strategy declare its own vector count as a soft default that an integer `--nsamples` can still override.
+- **Reusable Strategies**: build a strategy on another with `Parameter.extend()`: replace or add arguments, and add, replace or remove vectors and constraints by name.
 - **Folder-Scoped Names**: strategy names are looked up like fixtures, nearest folder first, and strategy files are imported only for the folders being tested.
 - **Metadata**: `item.stash[VECTOR_KEY]` describes the row of each test, and `export_strategies()` writes every strategy as versioned JSON.
 - **Typed**: the package ships type hints (`py.typed`), and the decorators keep the decorated function's type.
@@ -34,7 +35,7 @@
 `pytest-strategies` needs Python 3.11 or later and pytest 8.4.2 or later. It is not published on PyPI yet. Install a release from GitHub:
 
 ```bash
-pip install "pytest-strategies @ git+https://github.com/guillegil/pytest-strategies.git@v4.0.0"
+pip install "pytest-strategies @ git+https://github.com/guillegil/pytest-strategies.git@v4.1.0"
 ```
 
 or from a local clone with `pip install -e .`.
@@ -622,7 +623,7 @@ pytest-strategies: contexts conftest.py 976bcfdf, tests/tb_a/conftest.py b1e1b23
 - The fingerprint is the first 8 hex characters of the SHA-256 of a canonical encoding of the object. It is computed when the hook returns the object, before any factory or fixture receives it, so a factory or a test that changes the object later changes no fingerprint. The line lists the contexts computed by the end of the collection, for factories with `ctx` or by `get_context()` calls made by then; a context that `strategies_ctx` or a fixture computes first appears only in the `-v` Contexts block. Nothing is printed when no context was computed by then, or when every context is `None`; the line appears with `-q` and `--collect-only` too. Under pytest-xdist the controller collects no tests, so it prints the line the workers printed after their collection at the end of the run, in its terminal summary.
 - The encoding depends only on what the object holds. Sets are sorted, so the hash order of `PYTHONHASHSEED` does not matter. Paths inside the rootdir are written relative to it, so two checkouts agree. A pydantic v2 model is written as its `model_dump()`, which leaves out `Field(exclude=True)` fields and keeps a `SecretStr` masked. Dataclasses, attrs classes and NamedTuples are written field by field, `SimpleNamespace` and `argparse.Namespace` objects by their attributes, mappings as their pairs in order, floats, dates, `Decimal` and `UUID` as text, and classes and Enum members by their qualified names, never their modules. Anything else is written as its repr, without memory addresses (` at 0x7f...` inside a `<...>` repr, and a mock's `id='140...'`; an address a repr of its own shows, such as `Periph('uart0' at 0x40001000)`, is kept), and with the items of the sets it shows as Python does (`{'b', 'a'}`) sorted. An object that keeps the default repr (`<Plain object at 0x...>`) is in the fingerprint by its type alone, and the line says so: `context 976bcfdf (partial: Plain)`. A repr that shows a set in another form (`",".join(tags)`) should sort it. An object that cannot be encoded (its repr raises) gives `unavailable`, and never fails the run.
 - Leave volatile values out of the context (temporary paths, process IDs, times), or mark them `Field(exclude=True)` in a pydantic model, so that the fingerprint stays the same from one run to the next.
-- When tests fail, the line that says how to reproduce the run ends with the contexts their factories received: `pytest-strategies: reproduce with --rng-seed=S (context 976bcfdf)`, or `(contexts conftest.py 976bcfdf, tests/tb_a/conftest.py b1e1b237)`. Under pytest-xdist the workers send them to the controller. Tests whose setup or call failed count; an error in a test's teardown alone adds no context. The `pytest-strategies` section of each failed row shows the fingerprint of its factory's context in its `context` line (see [Reproducing a failure](#reproducing-a-failure)).
+- When tests fail, the line that says how to reproduce the run ends with the contexts their factories received: `pytest-strategies: reproduce with --rng-seed=S (context 976bcfdf)`, or `(contexts conftest.py 976bcfdf, tests/tb_a/conftest.py b1e1b237)`. Under pytest-xdist the workers send them to the controller. Tests whose setup or call failed count; an error in a test's teardown alone adds no context. With `--strategy-details`, the `pytest-strategies` section of each failed row shows the fingerprint of its factory's context in its `context` line (see [Reproducing a failure](#reproducing-a-failure)).
 - `-v` adds a "Contexts" block to the Strategy Summary, with each context's label, fingerprint and number of tests whose factories received it. `item.stash[VECTOR_KEY].context` holds the fingerprint for the rows of a factory that received `ctx`, and `None` for the others (see [Per-Test Metadata](#-per-test-metadata)).
 
 ### 11. Metadata Export
@@ -643,7 +644,7 @@ For a `tests/dma/strategies.py` that registers `burst` with two arguments, a dir
 {
   "schema": 1,
   "kind": "strategies",
-  "generator": {"name": "pytest-strategies", "version": "4.0.0"},
+  "generator": {"name": "pytest-strategies", "version": "4.1.0"},
   "seed": 1,
   "nsamples": 10,
   "strategies": [
@@ -685,6 +686,43 @@ In a pytest session every strategy file is imported first. Each factory gets the
 Its random draws come from a stream derived from the seed, the strategy name and the factory's module name, or the folder of its file for a factory in a strategy file, a test module or a `conftest.py`, so every call in a session, and in every environment and checkout, exports the same values. A file counts as a strategy file, a test module or a `conftest.py` when it has such a name and is inside the rootdir, below a `testpaths` entry, or imported by its path in the session (a test module collected from a folder named on the command line) and, when `consider_namespace_packages` is off (pytest's default), not a module of a regular package that Python holds under its package name (`acme.strategies` for `acme/strategies.py` next to `acme/__init__.py`), the name pytest then imports it under in every import mode. A module named like one elsewhere, such as a library's `extacme/strategies.py` on `sys.path`, is keyed by its module's name, so every checkout folder exports the same values.
 
 A factory in a package module named like one inside the rootdir (`src/acme/strategies.py`, `src/acme/test_utils.py`) is therefore keyed by its folder in a checkout or an editable install and by its module's name when installed, so the two export different values; rename the module (`acme/catalog.py`) to avoid that. Outside the rootdir and the `testpaths`, these are keyed by their folder in a run that collects that folder (one that names it on the command line) and by their module's name in a run that does not: (a) a helper named like one, not in a regular package, imported by its module's name; (b) a regular package's module that Python holds only under a longer namespace-package name (`ns.acme.strategies`); (c) with `consider_namespace_packages = true`, also a regular package's module imported by its name. List such a folder in `testpaths` to key them by their folder in every run.
+
+### 12. Reusing and Extending Strategies
+
+A strategy is reused by its name from any folder below the one that registers it, or by passing its factory (see [Strategy Files and Scoped Names](#9-strategy-files-and-scoped-names)). To build a new strategy on an existing one, call its factory and `extend()` the `Parameter` it returns. `extend()` returns a new `Parameter`; the one it is called on does not change.
+
+```python
+# tests/strategies.py
+from pytest_strategy import Parameter, RNGChoice, RNGInteger, TestArg, register
+
+@register("dma_burst")
+def dma_burst():
+    return Parameter(
+        TestArg("addr", rng_type=RNGInteger(0, 0xFFFF)),
+        TestArg("length", rng_type=RNGInteger(1, 256)),
+        directed_vectors={"zeros": {"addr": 0, "length": 1}},
+        vector_constraints={"aligned": lambda v: v.addr % 4 == 0},
+    )
+
+@register("dma_short")
+def dma_short():
+    # Same vectors and constraints, a narrower length
+    return dma_burst().extend(TestArg("length", rng_type=RNGInteger(1, 8)), nsamples=5)
+
+@register("dma_prio")
+def dma_prio():
+    return dma_burst().extend(
+        TestArg("prio", rng_type=RNGChoice([0, 1, 2])),        # a new argument, added last
+        defaults={"prio": 0},                                   # its value in the kept vectors
+        directed_vectors={"urgent": {"addr": 0, "length": 4, "prio": 2}},
+        vector_constraints={"aligned": None},                   # None removes one
+    )
+```
+
+- **Arguments.** A `TestArg` with a name the base has replaces that argument in its place, and the vectors keep their values. A new name is added after the others; every kept vector then needs a value for it, from `defaults` or the `TestArg`'s fixed `value=`, or the call fails and names the vector.
+- **Vectors and constraints** are given as dicts by name: a new name is added, a known name is replaced in its place, and `None` removes it (a name the base does not have fails). A list of constraints is added after the others. Vectors are written for the new argument list, in any form the constructor takes, and a `pytest.param(...)` vector keeps its marks.
+- **Settings** (`nsamples`, `max_retries`, `per_sequence_samples`, `max_exhaustive`, `ids`, `always_include_directed`) are the base's unless given.
+- A factory that takes inputs passes them on: `def esm_burst(ctx): return esm_rw(ctx).extend(...)`. The new strategy has a name of its own, so its random rows differ from the base's for the same seed.
 
 ## 🔌 Fixture Integration
 
@@ -816,6 +854,7 @@ Control test generation directly from the command line:
 | `--vector-index`    | Run only the directed vector at this index (0-based, in definition order) | `pytest --vector-index=0`                 |
 | `--rng-seed`        | Set seed for reproducibility. Without it, `--lf` and `--sw` reuse the seed of the failed run (see [Reproducibility](#-reproducibility)) | `pytest --rng-seed=42`                      |
 | `--strategy-constraint-off` | Turn named constraints off for this run: `NAME` in every strategy, `STRATEGY:NAME` in one; comma-separated, repeatable (see [Rows and Constraints](#4-rows-and-constraints)) | `pytest --strategy-constraint-off=dma_burst:aligned` |
+| `--strategy-details` | Show a `pytest-strategies` section under each failed strategy row's traceback: its values, seed and rerun command (off by default; see [Reproducing a failure](#reproducing-a-failure)) | `pytest --strategy-details` |
 | `--list-strategies` | List the registered strategy names and exit                             | `pytest --list-strategies`                  |
 
 Ini options go in your pytest configuration, and `-o NAME=VALUE` sets one for a single run:
@@ -847,9 +886,9 @@ pytest-strategies: failed rows:
   pytest 'tests/dma/test_write.py::test_write[rand-3]' --rng-seed=1763926297314361000  # burst random 3
   pytest 'tests/dma/test_write.py::test_write[directed-zeros]' --rng-seed=1763926297314361000  # burst directed zeros
 ```
-When the factories of the failed tests received a context, the first line ends with its fingerprint, such as `(context 976bcfdf)` (see [The context fingerprint](#the-context-fingerprint)). Then comes, for each strategy row whose setup or call failed, the command that runs that row alone with the same values, from the folder pytest was started in, and what the row is. Below `-v` at most 10 rows are listed, followed by `... and 4 more`; `-qq` prints only the first line. An error in a test's teardown alone lists nothing.
+When the factories of the failed tests received a context, the first line ends with its fingerprint, such as `(context 976bcfdf)` (see [The context fingerprint](#the-context-fingerprint)). Then comes, for each strategy row whose setup or call failed, the command that runs that row alone with the same values, from the folder pytest was started in, and what the row is. Below `-v` at most 10 rows are listed, followed by `... and 4 more`, and a last line points to `--strategy-details`; `-qq` prints only the first line. An error in a test's teardown alone lists nothing. However many rows fail, this list stays short: the plugin adds nothing else to a failure's report by default.
 
-Under its traceback, each failed strategy row also gets a `pytest-strategies` section that says what the row is and how to run it again:
+With `--strategy-details` (on the command line, or in `addopts` to keep it on), each failed strategy row also gets a `pytest-strategies` section under its traceback that says what the row is, its values and how to run it again. One block per failed row: a run where 5,000 rows fail prints 5,000 blocks, so turn it on for the failures you are looking into, such as `pytest --lf --strategy-details -x`.
 ```text
 ------------------------------ pytest-strategies -------------------------------
 strategy  burst (tests/dma/strategies.py:12)
@@ -867,7 +906,7 @@ rerun     pytest 'tests/dma/test_write.py::test_write[rand-3]' --rng-seed=176392
 - A failure that pytest reports as plain text, such as an XPASS of a `strict` xfail, is listed but gets no section. An error reported without a traceback, such as a missing fixture, gets the section below its report. Under pytest-xdist the workers send the rows to the controller.
 
 A `--junitxml` report holds the same information, under pytest-xdist too:
-- The failure (or error) text of each failed strategy row ends with its `pytest-strategies` section.
+- With `--strategy-details`, the failure (or error) text of each failed strategy row ends with its `pytest-strategies` section.
 - The test suite gets the property `pytest_strategies.seed`, and `pytest_strategies.failed.0`, `pytest_strategies.failed.1` and so on, the commands of the list of failed rows, in the same order:
   ```xml
   <properties>

@@ -778,7 +778,9 @@ class PytestStrategyPlugin:
         elif report.failed and call.when in ("setup", "call"):
             infos = item.stash.get(VECTORS_KEY, ())
             if infos:
-                repro, attribute = _repro.failure(item, infos)
+                section, attribute = _repro.failure(item, infos)
+                if _details(item.config):
+                    repro = section
                 # TestReport keeps extra attributes when pytest-xdist serializes it
                 report.pytest_strategies = attribute  # type: ignore[attr-defined]
                 if _junit_family(item.config) == "xunit1":
@@ -1139,7 +1141,10 @@ class PytestStrategyPlugin:
             contexts = _contexts_text(state.failed_contexts)
             suffix = f" ({contexts})" if contexts is not None else ""
             write_line(f"pytest-strategies: reproduce with --rng-seed={_run_seed()}{suffix}")
-            for line in _failed_rows_lines(state.failed_rows, self._verbosity(config)):
+            lines = _failed_rows_lines(state.failed_rows, self._verbosity(config))
+            if lines and not _details(config):
+                lines.append("  (--strategy-details shows each row's values below its traceback)")
+            for line in lines:
                 write_line(line)
         if state is not None:
             if exitstatus in _FINISHED:
@@ -2087,6 +2092,16 @@ def _encodable_sections(report: pytest.TestReport, encoding: str) -> None:
             report.sections[position] = (name, _repro.encodable(content, encoding))
 
 
+def _details(config: Config) -> bool:
+    """
+    Whether a failed strategy row gets its ``pytest-strategies`` section below its
+    traceback: with ``--strategy-details``. Off by default, so a run where many rows
+    fail prints no section per row; the terminal summary lists the rerun commands
+    (``_failed_rows_lines``).
+    """
+    return bool(getattr(config.option, "strategy_details", False))
+
+
 def _failed_rows_lines(rows: Mapping[str, Mapping[str, str]], verbosity: int) -> list[str]:
     """
     Return the lines that list the failed strategy rows after the line that says how
@@ -2975,6 +2990,17 @@ def pytest_addoption(parser: pytest.Parser) -> None:
             "Turn a named vector constraint off for this run: NAME in every strategy, "
             "STRATEGY:NAME in that strategy only. Items are separated by commas, and the "
             "option can be repeated"
+        ),
+    )
+
+    group.addoption(
+        "--strategy-details",
+        action="store_true",
+        default=False,
+        help=(
+            "Show a pytest-strategies section under each failed strategy row's "
+            "traceback: what the row is, its values, the seed and its rerun command "
+            "(off by default; put it in addopts to keep it on)"
         ),
     )
 

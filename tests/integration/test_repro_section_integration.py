@@ -25,6 +25,15 @@ from pytest_strategy._repro import quote
 
 pytest_plugins = ["pytester"]
 
+
+@pytest.fixture(autouse=True)
+def _strategy_details(pytester, monkeypatch):
+    """These runs check the per-row section, which --strategy-details turns on
+    (also for the rerun commands run through the shell, which inherit it). After
+    pytester, which clears PYTEST_ADDOPTS."""
+    monkeypatch.setenv("PYTEST_ADDOPTS", "--strategy-details")
+
+
 SEED = 21
 
 CONFTEST = """
