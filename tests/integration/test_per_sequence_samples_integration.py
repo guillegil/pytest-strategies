@@ -86,9 +86,12 @@ def test_each_device_gets_the_requested_rows(project):
         "-p", "no:cacheprovider", "--rng-seed=1", "--nsamples=4", "--collect-only", "-q"
     )
 
-    ids = [line for line in result.outlines if "::test_width[" in line]
-    assert sum("devA" in i for i in ids) == 1 + 4
-    assert sum("devB" in i for i in ids) == 4
+    ids = [line.split("::")[1] for line in result.outlines if "::test_width[" in line]
+    assert ids == [
+        "test_width[directed-narrow]",
+        *(f"test_width[device=devA-rand-{j}]" for j in range(4)),
+        *(f"test_width[device=devB-rand-{j}]" for j in range(4)),
+    ]
 
 
 def test_short_combination_warning_names_strategy_and_test(pytester):

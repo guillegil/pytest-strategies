@@ -8,7 +8,6 @@ list vectors, and discovery below symlinks and norecursedirs path patterns.
 """
 
 import os
-import re
 
 import pytest
 
@@ -40,14 +39,6 @@ def r3_modes(nsamples):
 """
 
 
-def _node_ids(result, test_name):
-    return sorted(
-        line.strip()
-        for line in result.outlines
-        if re.match(rf"\s*tests/test_\w+\.py::{test_name}\[", line)
-    )
-
-
 class TestImportedStrategyFile:
     """A test module or conftest.py that imports a strategy file gets the loaded module."""
 
@@ -75,17 +66,20 @@ class TestImportedStrategyFile:
         )
         return pytester
 
-    def test_same_node_ids_for_the_whole_suite_and_one_file(self, project):
+    def test_same_values_for_the_whole_suite_and_one_file(self, project, values_dump):
         """The import used to run the file again and redraw OFFSET for later tests."""
         args = ("-p", "no:cacheprovider", "--rng-seed=1", "--collect-only", "-q")
+        project.makeconftest(values_dump.conftest)
 
-        full = project.runpytest_subprocess(*args)
-        alone = project.runpytest_subprocess(*args, "tests/test_b.py")
-        reversed_order = project.runpytest_subprocess(*args, "tests/test_b.py", "tests/test_a.py")
+        def test_b_rows(*paths):
+            return [row for row in values_dump.collect(*args, *paths) if "::test_b[" in row[0]]
 
-        assert _node_ids(full, "test_b")
-        assert _node_ids(full, "test_b") == _node_ids(alone, "test_b")
-        assert _node_ids(full, "test_b") == _node_ids(reversed_order, "test_b")
+        full = test_b_rows()
+        alone = test_b_rows("tests/test_b.py")
+        reversed_order = test_b_rows("tests/test_b.py", "tests/test_a.py")
+
+        assert len(full) == 2
+        assert full == alone == reversed_order
 
     def test_importing_test_gets_the_strategy_classes_and_values(self, project):
         result = project.runpytest_subprocess("-p", "no:cacheprovider", "--rng-seed=3")
@@ -196,7 +190,7 @@ class TestVectorOptions:
 
             @Strategy.strategy("r3_single")
             def test_single(x):
-                assert isinstance(x, int), repr(x)
+                assert isinstance(x, int) and x in (5, 6), repr(x)
             """)
         return pytester
 
@@ -206,12 +200,15 @@ class TestVectorOptions:
         assert result.ret == pytest.ExitCode.USAGE_ERROR
         result.stderr.fnmatch_lines(["*--vector-name= matched no directed vector*"])
 
-    @pytest.mark.parametrize("args", [("--nsamples=0",), ("--vector-mode=test",)])
-    def test_list_vector_gives_the_element(self, project, args):
+    @pytest.mark.parametrize(
+        ("args", "row"),
+        [(("--nsamples=0",), "directed-five"), (("--vector-mode=test",), "test-six")],
+    )
+    def test_list_vector_gives_the_element(self, project, args, row):
         result = project.runpytest_subprocess("-p", "no:cacheprovider", "-v", *args)
 
         result.assert_outcomes(passed=1)
-        result.stdout.fnmatch_lines(["*test_single[[]x=[56][]] PASSED*"])
+        result.stdout.fnmatch_lines([f"*test_single[[]{row}[]] PASSED*"])
 
 
 class TestDiscoveryScope:

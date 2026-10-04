@@ -1,6 +1,6 @@
 [project]
 name = "pytest-strategies"
-version = "3.0.0"
+version = "4.0.0"
 description = "A pytest plugin for constrained-randomized test parametrization with directed testing support"
 authors = [{ name = "Guillermo Gil", email = "guillegirod@gmail.com" }]
 license = "MIT"
@@ -46,6 +46,9 @@ dev = [
     "ruff>=0.13",
     "mypy>=2.0",
     "pre-commit>=4.0",
+    # Record mode's tests use real pydantic models and attrs classes
+    "pydantic>=2",
+    "attrs",
 ]
 
 [project.urls]
@@ -151,10 +154,6 @@ addopts = [
 empty_parameter_set_mark = "fail_at_collect"
 filterwarnings = [
     "error",
-    # The suite keeps testing the APIs deprecated in 3.0 until 4.0 removes them
-    "ignore:Strategy '.*' returns an \\(argnames, samples\\) tuple:DeprecationWarning",
-    "ignore:TestArg\\((directed|test)_values=\\.\\.\\.\\) is deprecated:DeprecationWarning",
-    "ignore:RNG.set_max_retries\\(\\) is deprecated:DeprecationWarning",
 ]
 
 markers = [

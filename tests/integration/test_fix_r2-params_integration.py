@@ -65,8 +65,9 @@ class TestNsamplesAutoPassThrough:
         """A strategy defaulting to "auto" used to fail every run, even without a flag."""
         self._make_strategies(pytester, "fixr2auto_b")
         result = pytester.runpytest_inprocess("--collect-only", "-q", "--rng-seed=1")
+        # One exhaustive row per Series value
         result.stdout.fnmatch_lines(
-            ["*test_auto_default[[]y='a'[]]*", "*test_auto_default[[]y='b'[]]*"]
+            ["*test_auto_default[[]y=a[]]*", "*test_auto_default[[]y=b[]]*"]
         )
         result.stdout.fnmatch_lines(["*12 tests collected*"])
 

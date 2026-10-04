@@ -73,12 +73,11 @@ class TestBasicIntegration:
         assert all(isinstance(s[2], bool) for s in samples)
 
     def test_directed_and_random_integration(self):
-        """Test integration of directed values with random generation."""
+        """Test integration of directed vectors with random generation."""
         RNG.seed(42)
 
-        # Create TestArgs with directed values
-        arg1 = TestArg("x", rng_type=RNGInteger(0, 100), directed_values=[0, 50, 100])
-        arg2 = TestArg("y", rng_type=RNGInteger(0, 100), directed_values=[0, 50, 100])
+        arg1 = TestArg("x", rng_type=RNGInteger(0, 100))
+        arg2 = TestArg("y", rng_type=RNGInteger(0, 100))
 
         # Create Parameter with directed vectors
         param = Parameter(
@@ -347,9 +346,7 @@ class TestRealWorldScenarios:
         RNG.seed(42)
 
         # Simulate API parameters
-        arg_user_id = TestArg(
-            "user_id", rng_type=RNGInteger(1, 10000), directed_values=[1, 999, 10000]  # Edge cases
-        )
+        arg_user_id = TestArg("user_id", rng_type=RNGInteger(1, 10000))
         arg_page_size = TestArg(
             "page_size",
             rng_type=RNGWeightedInteger(
@@ -358,7 +355,6 @@ class TestRealWorldScenarios:
                     (100, 500): 0.3,  # Large pages
                 }
             ),
-            directed_values=[1, 10, 100],  # Edge cases
         )
         arg_include_deleted = TestArg("include_deleted", rng_type=RNGBoolean(0.2))  # 20% true
 
@@ -388,14 +384,8 @@ class TestRealWorldScenarios:
         """Simulate testing database queries with constraints."""
         RNG.seed(42)
 
-        arg_offset = TestArg(
-            "offset",
-            rng_type=RNGInteger(0, 1000),
-            directed_values=[0],  # Always test from beginning
-        )
-        arg_limit = TestArg(
-            "limit", rng_type=RNGInteger(1, 100), directed_values=[1, 10, 100]  # Common limits
-        )
+        arg_offset = TestArg("offset", rng_type=RNGInteger(0, 1000))
+        arg_limit = TestArg("limit", rng_type=RNGInteger(1, 100))
         arg_sort_order = TestArg("sort_order", rng_type=RNGChoice(["asc", "desc"]))
 
         # Constraint: offset + limit <= 1000 (max result set)
@@ -425,11 +415,8 @@ class TestRealWorldScenarios:
                     (5000, 30000): 0.1,  # Slow
                 }
             ),
-            directed_values=[100, 30000],  # Min/max
         )
-        arg_retry_count = TestArg(
-            "retry_count", rng_type=RNGInteger(0, 5), directed_values=[0, 1, 5]
-        )
+        arg_retry_count = TestArg("retry_count", rng_type=RNGInteger(0, 5))
         arg_enable_cache = TestArg("enable_cache", rng_type=RNGBoolean(0.8))  # Usually enabled
         arg_log_level = TestArg(
             "log_level", rng_type=RNGChoice(["DEBUG", "INFO", "WARNING", "ERROR"])
@@ -468,15 +455,11 @@ class TestModeIntegration:
     """Test different generation modes with full integration."""
 
     def test_all_mode_integration(self):
-        """Test 'all' mode with directed values at multiple levels."""
+        """Test 'all' mode with directed vectors."""
         RNG.seed(42)
 
-        arg1 = TestArg(
-            "x", rng_type=RNGInteger(0, 100), directed_values=[0, 100], always_include_directed=True
-        )
-        arg2 = TestArg(
-            "y", rng_type=RNGInteger(0, 100), directed_values=[0, 100], always_include_directed=True
-        )
+        arg1 = TestArg("x", rng_type=RNGInteger(0, 100))
+        arg2 = TestArg("y", rng_type=RNGInteger(0, 100))
 
         param = Parameter(
             arg1,

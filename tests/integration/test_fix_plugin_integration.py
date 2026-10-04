@@ -6,6 +6,7 @@ its own strategy registry) or has to exit the inner session.
 """
 
 import re
+import textwrap
 
 import pytest
 
@@ -63,15 +64,10 @@ def _seed_from_header(result):
     return int(match.group(1))
 
 
-def _test_ids(result):
-    """Return the parametrized test IDs (``test_x[...]``) found in a run's output."""
-    return re.findall(r"test_\w+\[[^\]]*\]", result.stdout.str())
-
-
 class TestUnseededRunReproducibility:
     """The seed printed by an unseeded run must reproduce it exactly."""
 
-    def test_printed_seed_reproduces_module_level_draws(self, pytester):
+    def test_printed_seed_reproduces_module_level_draws(self, pytester, values_dump):
         """Randomness drawn before the first factory runs must also be reproduced.
 
         The strategy file draws an offset at import time, before any factory
@@ -97,48 +93,93 @@ class TestUnseededRunReproducibility:
                 pass
             """)
 
-        unseeded = pytester.runpytest_subprocess("--collect-only")
-        seed = _seed_from_header(unseeded)
-        reproduced = pytester.runpytest_subprocess("--collect-only", f"--rng-seed={seed}")
+        pytester.makeconftest(values_dump.conftest)
 
-        unseeded_ids = _test_ids(unseeded)
-        assert len(unseeded_ids) == 3
-        assert _test_ids(reproduced) == unseeded_ids
+        unseeded = values_dump.run("--collect-only")
+        seed = _seed_from_header(unseeded)
+        unseeded_values = values_dump.read()
+
+        assert len(unseeded_values) == 3
+        assert values_dump.collect("--collect-only", f"--rng-seed={seed}") == unseeded_values
+
+
+class TestSeedSetInAConftest:
+    """
+    A conftest.py that seeds in its pytest_configure sets the run's seed, as in 3.0:
+    the plugin seeds after the initial conftest.py files' pytest_configure.
+    """
+
+    @pytest.mark.parametrize(
+        "seeding",
+        ["RNG.seed(1234)", "if config.option.rng_seed is None: config.option.rng_seed = 1234"],
+        ids=["RNG.seed", "option"],
+    )
+    def test_the_header_the_reproduce_line_and_the_values_follow_it(
+        self, pytester, values_dump, seeding
+    ):
+        pytester.makeconftest(f"""
+from pytest_strategy import RNG
+
+def pytest_configure(config):
+    {seeding}
+""" + values_dump.conftest)
+        pytester.makepyfile(strategies=STRATEGIES)
+        pytester.makepyfile(test_seeded=TESTS + "\n\ndef test_fails():\n    assert False\n")
+
+        first = values_dump.run(ret=1)
+        values = values_dump.read()
+        second = values_dump.run(ret=1)
+
+        for result in (first, second):
+            assert _seed_from_header(result) == 1234
+            result.stdout.fnmatch_lines(["pytest-strategies: reproduce with --rng-seed=1234"])
+        assert len(values) == 6
+        assert values_dump.read() == values
+        # The values of the seed it set
+        pytester.makeconftest(values_dump.conftest)
+        assert values_dump.collect("--collect-only", "--rng-seed=1234") == values
 
 
 class TestXdistSeedSharing:
     """pytest-xdist workers must all use the controller's seed."""
 
-    def test_unseeded_xdist_run_collects_the_same_tests_on_every_worker(self, pytester):
+    def test_unseeded_xdist_run_collects_the_same_tests_on_every_worker(
+        self, pytester, values_dump
+    ):
         pytest.importorskip("xdist")
+        pytester.makeconftest(values_dump.conftest)
         pytester.makepyfile(strategies=STRATEGIES)
         pytester.makepyfile(test_xdist=TESTS)
 
-        result = pytester.runpytest_subprocess("-n", "2")
+        result = values_dump.run("-n", "2")
 
         result.stdout.no_fnmatch_line("*Different tests were collected*")
         result.assert_outcomes(passed=6)
+        # The node IDs do not show the values: the workers drew the same ones
+        gw0 = values_dump.read("values-gw0.json")
+        assert len(gw0) == 6
+        assert gw0 == values_dump.read("values-gw1.json")
 
-    def test_worker_uses_seed_from_workerinput(self, pytester):
+    def test_worker_uses_seed_from_workerinput(self, pytester, values_dump):
         """Without --rng-seed, a worker takes the seed the controller sent."""
-        pytester.makeconftest("""
+        pytester.makeconftest(textwrap.dedent("""
             import pytest
 
             @pytest.hookimpl(tryfirst=True)
             def pytest_configure(config):
                 # Stand in for an xdist worker (workerinput is set before configure).
                 config.workerinput = {"pytest_strategies_seed": 4242}
-            """)
+            """) + values_dump.conftest)
         pytester.makepyfile(strategies=STRATEGIES)
         pytester.makepyfile(test_worker=TESTS)
 
-        worker = pytester.runpytest_subprocess("-p", "no:xdist", "--collect-only")
-        seeded = pytester.runpytest_subprocess(
-            "-p", "no:xdist", "--collect-only", "--rng-seed=4242"
-        )
+        worker = values_dump.run("-p", "no:xdist", "--collect-only")
+        worker_values = values_dump.read()
+        seeded = values_dump.collect("-p", "no:xdist", "--collect-only", "--rng-seed=4242")
 
         assert _seed_from_header(worker) == 4242
-        assert _test_ids(worker) == _test_ids(seeded)
+        assert len(worker_values) == 6
+        assert seeded == worker_values
 
     def test_plugin_works_without_xdist(self, pytester):
         """The optional xdist hook must not break a run where xdist is absent."""
@@ -166,12 +207,13 @@ class TestPerTestRandomStreams:
         """
 
     @staticmethod
-    def _ids_by_test(result):
-        """Map each test name to the list of IDs it was collected with."""
-        ids = {}
-        for test_id in _test_ids(result):
-            ids.setdefault(test_id.split("[")[0], []).append(test_id.split("[", 1)[1])
-        return ids
+    def _values_by_test(pytester, values_dump, *args):
+        """Collect with ``args`` and map each test name to its rows' values, in order."""
+        pytester.makeconftest(values_dump.conftest)
+        values = {}
+        for nodeid, params in values_dump.collect("--collect-only", *args):
+            values.setdefault(nodeid.split("::")[1].split("[")[0], []).append(params)
+        return values
 
     @staticmethod
     def _test_module(*names):
@@ -182,7 +224,7 @@ class TestPerTestRandomStreams:
         ]
         return "from pytest_strategy import Strategy\n\n" + "\n".join(blocks)
 
-    def test_tests_and_strategies_get_different_values(self, pytester):
+    def test_tests_and_strategies_get_different_values(self, pytester, values_dump):
         pytester.makepyfile(twin_strategies=self.TWIN_STRATEGIES)
         pytester.makepyfile(
             test_twins=self._test_module(
@@ -190,28 +232,24 @@ class TestPerTestRandomStreams:
             )
         )
 
-        ids = self._ids_by_test(pytester.runpytest_subprocess("--collect-only", "--rng-seed=42"))
+        values = self._values_by_test(pytester, values_dump, "--rng-seed=42")
 
         # Same strategy, different tests: different values.
-        assert ids["test_one"] != ids["test_two"]
+        assert values["test_one"] != values["test_two"]
         # Identical strategy definitions under different names: different values.
-        assert ids["test_one"] != ids["test_three"]
+        assert values["test_one"] != values["test_three"]
 
-    def test_values_do_not_depend_on_collection_order(self, pytester):
+    def test_values_do_not_depend_on_collection_order(self, pytester, values_dump):
         pytester.makepyfile(twin_strategies=self.TWIN_STRATEGIES)
         pytester.makepyfile(
             test_twins=self._test_module(("test_one", "twin_a"), ("test_two", "twin_b"))
         )
-        forward = self._ids_by_test(
-            pytester.runpytest_subprocess("--collect-only", "--rng-seed=42")
-        )
+        forward = self._values_by_test(pytester, values_dump, "--rng-seed=42")
 
         pytester.makepyfile(
             test_twins=self._test_module(("test_two", "twin_b"), ("test_one", "twin_a"))
         )
-        backward = self._ids_by_test(
-            pytester.runpytest_subprocess("--collect-only", "--rng-seed=42")
-        )
+        backward = self._values_by_test(pytester, values_dump, "--rng-seed=42")
 
         assert len(forward["test_one"]) == 3
         assert forward == backward
@@ -240,11 +278,11 @@ class TestNestedSessionSeed:
 
 # A test that needs a strategy: running it loads the strategy files of its folder
 OTHER_STRATEGY = """
-from pytest_strategy import register
+from pytest_strategy import Parameter, TestArg, register
 
 @register("other_strat")
 def other(nsamples):
-    return ("x",), [(1,)]
+    return Parameter(TestArg("x", value=1), nsamples=1)
 """
 OTHER_TEST = """
 from pytest_strategy import strategy
@@ -265,11 +303,11 @@ class TestSkipInStrategyFile:
 
             missing = pytest.importorskip("pytest_strategies_missing_module")
 
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, Strategy, TestArg
 
             @Strategy.register("optional_strat")
             def optional(nsamples):
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
 
             def test_optional():
                 pass
@@ -287,11 +325,11 @@ class TestSkipInStrategyFile:
 
             pytest.skip("no gpu", allow_module_level=True)
 
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, Strategy, TestArg
 
             @Strategy.register("gpu_strat")
             def gpu(nsamples):
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
             """)
         pytester.makepyfile(other_strategies=OTHER_STRATEGY, test_other=OTHER_TEST)
 
@@ -309,11 +347,11 @@ class TestSkipInStrategyFile:
 
             pytest.fail("broken setup")
 
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, Strategy, TestArg
 
             @Strategy.register("failing_strat")
             def failing(nsamples):
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
             """)
         pytester.makepyfile(test_other="def test_other():\n    pass\n")
 
@@ -359,11 +397,11 @@ class TestLoadErrorsAreVisible:
 
     def test_syntax_error_is_reported_in_quiet_mode(self, pytester):
         pytester.makepyfile(strategies="""
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, Strategy, TestArg
 
             @Strategy.register("broken")
             def broken(nsamples)
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
             """)
         pytester.makepyfile(other_strategies=OTHER_STRATEGY, test_other=OTHER_TEST)
 

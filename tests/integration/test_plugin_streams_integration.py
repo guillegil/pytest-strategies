@@ -1,0 +1,1807 @@
+"""
+End-to-end tests for the plugin's random streams other than the rows (streams v1,
+D5), run through pytester: a factory call, a strategy file's import, a test module's
+import, the context hook, each fixture's setup, each phase of a test and an export
+call draw from streams of their own, keyed by what they are. Their draws are the same
+whichever tests run, in any order, alone or under pytest-xdist, and an RNG.seed()
+call in one of them changes nothing outside it.
+
+Each project checks its draws against the key the plugin is meant to use, and the
+runs are compared with each other. Distinct module and strategy names are used per
+project on purpose (see test_session_isolation_integration.py for rationale).
+"""
+
+import ast
+import importlib.util
+import json
+import os
+import random
+import shutil
+import subprocess
+import sys
+from textwrap import dedent
+
+import pytest
+
+from pytest_strategy import RNG
+from pytest_strategy._streams import StreamKey
+
+pytest_plugins = ["pytester"]
+
+SEED = 7
+
+
+def randint(key):
+    """The first RNG.integer(0, 10**9) of the stream of ``key``."""
+    return random.Random(key.seed_int()).randint(0, 10**9)
+
+
+# A module the projects import (pythonpath = .) to record what their tests draw,
+# one file per process, so that pytest-xdist workers do not write to the same file
+RECORD = """
+    import json
+    import os
+    import pathlib
+
+    DIRECTORY = pathlib.Path(__file__).parent / "records"
+
+    def record(label, value):
+        DIRECTORY.mkdir(exist_ok=True)
+        with open(DIRECTORY / f"{os.getpid()}.jsonl", "a") as out:
+            out.write(json.dumps([label, value]) + "\\n")
+"""
+
+
+def read_records(pytester):
+    """Return the values each label recorded in the last run (one per label)."""
+    found = {}
+    for path in sorted((pytester.path / "records").glob("*.jsonl")):
+        for line in path.read_text().splitlines():
+            label, value = json.loads(line)
+            found.setdefault(label, set()).add(value)
+    # A fixture or a module that two pytest-xdist workers set up draws the same
+    assert all(len(values) == 1 for values in found.values()), found
+    return {label: values.pop() for label, values in found.items()}
+
+
+def run_and_read(pytester, *args, passed):
+    """Run pytest in a subprocess, check the outcome, and return the records."""
+    records = pytester.path / "records"
+    for path in records.glob("*.jsonl") if records.exists() else ():
+        path.unlink()
+    result = pytester.runpytest_subprocess("-p", "no:cacheprovider", f"--rng-seed={SEED}", *args)
+    result.assert_outcomes(passed=passed)
+    return read_records(pytester)
+
+
+# ---------------------------------------------------------------------------
+# Factories: T/"factory"
+# ---------------------------------------------------------------------------
+
+
+FACTORY_STRATEGIES = """
+    import os
+
+    from pytest_strategy import RNG, Parameter, RNGInteger, TestArg, register
+
+    @register("ps_factory")
+    def factory(rng):
+        assert rng is RNG.generator()
+        if os.environ.get("PS_EXTRA_DRAW"):
+            rng.random()
+        return Parameter(
+            TestArg("f", value=(rng.random(), RNG.integer(0, 10**9))),
+            TestArg("x", rng_type=RNGInteger(0, 10**9)),
+            nsamples=3,
+        )
+
+    @register("ps_ctx")
+    def with_ctx(ctx):
+        return Parameter(TestArg("c", value=ctx["draw"]), nsamples=1)
+"""
+
+FACTORY_TESTS = """
+    from pytest_strategy import strategy
+
+    @strategy("ps_factory")
+    def test_a(f, x):
+        pass
+
+    @strategy("ps_factory")
+    def test_b(f, x):
+        pass
+
+    @strategy("ps_ctx")
+    def test_ctx_a(c):
+        pass
+
+    @strategy("ps_ctx")
+    def test_ctx_b(c):
+        pass
+"""
+
+CONTEXT_HOOK = """
+from pytest_strategy import RNG
+
+def pytest_strategies_context(config):
+    return {"draw": RNG.integer(0, 10**9)}
+"""
+
+
+@pytest.fixture
+def factory_project(pytester, values_dump):
+    pytester.makepyfile(strategies=FACTORY_STRATEGIES, test_ps_factory=FACTORY_TESTS)
+    pytester.makeconftest(values_dump.conftest + CONTEXT_HOOK)
+    return values_dump
+
+
+def by_test(rows, name):
+    """Return the values of the argument ``name`` by test name, row by row."""
+    values = {}
+    for nodeid, params in rows:
+        params = ast.literal_eval(params)
+        if name in params:
+            test = nodeid.split("::")[-1].split("[")[0]
+            values.setdefault(test, []).append(params[name])
+    return values
+
+
+class TestFactoryStreams:
+    def test_draws_are_the_same_for_the_file_one_test_and_any_count(self, factory_project):
+        def draws(*args):
+            rows = factory_project.collect("--collect-only", f"--rng-seed={SEED}", *args)
+            return by_test(rows, "f")
+
+        whole = draws()
+        selected = draws("-k", "test_b")
+        alone = draws("test_ps_factory.py::test_b")
+        five = draws("--nsamples=5")
+
+        assert selected["test_b"] == whole["test_b"]
+        assert alone == {"test_b": whole["test_b"]}
+        assert five == {test: values[:1] * 5 for test, values in whole.items()}
+
+    def test_two_tests_get_draws_of_their_own(self, factory_project):
+        draws = by_test(factory_project.collect("--collect-only", f"--rng-seed={SEED}"), "f")
+
+        for test in ("test_a", "test_b"):
+            key = StreamKey.root(SEED, "test", "ps_factory", f"test_ps_factory.py::{test}")
+            generator = random.Random(key.child("factory").seed_int())
+            expected = (generator.random(), generator.randint(0, 10**9))
+            assert draws[test] == [expected] * 3
+        assert draws["test_a"] != draws["test_b"]
+
+    def test_an_extra_draw_in_the_factory_leaves_the_rows(self, factory_project, monkeypatch):
+        base = factory_project.collect("--collect-only", f"--rng-seed={SEED}")
+        monkeypatch.setenv("PS_EXTRA_DRAW", "1")
+        extra = factory_project.collect("--collect-only", f"--rng-seed={SEED}")
+
+        assert by_test(extra, "x") == by_test(base, "x")
+        assert by_test(extra, "f") != by_test(base, "f")
+
+    def test_the_context_hook_draws_from_its_own_stream(self, factory_project):
+        whole = by_test(factory_project.collect("--collect-only", f"--rng-seed={SEED}"), "c")
+        alone = by_test(
+            factory_project.collect(
+                "--collect-only", f"--rng-seed={SEED}", "test_ps_factory.py::test_ctx_b"
+            ),
+            "c",
+        )
+
+        expected = randint(StreamKey.root(SEED, "ctx"))
+        assert whole == {"test_ctx_a": [expected], "test_ctx_b": [expected]}
+        assert alone == {"test_ctx_b": [expected]}
+
+
+# ---------------------------------------------------------------------------
+# Strategy files: root(S, "file", path)
+# ---------------------------------------------------------------------------
+
+
+FILE_A = """
+    from pytest_strategy import RNG, Parameter, RNGInteger, TestArg, register
+
+    DRAW = RNG.integer(0, 10**9)
+
+    @register("ps_file_a")
+    def file_a():
+        return Parameter(
+            TestArg("d", value=DRAW), TestArg("x", rng_type=RNGInteger(0, 10**9)), nsamples=2
+        )
+"""
+
+# A strategy file that reseeds the RNG when it is imported
+FILE_B = """
+    from pytest_strategy import RNG, Parameter, TestArg, register
+
+    RNG.seed(5)
+    DRAW = RNG.integer(0, 10**9)
+
+    @register("ps_file_b")
+    def file_b():
+        return Parameter(TestArg("d", value=DRAW), nsamples=1)
+"""
+
+TEST_A = """
+    import random
+
+    from pytest_strategy import RNG, strategy
+    from pytest_strategy._streams import StreamKey
+
+    @strategy("ps_file_a")
+    def test_a(d, x):
+        pass
+
+    def test_user_stream(request):
+        assert RNG.get_seed() == request.config.getoption("--rng-seed")
+        RNG.refresh_seed(key=request.node.nodeid)
+        key = StreamKey.root(RNG.get_seed(), "user", request.node.nodeid)
+        assert RNG.integer(0, 10**9) == random.Random(key.seed_int()).randint(0, 10**9)
+"""
+
+TEST_B = """
+    from pytest_strategy import strategy
+
+    @strategy("ps_file_b")
+    def test_b(d):
+        pass
+"""
+
+
+@pytest.fixture
+def file_project(pytester, values_dump):
+    pytester.makeconftest(values_dump.conftest)
+    for folder, strategies, tests in (("a", FILE_A, TEST_A), ("b", FILE_B, TEST_B)):
+        directory = pytester.path / "tests" / folder
+        directory.mkdir(parents=True)
+        (directory / "strategies.py").write_text(dedent(strategies))
+        (directory / f"test_{folder}.py").write_text(dedent(tests))
+    return values_dump
+
+
+class TestFileStreams:
+    def test_draws_are_the_same_for_full_subset_and_reversed_runs(self, file_project):
+        runs = {
+            "full": file_project.collect(f"--rng-seed={SEED}"),
+            "subset": file_project.collect(f"--rng-seed={SEED}", "tests/a"),
+            "reversed": file_project.collect(f"--rng-seed={SEED}", "tests/b", "tests/a"),
+        }
+
+        rows_of_a = {
+            run: sorted(row for row in rows if "test_a.py::test_a[" in row[0])
+            for run, rows in runs.items()
+        }
+        assert rows_of_a["full"] == rows_of_a["subset"] == rows_of_a["reversed"]
+        expected = randint(StreamKey.root(SEED, "file", "tests/a/strategies.py"))
+        assert by_test(rows_of_a["full"], "d") == {"test_a": [expected, expected]}
+
+    def test_a_reseed_in_a_file_changes_only_that_file(self, file_project):
+        rows = file_project.collect(f"--rng-seed={SEED}", "tests/b", "tests/a")
+
+        # The test bodies check RNG.get_seed() and their refresh_seed stream
+        assert by_test(rows, "d")["test_b"] == [random.Random(5).randint(0, 10**9)]
+
+
+SHARED_STRATEGIES = """
+    import pathlib
+
+    from pytest_strategy import RNG, Parameter, TestArg, register
+
+    DRAW = RNG.integer(0, 10**9)
+    pathlib.Path(__file__).with_name("draw.txt").write_text(str(DRAW))
+
+    @register("ps_shared")
+    def shared():
+        return Parameter(TestArg("d", value=DRAW), nsamples=1)
+"""
+
+SHARED_TESTS = """
+    from pytest_strategy import strategy
+
+    @strategy("ps_shared")
+    def test_shared(d):
+        pass
+"""
+
+
+def test_a_file_outside_the_rootdir_draws_the_same_in_two_checkouts(pytester, monkeypatch):
+    draws = []
+    for base in ("one", "deeper/two"):
+        proj = pytester.path / base / "proj"
+        shared = pytester.path / base / "shared"
+        proj.mkdir(parents=True)
+        shared.mkdir()
+        (proj / "pytest.ini").write_text("[pytest]\ntestpaths = ../shared\n")
+        (shared / "x_strategies.py").write_text(dedent(SHARED_STRATEGIES))
+        (shared / "test_x.py").write_text(dedent(SHARED_TESTS))
+        monkeypatch.chdir(proj)
+
+        result = pytester.runpytest_subprocess("-p", "no:cacheprovider", f"--rng-seed={SEED}")
+
+        result.assert_outcomes(passed=1)
+        draws.append(int((shared / "draw.txt").read_text()))
+
+    assert draws == [randint(StreamKey.root(SEED, "file", "../shared/x_strategies.py"))] * 2
+
+
+# A strategy file a constraint imports while the rows are drawn
+LATE_STRATEGIES = """
+    from pytest_strategy import RNG, Parameter, TestArg, register
+
+    DRAW = RNG.integer(0, 10**9)
+
+    @register("ps_late")
+    def late():
+        return Parameter(TestArg("d", value=DRAW), nsamples=1)
+"""
+
+LATE_TESTS = """
+    import random
+
+    from pytest_strategy import RNG, Parameter, RNGInteger, TestArg, strategy
+    from pytest_strategy._streams import StreamKey
+
+    SEEN = []
+
+    def imports_late(v):
+        import late_strategies
+
+        SEEN.append(late_strategies.DRAW)
+        return True
+
+    def factory():
+        return Parameter(
+            TestArg("x", rng_type=RNGInteger(0, 9)), vector_constraints=[imports_late], nsamples=2
+        )
+
+    @strategy(factory)
+    def test_x(x):
+        pass
+
+    def test_the_file_drew_from_its_stream():
+        key = StreamKey.root(RNG.get_seed(), "file", "lib/late_strategies.py")
+        assert set(SEEN) == {random.Random(key.seed_int()).randint(0, 10**9)}
+"""
+
+
+def test_a_strategy_file_imported_by_a_constraint_draws_from_its_stream(pytester):
+    pytester.makeini("[pytest]\npythonpath = lib\n")
+    pytester.mkdir("lib")
+    (pytester.path / "lib" / "late_strategies.py").write_text(dedent(LATE_STRATEGIES))
+    pytester.makepyfile(test_late=LATE_TESTS)
+
+    result = pytester.runpytest_subprocess("-p", "no:cacheprovider", f"--rng-seed={SEED}")
+
+    result.assert_outcomes(passed=3)
+
+
+# ---------------------------------------------------------------------------
+# Test modules, fixtures and test phases
+# ---------------------------------------------------------------------------
+
+
+RUN_CONFTEST = """
+    import os
+
+    import pytest
+
+    from pytest_strategy import RNG
+    from record import record
+
+    @pytest.fixture(scope="session")
+    def sess():
+        value = RNG.integer(0, 10**9)
+        record("sess", value)
+        return value
+
+    def pytest_collection_modifyitems(items):
+        if os.environ.get("PS_REVERSE"):
+            items.reverse()
+"""
+
+RUN_BODY = """
+    import pytest
+
+    from pytest_strategy import RNG
+    from record import record
+
+    record("module", RNG.integer(0, 10**9))
+
+    @pytest.fixture(scope="module")
+    def mod():
+        value = RNG.integer(0, 10**9)
+        record("mod", value)
+        yield value
+        record("mod teardown", RNG.integer(0, 10**9))
+
+    @pytest.fixture(params=["p", "q"])
+    def par(request):
+        value = RNG.integer(0, 10**9)
+        record(f"par {request.param}", value)
+        return value
+
+    def test_first():
+        record("test_first", RNG.integer(0, 10**9))
+
+    def test_uses(sess, mod):
+        record("test_uses", RNG.integer(0, 10**9))
+
+    def test_reseeds():
+        RNG.seed(5)
+        record("test_reseeds", RNG.integer(0, 10**9))
+
+    def test_par(par):
+        pass
+
+    def test_last():
+        record("test_last", RNG.integer(0, 10**9))
+        record("seed", RNG.get_seed())
+"""
+
+RUN_EARLY = """
+    from pytest_strategy import RNG
+    from record import record
+
+    def test_early(sess):
+        record("test_early", RNG.integer(0, 10**9))
+"""
+
+
+@pytest.fixture
+def run_project(pytester):
+    pytester.makeini("[pytest]\npythonpath = .\n")
+    pytester.makepyfile(record=RECORD)
+    pytester.makeconftest(RUN_CONFTEST)
+    pytester.mkdir("tests")
+    (pytester.path / "tests" / "test_body.py").write_text(dedent(RUN_BODY))
+    (pytester.path / "tests" / "test_early.py").write_text(dedent(RUN_EARLY))
+    return pytester
+
+
+BODY = "tests/test_body.py"
+
+
+class TestBodyAndFixtureStreams:
+    def test_each_draw_comes_from_its_key(self, run_project):
+        records = run_and_read(run_project, passed=7)
+
+        def body(test, phase="call"):
+            return randint(StreamKey.root(SEED, "body", f"{BODY}::{test}", phase))
+
+        def fixture(scope, name, param_index, where, base):
+            # The scope node's ID, the name and the parameter index, then where the
+            # fixture is defined (its file and its function's qualified name) and the
+            # node ID pytest registered it for ("" for the rootdir's conftest.py)
+            return randint(
+                StreamKey.root(SEED, "fixture", scope, name, param_index, where, name, base)
+            )
+
+        assert records == {
+            "module": randint(StreamKey.root(SEED, "module", BODY)),
+            "test_first": body("test_first"),
+            "sess": fixture("", "sess", 0, "conftest.py", ""),
+            "mod": fixture(BODY, "mod", 0, BODY, BODY),
+            "test_uses": body("test_uses"),
+            "test_reseeds": random.Random(5).randint(0, 10**9),
+            "par p": fixture(f"{BODY}::test_par[p]", "par", 0, BODY, BODY),
+            "par q": fixture(f"{BODY}::test_par[q]", "par", 1, BODY, BODY),
+            "test_last": body("test_last"),
+            # test_reseeds' RNG.seed(5) ended with its call phase
+            "seed": SEED,
+            # A module fixture's teardown runs in the teardown of the module's last test
+            "mod teardown": body("test_last", "teardown"),
+            "test_early": randint(
+                StreamKey.root(SEED, "body", "tests/test_early.py::test_early", "call")
+            ),
+        }
+
+    def test_draws_are_the_same_alone_in_the_suite_and_reversed(self, run_project, monkeypatch):
+        suite = run_and_read(run_project, passed=7)
+        alone = run_and_read(run_project, f"{BODY}::test_uses", passed=1)
+        early = run_and_read(run_project, "tests/test_early.py", passed=1)
+        monkeypatch.setenv("PS_REVERSE", "1")
+        reversed_ = run_and_read(run_project, passed=7)
+
+        # Alone, test_uses sets up both fixtures; reversed, test_early sets up sess
+        for label in ("module", "sess", "mod", "test_uses"):
+            assert alone[label] == suite[label], label
+        assert early["sess"] == suite["sess"]
+        assert {k: v for k, v in reversed_.items() if k != "mod teardown"} == {
+            k: v for k, v in suite.items() if k != "mod teardown"
+        }
+
+    def test_draws_are_the_same_under_xdist(self, run_project):
+        pytest.importorskip("xdist")
+        suite = run_and_read(run_project, passed=7)
+
+        distributed = run_and_read(run_project, "-n", "2", passed=7)
+
+        # Which test tears the module fixture down depends on the scheduling
+        suite.pop("mod teardown")
+        distributed.pop("mod teardown")
+        assert distributed == suite
+
+
+# A conftest.py below the initial ones is imported while its folder is collected,
+# outside every stream, so its RNG.seed(5) stays for the rest of the session: the
+# test module, fixture and test-phase streams are keyed by the run's seed, not
+# RNG.get_seed(). A rerun of the node ID makes the conftest an initial one, which
+# pytest_configure's seeding then overrides
+
+RESEEDING_CONFTEST = """
+    import pytest
+
+    from pytest_strategy import RNG
+    from record import record
+
+    RNG.seed(5)
+
+    @pytest.fixture
+    def sub():
+        value = RNG.integer(0, 10**9)
+        record("sub", value)
+        return value
+"""
+
+RESEEDING_TESTS = """
+    from pytest_strategy import RNG
+    from record import record
+
+    record("module", RNG.integer(0, 10**9))
+
+    def test_sub(sub):
+        record("test_sub", RNG.integer(0, 10**9))
+        record("seed", RNG.get_seed())
+"""
+
+
+def test_a_conftest_that_reseeds_leaves_the_module_fixture_and_body_streams(pytester):
+    pytester.makeini("[pytest]\npythonpath = .\n")
+    pytester.makepyfile(record=RECORD)
+    sub = pytester.mkdir("tests") / "sub"
+    sub.mkdir()
+    (sub / "conftest.py").write_text(dedent(RESEEDING_CONFTEST))
+    (sub / "test_sub.py").write_text(dedent(RESEEDING_TESTS))
+
+    # The whole project, so that tests/sub/conftest.py is not an initial conftest
+    records = run_and_read(pytester, passed=1)
+
+    test = "tests/sub/test_sub.py::test_sub"
+    assert records == {
+        "module": randint(StreamKey.root(SEED, "module", "tests/sub/test_sub.py")),
+        "sub": randint(
+            StreamKey.root(
+                SEED, "fixture", test, "sub", 0, "tests/sub/conftest.py", "sub", "tests/sub"
+            )
+        ),
+        "test_sub": randint(StreamKey.root(SEED, "body", test, "call")),
+        # The conftest's seed is what RNG.get_seed() returns in the test
+        "seed": 5,
+    }
+    # Run alone, the conftest is an initial one, which the session's seed overrides
+    assert run_and_read(pytester, test, passed=1) == {**records, "seed": SEED}
+
+
+# The test IDs never change the rows, but a test's phases draw from streams of its
+# node ID, which contains the ID
+
+IDS_TESTS = """
+    from pytest_strategy import RNG, VECTOR_KEY, Parameter, RNGInteger, TestArg, strategy
+    from record import record
+
+    def ps_ids_rows():
+        return Parameter(TestArg("x", rng_type=RNGInteger(0, 10**9)), nsamples=2)
+
+    @strategy(ps_ids_rows)
+    def test_ids(x, request):
+        index = request.node.stash[VECTOR_KEY].index
+        record(f"row {index}", x)
+        record(f"nodeid {index}", request.node.nodeid)
+        record(f"body {index}", RNG.integer(0, 10**9))
+"""
+
+
+def test_the_id_format_changes_the_body_draws_not_the_rows(pytester):
+    pytester.makeini("[pytest]\npythonpath = .\n")
+    pytester.makepyfile(record=RECORD, test_ids=IDS_TESTS)
+
+    names = run_and_read(pytester, passed=2)
+    values = run_and_read(pytester, "-o", "strategies_ids=values", passed=2)
+
+    for index in (0, 1):
+        assert values[f"row {index}"] == names[f"row {index}"]
+        assert values[f"nodeid {index}"] != names[f"nodeid {index}"]
+        for records in (names, values):
+            nodeid = records[f"nodeid {index}"]
+            assert records[f"body {index}"] == randint(StreamKey.root(SEED, "body", nodeid, "call"))
+        assert values[f"body {index}"] != names[f"body {index}"]
+
+
+# Fixtures that pytest sets up for the same scope node under one name: an override
+# that requests the fixture it overrides, session fixtures of one name in two
+# sibling folders' conftest.py files, and one session fixture function that both
+# folders' conftest.py files import
+
+SAME_NAME_CONFTEST = """
+    import pytest
+
+    from pytest_strategy import RNG
+    from record import record
+
+    @pytest.fixture
+    def value():
+        drawn = RNG.integer(0, 10**9)
+        record("value", drawn)
+        return drawn
+
+    @pytest.fixture(scope="module")
+    def modvalue():
+        drawn = RNG.integer(0, 10**9)
+        record("modvalue", drawn)
+        return drawn
+"""
+
+SAME_NAME_OVERRIDE = """
+    import pytest
+
+    from pytest_strategy import RNG
+    from record import record
+
+    @pytest.fixture
+    def value(value):
+        drawn = RNG.integer(0, 10**9)
+        record("value override", drawn)
+        return drawn
+
+    @pytest.fixture(scope="module")
+    def modvalue(modvalue):
+        drawn = RNG.integer(0, 10**9)
+        record("modvalue override", drawn)
+        return drawn
+
+    def test_override(value, modvalue):
+        pass
+"""
+
+SAME_NAME_SIBLING = """
+    import pytest
+
+    from pytest_strategy import RNG
+    from ps_shared_fixtures import port
+    from record import record
+
+    @pytest.fixture(scope="session")
+    def resource():
+        drawn = RNG.integer(0, 10**9)
+        record("resource {folder}", drawn)
+        return drawn
+"""
+
+SAME_NAME_SHARED = """
+    import pytest
+
+    from pytest_strategy import RNG
+
+    @pytest.fixture(scope="session")
+    def port():
+        return RNG.integer(0, 10**9)
+"""
+
+
+@pytest.fixture
+def same_name_project(pytester):
+    pytester.makeini("[pytest]\npythonpath = .\n")
+    pytester.makepyfile(record=RECORD)
+    pytester.makeconftest(SAME_NAME_CONFTEST)
+    pytester.makepyfile(ps_shared_fixtures=SAME_NAME_SHARED)
+    tests = pytester.mkdir("tests")
+    (tests / "test_override.py").write_text(dedent(SAME_NAME_OVERRIDE))
+    for folder in ("a", "b"):
+        (tests / folder).mkdir()
+        (tests / folder / "conftest.py").write_text(
+            dedent(SAME_NAME_SIBLING).replace("{folder}", folder)
+        )
+        (tests / folder / f"test_{folder}.py").write_text(
+            "from record import record\n\n"
+            f"def test_{folder}(resource, port):\n"
+            f"    record('port {folder}', port)\n"
+        )
+    return pytester
+
+
+class TestFixturesOfOneName:
+    def test_each_definition_draws_from_a_stream_of_its_own(self, same_name_project):
+        records = run_and_read(same_name_project, passed=3)
+
+        def fixture(scope, name, where, base):
+            return randint(StreamKey.root(SEED, "fixture", scope, name, 0, where, name, base))
+
+        override = "tests/test_override.py"
+        test = f"{override}::test_override"
+        assert records == {
+            "value": fixture(test, "value", "conftest.py", ""),
+            "value override": fixture(test, "value", override, override),
+            "modvalue": fixture(override, "modvalue", "conftest.py", ""),
+            "modvalue override": fixture(override, "modvalue", override, override),
+            "resource a": fixture("", "resource", "tests/a/conftest.py", "tests/a"),
+            "resource b": fixture("", "resource", "tests/b/conftest.py", "tests/b"),
+            # One function, of a module imported by its name: the folder pytest
+            # registered it for tells them apart
+            "port a": fixture("", "port", "ps_shared_fixtures", "tests/a"),
+            "port b": fixture("", "port", "ps_shared_fixtures", "tests/b"),
+        }
+        # 4.0's first key had no definition, and its second no base: these pairs
+        # drew the same values
+        assert records["value"] != records["value override"]
+        assert records["modvalue"] != records["modvalue override"]
+        assert records["resource a"] != records["resource b"]
+        assert records["port a"] != records["port b"]
+
+    def test_draws_are_the_same_alone_in_the_suite_and_under_xdist(self, same_name_project):
+        suite = run_and_read(same_name_project, passed=3)
+        alone = {
+            **run_and_read(same_name_project, "tests/test_override.py", passed=1),
+            **run_and_read(same_name_project, "tests/b", passed=1),
+            **run_and_read(same_name_project, "tests/a/test_a.py::test_a", passed=1),
+        }
+
+        assert alone == suite
+        if importlib.util.find_spec("xdist") is not None:
+            assert run_and_read(same_name_project, "-n", "2", passed=3) == suite
+
+
+# ---------------------------------------------------------------------------
+# Export: root(S, "export", name, folder)
+# ---------------------------------------------------------------------------
+
+
+EXPORT_STRATEGIES = """
+    import json
+    import pathlib
+
+    from pytest_strategy import Parameter, TestArg, register
+
+    OUT = pathlib.Path(__file__).parent / "export_draws.jsonl"
+
+    def record(name, rng):
+        with open(OUT, "a") as f:
+            f.write(json.dumps([name, rng.random()]) + "\\n")
+        return Parameter(TestArg("e", value=1), nsamples=1)
+
+    @register("ps_export")
+    def exported(rng):
+        return record("ps_export", rng)
+
+    # A factory whose code has no file: its co_filename is "<string>"
+    namespace = {"record": record}
+    exec("def made(rng):\\n    return record('ps_exec', rng)\\n", namespace)
+    register("ps_exec")(namespace["made"])
+"""
+
+EXPORT_TESTS = """
+    from pytest_strategy import RNG, export_strategies
+
+    def test_export(monkeypatch):
+        export_strategies()
+        # Neither the seed RNG.seed() sets nor the working directory changes the streams
+        RNG.seed(5)
+        monkeypatch.chdir("tests")
+        export_strategies()
+"""
+
+
+def test_export_calls_draw_from_the_strategys_folder_stream(pytester):
+    pytester.mkdir("tests")
+    (pytester.path / "tests" / "a").mkdir()
+    (pytester.path / "tests" / "a" / "strategies.py").write_text(dedent(EXPORT_STRATEGIES))
+    (pytester.path / "tests" / "a" / "test_export.py").write_text(dedent(EXPORT_TESTS))
+
+    result = pytester.runpytest_subprocess("-p", "no:cacheprovider", f"--rng-seed={SEED}")
+
+    result.assert_outcomes(passed=1)
+    lines = (pytester.path / "tests" / "a" / "export_draws.jsonl").read_text().splitlines()
+
+    def draw(name, folder):
+        key = StreamKey.root(SEED, "export", name, folder)
+        return [name, random.Random(key.seed_int()).random()]
+
+    # The folder of a factory without a file is "", not the working directory
+    assert [json.loads(line) for line in lines] == [
+        draw("ps_export", "tests/a"),
+        draw("ps_exec", ""),
+    ] * 2
+
+
+INSTALLED_STRATEGIES = """
+    from pytest_strategy import Parameter, TestArg, register
+
+    @register("ps_installed")
+    def installed(rng):
+        return Parameter(TestArg("e", value=rng.randint(0, 10**9)), nsamples=1)
+"""
+
+INSTALLED_TESTS = """
+    import pathlib
+
+    from pytest_strategy import export_strategies
+
+    def test_export():
+        (pathlib.Path(__file__).parent / "export.json").write_text(export_strategies())
+"""
+
+
+def test_an_installed_packages_factory_exports_the_same_from_any_environment(pytester):
+    """Its folder's path depends on where the package is installed; its module does not."""
+    pytester.makeconftest("import ps_installed_strategies")
+    pytester.makepyfile(test_export=INSTALLED_TESTS)
+    exported = []
+    for env, folder in (("env_a", "site-packages"), ("env_b", "dist-packages")):
+        package = pytester.path / env / "lib" / "python3" / folder / "ps_installed_strategies"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text(dedent(INSTALLED_STRATEGIES))
+        # pytest splits ini paths with shlex, which drops Windows backslashes
+        pytester.makeini(f"[pytest]\npythonpath = {package.parent.as_posix()}\n")
+
+        result = pytester.runpytest_subprocess("-p", "no:cacheprovider", f"--rng-seed={SEED}")
+
+        result.assert_outcomes(passed=1)
+        data = json.loads((pytester.path / "export.json").read_text())
+        [entry] = data["strategies"]
+        exported.append(entry["parameter"]["arguments"][0]["value"])
+
+    key = StreamKey.root(SEED, "export", "ps_installed", "ps_installed_strategies")
+    assert exported == [randint(key)] * 2
+
+
+# ---------------------------------------------------------------------------
+# Keys that do not depend on the environment or the checkout
+# ---------------------------------------------------------------------------
+
+
+# Writes what a project draws to draws.jsonl in the working directory
+DRAWS = """
+    import json
+    import pathlib
+
+    def record(label, value):
+        with open(pathlib.Path.cwd() / "draws.jsonl", "a") as out:
+            out.write(json.dumps([label, value]) + "\\n")
+"""
+
+
+def read_draws(path):
+    """Return the values each label recorded in ``path``/draws.jsonl, then remove it."""
+    found = {}
+    for line in (path / "draws.jsonl").read_text().splitlines():
+        label, value = json.loads(line)
+        found.setdefault(label, set()).add(value)
+    (path / "draws.jsonl").unlink()
+    assert all(len(values) == 1 for values in found.values()), found
+    return {label: values.pop() for label, values in found.items()}
+
+
+ROOT_PACKAGE_CONFTEST = """
+    import pytest
+
+    from pytest_strategy import RNG
+    from ps_draws import record
+
+    @pytest.fixture(scope="package")
+    def root_pkg():
+        value = RNG.integer(0, 10**9)
+        record("root_pkg", value)
+        return value
+"""
+
+
+def test_a_package_fixture_of_a_rootdir_that_is_a_package(pytester, monkeypatch):
+    """
+    pytest 9 sets it up for the rootdir's Package, whose node ID is ".", and pytest
+    8 for the session, whose node ID is "": both are keyed by "", so the fixture
+    draws the same on both.
+    """
+    tests = pytester.mkdir("tests")
+    (tests / "pytest.ini").write_text(f"[pytest]\npythonpath = {pytester.path.as_posix()}\n")
+    (tests / "__init__.py").write_text("")
+    (tests / "conftest.py").write_text(dedent(ROOT_PACKAGE_CONFTEST))
+    (tests / "test_a.py").write_text("def test_a(root_pkg):\n    pass\n")
+    (tests / "sub").mkdir()
+    (tests / "sub" / "__init__.py").write_text("")
+    (tests / "sub" / "test_b.py").write_text("def test_b(root_pkg):\n    pass\n")
+    pytester.makepyfile(ps_draws=DRAWS)
+    monkeypatch.chdir(tests)
+
+    result = pytester.runpytest_subprocess("-p", "no:cacheprovider", f"--rng-seed={SEED}")
+
+    result.assert_outcomes(passed=2)
+    key = StreamKey.root(SEED, "fixture", "", "root_pkg", 0, "conftest.py", "root_pkg", "")
+    assert read_draws(tests) == {"root_pkg": randint(key)}
+
+
+PACKAGE_FIXTURES = """
+    import pytest
+
+    from pytest_strategy import RNG, Parameter, TestArg, register
+
+    @pytest.fixture(scope="session")
+    def device():
+        return RNG.integer(0, 10**9)
+
+    @register("ps_device")
+    def device_rows(rng):
+        return Parameter(TestArg("d", value=rng.randint(0, 10**9)), nsamples=1)
+"""
+
+PACKAGE_TESTS = """
+    import json
+
+    from pytest_strategy import export_strategies
+    from ps_draws import record
+
+    def test_device(device):
+        record("device", device)
+        exported = json.loads(export_strategies())["strategies"]
+        [device] = [e["parameter"] for e in exported if e["name"] == "ps_device"]
+        record("export", device["arguments"][0]["value"])
+"""
+
+
+def test_a_packages_fixture_draws_the_same_installed_or_from_its_source(pytester):
+    """
+    A package that ships fixtures and strategies, run installed (tox, CI) and in
+    editable mode from its checkout's src/ folder: they are keyed by their module's
+    name, so a seed recorded in one reruns in the other.
+    """
+    pytester.makeconftest("from acme_ps.testing import device")
+    pytester.makepyfile(ps_draws=DRAWS, test_device=PACKAGE_TESTS)
+    draws = []
+    for folder in ("src", ".tox/py/lib/python3/site-packages"):
+        package = pytester.path / folder / "acme_ps"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("")
+        (package / "testing.py").write_text(dedent(PACKAGE_FIXTURES))
+        pythonpath = f"{package.parent.as_posix()} {pytester.path.as_posix()}"
+        pytester.makeini(f"[pytest]\npythonpath = {pythonpath}\n")
+
+        result = pytester.runpytest_subprocess("-p", "no:cacheprovider", f"--rng-seed={SEED}")
+
+        result.assert_outcomes(passed=1)
+        draws.append(read_draws(pytester.path))
+        (package / "testing.py").unlink()
+
+    device = StreamKey.root(SEED, "fixture", "", "device", 0, "acme_ps.testing", "device", "")
+    export = StreamKey.root(SEED, "export", "ps_device", "acme_ps.testing")
+    assert draws == [{"device": randint(device), "export": randint(export)}] * 2
+
+
+def run_package_project(pytester, layout, name):
+    """
+    Run a project whose tests/conftest.py imports the fixture ``device`` from the
+    package module acme_ps.<name>, first from its checkout, then installed, and
+    return what each run drew. The src layout has testpaths = tests, which pytest
+    collects from the rootdir; the flat layout has its rootdir in tests/
+    (tests/pytest.ini), so that the package is next to the rootdir.
+    """
+    pytester.makepyfile(ps_draws=DRAWS)
+    tests = pytester.mkdir("tests")
+    (tests / "conftest.py").write_text(f"from acme_ps.{name} import device\n")
+    (tests / "test_device.py").write_text(dedent(PACKAGE_TESTS))
+    rootdir, args = (tests, ["tests"]) if layout == "flat" else (pytester.path, [])
+    draws = []
+    for folder in ("." if layout == "flat" else "src", ".tox/py/lib/python3/site-packages"):
+        package = pytester.path / folder / "acme_ps"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("")
+        (package / f"{name}.py").write_text(dedent(PACKAGE_FIXTURES))
+        pythonpath = f"{package.parent.as_posix()} {pytester.path.as_posix()}"
+        testpaths = "" if layout == "flat" else "testpaths = tests\n"
+        (rootdir / "pytest.ini").write_text(f"[pytest]\n{testpaths}pythonpath = {pythonpath}\n")
+
+        result = pytester.runpytest_subprocess(
+            "-p", "no:cacheprovider", f"--rng-seed={SEED}", *args
+        )
+
+        result.assert_outcomes(passed=1)
+        draws.append(read_draws(pytester.path))
+        # The working directory is on sys.path: the next run must not find it there
+        shutil.rmtree(package)
+    return draws
+
+
+def package_draws(where, folder, base):
+    """What test_device records when the fixture and the factory are keyed by ``where``."""
+    device = StreamKey.root(SEED, "fixture", "", "device", 0, where, "device", base)
+    export = StreamKey.root(SEED, "export", "ps_device", folder)
+    return {"device": randint(device), "export": randint(export)}
+
+
+@pytest.mark.parametrize("name", ["testing", "test_utils", "strategies"])
+def test_a_packages_fixture_draws_the_same_installed_or_next_to_the_rootdir(pytester, name):
+    """
+    The same for a flat layout whose rootdir is its tests/ folder: the package's
+    name begins next to the rootdir, not with its folder or one above it. A module
+    there named like a test module or a strategy file is outside the rootdir and
+    the testpaths, so it has its module's name too: these runs do not collect its
+    folder, and a run that does imports it under that same package name without
+    consider_namespace_packages (see the next tests).
+    """
+    draws = run_package_project(pytester, "flat", name)
+
+    module = f"acme_ps.{name}"
+    assert draws == [package_draws(module, module, "")] * 2
+
+
+ACME_STRATEGIES = """
+    from pytest_strategy import Parameter, TestArg, register
+
+    @register("ps_acme")
+    def acme_rows(rng):
+        return Parameter(TestArg("e", value=rng.randint(0, 10**9)), nsamples=1)
+"""
+
+ACME_TESTS = """
+    import json
+
+    from pytest_strategy import export_strategies
+    from ps_draws import record
+
+    def test_device(device):
+        record("device", device)
+        exported = {e["name"]: e["parameter"] for e in json.loads(export_strategies())["strategies"]}
+        record("export", exported["ps_device"]["arguments"][0]["value"])
+        record("strategies", exported["ps_acme"]["arguments"][0]["value"])
+"""
+
+
+@pytest.mark.parametrize("mode", ["prepend", "append", "importlib"])
+def test_a_package_module_next_to_a_rootdir_in_tests_draws_the_same_in_every_run(
+    pytester, monkeypatch, mode
+):
+    """
+    A flat layout with its rootdir in tests/ (tests/pytest.ini, pythonpath = ..),
+    whose tests/conftest.py imports acme_ps/test_utils.py and acme_ps/strategies.py:
+    the runs that do not collect acme_ps/ and those that do (-c tests/pytest.ini
+    from the project, which collects the project, and pytest . ../acme_ps with or
+    without --doctest-modules) draw the same, because without
+    consider_namespace_packages pytest imports a regular package's module under
+    its package name, acme_ps.test_utils, in every import mode, and the session's
+    recording of it does not replace that name with its path.
+    """
+    proj = pytester.path
+    (proj / "ps_draws.py").write_text(dedent(DRAWS))
+    (proj / "acme_ps").mkdir()
+    (proj / "acme_ps" / "__init__.py").write_text("")
+    (proj / "acme_ps" / "test_utils.py").write_text(dedent(PACKAGE_FIXTURES))
+    (proj / "acme_ps" / "strategies.py").write_text(dedent(ACME_STRATEGIES))
+    tests = pytester.mkdir("tests")
+    (tests / "pytest.ini").write_text("[pytest]\npythonpath = ..\n")
+    (tests / "conftest.py").write_text(
+        "import acme_ps.strategies\nfrom acme_ps.test_utils import device\n"
+    )
+    (tests / "test_acme.py").write_text(dedent(ACME_TESTS))
+    runs = [
+        (tests, []),
+        (proj, ["tests/test_acme.py::test_device"]),
+        (proj, ["tests"]),
+        (proj, ["-c", "tests/pytest.ini"]),
+        (tests, ["--doctest-modules", ".", "../acme_ps"]),
+        (tests, [".", "../acme_ps"]),
+    ]
+    draws = []
+    for cwd, args in runs:
+        monkeypatch.chdir(cwd)
+        result = pytester.runpytest_subprocess(
+            "-p", "no:cacheprovider", f"--rng-seed={SEED}", f"--import-mode={mode}", *args
+        )
+
+        result.assert_outcomes(passed=1)
+        draws.append(read_draws(cwd))
+
+    device = StreamKey.root(SEED, "fixture", "", "device", 0, "acme_ps.test_utils", "device", "")
+    export = StreamKey.root(SEED, "export", "ps_device", "acme_ps.test_utils")
+    strategies = StreamKey.root(SEED, "export", "ps_acme", "acme_ps.strategies")
+    expected = {
+        "device": randint(device),
+        "export": randint(export),
+        "strategies": randint(strategies),
+    }
+    assert draws == [expected] * len(runs)
+
+
+NAMESPACE_STRATEGIES = """
+    from pytest_strategy import Parameter, TestArg, register
+
+    @register("ps_ns_acme")
+    def acme_rows(rng):
+        return Parameter(TestArg("e", value=rng.randint(0, 10**9)), nsamples=1)
+"""
+
+NAMESPACE_TESTS = """
+    import json
+    import pathlib
+
+    import pytest
+
+    from pytest_strategy import RNG, export_strategies
+
+    @pytest.fixture(scope="session")
+    def drawn():
+        return RNG.integer(0, 10**9)
+
+    def test_ns(request, drawn):
+        exported = {e["name"]: e["parameter"] for e in json.loads(export_strategies())["strategies"]}
+        found = {
+            "test": request.node.nodeid,
+            "fixture": drawn,
+            "export": exported["ps_ns_acme"]["arguments"][0]["value"],
+        }
+        with open(pathlib.Path.cwd() / "draws.jsonl", "a") as out:
+            for label, value in found.items():
+                out.write(json.dumps([label, value]) + "\\n")
+"""
+
+# What the pytest console script runs, from a folder of its own (sys.path[0])
+CONSOLE_SCRIPT = """
+    import sys
+
+    from pytest import console_main
+
+    sys.exit(console_main())
+"""
+
+
+def run_launched(launcher, cwd, *args):
+    """
+    Run pytest with the command ``launcher`` in ``cwd`` and return what it drew.
+
+    pytester's runs put their working directory on PYTHONPATH, which would hide
+    the difference between the console script (its own folder on sys.path) and
+    python -m pytest (the working directory on sys.path), so this runs pytest in
+    this process's environment.
+    """
+    done = subprocess.run(
+        [*launcher, "-p", "no:cacheprovider", f"--rng-seed={SEED}", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    return read_draws(cwd)
+
+
+@pytest.mark.parametrize("pair", ["launcher", "cwd", "import-mode"])
+def test_with_namespace_packages_a_recorded_package_module_keeps_its_path(pytester, pair):
+    """
+    With consider_namespace_packages = true, pytest names a regular package's
+    module after the folders on sys.path: ns/acme_ns/test_ns.py (ns/ has no
+    __init__.py), next to a rootdir in tests/, is ns.acme_ns.test_ns when python
+    -m pytest runs in the project folder, which it puts on sys.path, and
+    acme_ns.test_ns from the console script or from tests/; with a conftest.py in
+    ns/, --import-mode=importlib names it from its whole path. With that option,
+    rule 3 keys a module the session imported by its path by its path also in a
+    regular package, so each pair draws one value: the launcher (the console
+    script or python -m pytest, -c tests/pytest.ini from the project), the working
+    directory (python -m pytest . ../ns from tests/, or -c tests/pytest.ini tests
+    ns from the project) and --import-mode (. ../ns from tests/, with a
+    conftest.py in ns/).
+    """
+    proj = pytester.mkdir("proj")
+    tests = proj / "tests"
+    tests.mkdir()
+    (tests / "pytest.ini").write_text("[pytest]\nconsider_namespace_packages = true\n")
+    (tests / "test_inside.py").write_text("def test_inside():\n    pass\n")
+    package = proj / "ns" / "acme_ns"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "strategies.py").write_text(dedent(NAMESPACE_STRATEGIES))
+    (package / "test_ns.py").write_text(dedent(NAMESPACE_TESTS))
+    script = pytester.mkdir("bin") / "pytest_script.py"
+    script.write_text(dedent(CONSOLE_SCRIPT))
+    console, module = [sys.executable, str(script)], [sys.executable, "-m", "pytest"]
+    modes = ["prepend", "append", "importlib"]
+    if pair == "launcher":
+        runs = [
+            (launcher, proj, [f"--import-mode={mode}", "-c", "tests/pytest.ini"])
+            for mode in modes
+            for launcher in (console, module)
+        ]
+    elif pair == "cwd":
+        runs = [
+            run
+            for mode in modes
+            for run in (
+                (module, tests, [f"--import-mode={mode}", ".", "../ns"]),
+                (module, proj, [f"--import-mode={mode}", "-c", "tests/pytest.ini", "tests", "ns"]),
+            )
+        ]
+    else:
+        (proj / "ns" / "conftest.py").write_text("")
+        runs = [(module, tests, [f"--import-mode={mode}", ".", "../ns"]) for mode in modes]
+
+    draws = [run_launched(launcher, cwd, *args) for launcher, cwd, args in runs]
+
+    test = draws[0]["test"]
+    fixture = StreamKey.root(
+        SEED,
+        "fixture",
+        "",
+        "drawn",
+        0,
+        "../ns/acme_ns/test_ns.py",
+        "drawn",
+        test.partition("::")[0],
+    )
+    export = StreamKey.root(SEED, "export", "ps_ns_acme", "../ns/acme_ns")
+    expected = {"test": test, "fixture": randint(fixture), "export": randint(export)}
+    assert draws == [expected] * len(runs)
+
+
+@pytest.mark.parametrize("name", ["test_utils", "strategies"])
+def test_a_package_module_named_like_a_test_module_keeps_its_path_in_a_checkout(pytester, name):
+    """
+    A file named like a test module or a strategy file inside the rootdir is keyed
+    by its path in every run: src/acme_ps/test_utils.py, which pytest never
+    collects with testpaths = tests, is keyed by its path in the checkout and by
+    its module's name installed, so the two draw different values (the limitation
+    docs/dev.md states; renaming the module avoids it).
+    """
+    draws = run_package_project(pytester, "src", name)
+
+    module = f"acme_ps.{name}"
+    assert draws == [
+        package_draws(f"src/acme_ps/{name}.py", "src/acme_ps", "tests"),
+        package_draws(module, module, "tests"),
+    ]
+
+
+# A test module and a strategy file in a folder that a run names on the command
+# line, outside the testpaths (testpaths = tests/unit and pytest tests/integration,
+# or this repository's testpaths = tests and pytest examples/), or in a testpaths
+# folder outside the rootdir. pytest imports them by their paths, under module
+# names that depend on --import-mode
+
+OUTSIDE_STRATEGIES = """
+    from pytest_strategy import Parameter, TestArg, register
+
+    @register("ps_outside")
+    def outside(rng):
+        return Parameter(TestArg("e", value=rng.randint(0, 10**9)), nsamples=1)
+"""
+
+OUTSIDE_TESTS = """
+    import json
+
+    import pytest
+
+    from pytest_strategy import RNG, export_strategies
+    from ps_draws import record
+
+    @pytest.fixture
+    def drawn():
+        return RNG.integer(0, 10**9)
+
+    def test_outside(drawn, request):
+        record("test", request.node.nodeid)
+        record("fixture", drawn)
+        exported = json.loads(export_strategies())["strategies"]
+        [outside] = [e["parameter"] for e in exported if e["name"] == "ps_outside"]
+        record("export", outside["arguments"][0]["value"])
+"""
+
+
+@pytest.mark.parametrize(
+    ("testpaths", "folder"),
+    [("tests/unit", "tests/integration"), ("tests", "integration")],
+    ids=["integration-next-to-unit", "folder-next-to-the-testpaths"],
+)
+@pytest.mark.parametrize("mode", ["prepend", "append", "importlib"])
+def test_a_test_module_outside_the_testpaths_draws_the_same_in_every_import_mode(
+    pytester, testpaths, folder, mode
+):
+    """
+    A fixture in a test module and export_strategies() for a strategy file in a
+    folder that the command line names outside the testpaths: they are keyed by
+    their paths, in that run and in the run of the test's node ID, whatever module
+    names --import-mode gives them.
+    """
+    pytester.makepyfile(ps_draws=DRAWS)
+    pytester.makeini(f"[pytest]\ntestpaths = {testpaths}\npythonpath = .\n")
+    (pytester.path / testpaths).mkdir(parents=True)
+    (pytester.path / testpaths / "test_other.py").write_text("def test_other():\n    pass\n")
+    (pytester.path / folder).mkdir(parents=True)
+    (pytester.path / folder / "strategies.py").write_text(dedent(OUTSIDE_STRATEGIES))
+    (pytester.path / folder / "test_outside.py").write_text(dedent(OUTSIDE_TESTS))
+    module = f"{folder}/test_outside.py"
+    test = f"{module}::test_outside"
+    draws = []
+    for target in (folder, test):
+        result = pytester.runpytest_subprocess(
+            "-p", "no:cacheprovider", f"--rng-seed={SEED}", f"--import-mode={mode}", target
+        )
+
+        result.assert_outcomes(passed=1)
+        draws.append(read_draws(pytester.path))
+
+    fixture = StreamKey.root(SEED, "fixture", test, "drawn", 0, module, "drawn", module)
+    export = StreamKey.root(SEED, "export", "ps_outside", folder)
+    expected = {"test": test, "fixture": randint(fixture), "export": randint(export)}
+    assert draws == [expected] * 2
+
+
+def test_a_testpaths_folder_outside_the_rootdir_draws_the_same_in_every_import_mode(
+    pytester, monkeypatch
+):
+    """
+    The same for a testpaths entry outside the rootdir (testpaths = ../shared): a
+    file named like a test module or a strategy file is keyed by its path outside
+    the rootdir too.
+    """
+    proj = pytester.mkdir("proj")
+    shared = pytester.mkdir("shared")
+    (shared / "strategies.py").write_text(dedent(OUTSIDE_STRATEGIES))
+    (shared / "test_outside.py").write_text(dedent(OUTSIDE_TESTS))
+    (proj / "ps_draws.py").write_text(dedent(DRAWS))
+    (proj / "pytest.ini").write_text("[pytest]\ntestpaths = ../shared\npythonpath = .\n")
+    monkeypatch.chdir(proj)
+    draws = []
+    for mode in ("prepend", "append", "importlib"):
+        result = pytester.runpytest_subprocess(
+            "-p", "no:cacheprovider", f"--rng-seed={SEED}", f"--import-mode={mode}"
+        )
+
+        result.assert_outcomes(passed=1)
+        draws.append(read_draws(proj))
+
+    # pytest names the test outside the rootdir from its testpaths folder
+    test = draws[0]["test"]
+    module = "../shared/test_outside.py"
+    base = test.partition("::")[0]
+    fixture = StreamKey.root(SEED, "fixture", test, "drawn", 0, module, "drawn", base)
+    export = StreamKey.root(SEED, "export", "ps_outside", "../shared")
+    expected = {"test": test, "fixture": randint(fixture), "export": randint(export)}
+    assert draws == [expected] * 3
+
+
+OUTSIDE_CONFTEST = """
+    import pytest
+
+    from pytest_strategy import RNG
+    from ps_draws import record
+
+    @pytest.fixture(scope="session")
+    def conf():
+        value = RNG.integer(0, 10**9)
+        record("conftest", value)
+        return value
+"""
+
+
+@pytest.mark.parametrize("option", ["-c", "--rootdir"])
+@pytest.mark.parametrize("mode", ["prepend", "append", "importlib"])
+def test_a_test_module_outside_the_rootdir_draws_the_same_in_every_import_mode(
+    pytester, option, mode
+):
+    """
+    A test module, its folder's conftest.py and strategy file in a folder that the
+    command line names outside the rootdir (set with -c or --rootdir) and the
+    testpaths, a folder that is not a package: pytest and the plugin import them by
+    their paths in that session, under module names that --import-mode derives
+    from their paths (prepend names the conftest module "conftest" and the test
+    module "test_outside"), so they are keyed by their paths, in the run of the
+    folder and of the test's node ID.
+    """
+    pytester.makepyfile(ps_draws=DRAWS)
+    proj = pytester.mkdir("proj")
+    (proj / "tests").mkdir()
+    (proj / "tests" / "test_inside.py").write_text("def test_inside():\n    pass\n")
+    other = pytester.mkdir("other")
+    (other / "conftest.py").write_text(dedent(OUTSIDE_CONFTEST))
+    (other / "strategies.py").write_text(dedent(OUTSIDE_STRATEGIES))
+    (other / "test_outside.py").write_text(
+        dedent(OUTSIDE_TESTS).replace("def test_outside(drawn,", "def test_outside(conf, drawn,")
+    )
+    if option == "-c":
+        (proj / "pytest.ini").write_text("[pytest]\ntestpaths = tests\n")
+        rootdir = ["-c", "proj/pytest.ini"]
+    else:
+        rootdir = ["--rootdir=proj"]
+    draws = []
+    for target in ("other", "other/test_outside.py::test_outside"):
+        result = pytester.runpytest_subprocess(
+            "-p",
+            "no:cacheprovider",
+            f"--rng-seed={SEED}",
+            f"--import-mode={mode}",
+            *rootdir,
+            target,
+        )
+
+        result.assert_outcomes(passed=1)
+        draws.append(read_draws(pytester.path))
+
+    # pytest registers the fixtures of a conftest.py outside the rootdir for the session
+    conftest = StreamKey.root(SEED, "fixture", "", "conf", 0, "../other/conftest.py", "conf", "")
+    export = StreamKey.root(SEED, "export", "ps_outside", "../other")
+    expected = []
+    for drawn in draws:
+        # pytest names a test outside the rootdir from the path named on the command
+        # line (test_outside.py::test_outside, or ::test_outside for its node ID): the
+        # fixture's scope and base, which are in its key, follow; its definition does not
+        test = drawn["test"]
+        fixture = StreamKey.root(
+            SEED,
+            "fixture",
+            test,
+            "drawn",
+            0,
+            "../other/test_outside.py",
+            "drawn",
+            test.partition("::")[0],
+        )
+        expected.append(
+            {
+                "test": test,
+                "conftest": randint(conftest),
+                "fixture": randint(fixture),
+                "export": randint(export),
+            }
+        )
+    assert draws == expected
+
+
+OUTSIDE_HELPERS = """
+    import pytest
+
+    from pytest_strategy import RNG
+    from ps_draws import record
+
+    @pytest.fixture(scope="session")
+    def helper():
+        value = RNG.integer(0, 10**9)
+        record("helper", value)
+        return value
+"""
+
+# The folder's conftest.py imports the helper by its module's name; a folder that
+# is not a package puts itself on sys.path for --import-mode=importlib
+HELPER_CONFTEST = {
+    False: "import os, sys\nsys.path.insert(0, os.path.dirname(__file__))\n"
+    "from test_helpers import helper\n",
+    True: "from other.test_helpers import helper\n",
+}
+
+
+@pytest.mark.parametrize("package", [False, True], ids=["folder", "package"])
+@pytest.mark.parametrize("mode", ["prepend", "append", "importlib"])
+def test_a_helper_named_like_a_test_module_outside_the_rootdir(pytester, package, mode):
+    """
+    A helper module named like a test module (test_helpers.py) in a folder outside
+    the rootdir and the testpaths, which the folder's conftest.py imports by its
+    module's name: the run of the folder collects it, and the run of a node ID does
+    not. In a regular package (other/__init__.py), pytest imports it under its
+    package name, other.test_helpers, in every import mode (without
+    consider_namespace_packages), so both runs key it by that name, as they do the
+    package's conftest.py, test module and strategy file.
+    In a folder that is not a package, pytest imports a collected file under a name
+    it derives from the path (its basename, or importlib's name), so the session's
+    recording keys it by its path: the run of the folder keys it by its path and
+    the run of the node ID by its module's name, and the two draw other values
+    (the limitation docs/dev.md states); its conftest.py, test module and strategy
+    file, which both runs import by their paths, keep their paths.
+    """
+    pytester.makepyfile(ps_draws=DRAWS)
+    proj = pytester.mkdir("proj")
+    (proj / "tests").mkdir()
+    (proj / "tests" / "test_inside.py").write_text("def test_inside():\n    pass\n")
+    (proj / "pytest.ini").write_text("[pytest]\ntestpaths = tests\n")
+    other = pytester.mkdir("other")
+    if package:
+        (other / "__init__.py").write_text("")
+    (other / "conftest.py").write_text(dedent(OUTSIDE_CONFTEST) + HELPER_CONFTEST[package])
+    (other / "test_helpers.py").write_text(dedent(OUTSIDE_HELPERS))
+    (other / "strategies.py").write_text(dedent(OUTSIDE_STRATEGIES))
+    (other / "test_outside.py").write_text(
+        dedent(OUTSIDE_TESTS).replace(
+            "def test_outside(drawn,", "def test_outside(conf, helper, drawn,"
+        )
+    )
+    draws = []
+    for target in ("other", "other/test_outside.py::test_outside"):
+        result = pytester.runpytest_subprocess(
+            "-p",
+            "no:cacheprovider",
+            f"--rng-seed={SEED}",
+            f"--import-mode={mode}",
+            "-c",
+            "proj/pytest.ini",
+            target,
+        )
+
+        result.assert_outcomes(passed=1)
+        draws.append(read_draws(pytester.path))
+
+    def where(name, run):
+        if package:
+            return f"other.{name}"
+        if name == "test_helpers" and run == 1:
+            return name
+        return f"../other/{name}.py"
+
+    expected = []
+    for run, drawn in enumerate(draws):
+        test = drawn["test"]
+        module = test.partition("::")[0]
+        conftest = StreamKey.root(
+            SEED, "fixture", "", "conf", 0, where("conftest", run), "conf", ""
+        )
+        helper = StreamKey.root(
+            SEED, "fixture", "", "helper", 0, where("test_helpers", run), "helper", ""
+        )
+        fixture = StreamKey.root(
+            SEED, "fixture", test, "drawn", 0, where("test_outside", run), "drawn", module
+        )
+        folder = "other.strategies" if package else "../other"
+        export = StreamKey.root(SEED, "export", "ps_outside", folder)
+        expected.append(
+            {
+                "test": test,
+                "conftest": randint(conftest),
+                "helper": randint(helper),
+                "fixture": randint(fixture),
+                "export": randint(export),
+            }
+        )
+    assert draws == expected
+    # The limitation: only the helper of a folder that is not a package differs
+    assert (draws[0]["helper"] != draws[1]["helper"]) is not package
+
+
+# A library outside the checkout on sys.path (an editable install's .pth entry,
+# PYTHONPATH, a pip install target folder) whose modules are named like a test
+# module and a strategy file: pytest and the plugin never import them by their paths
+
+EXTERNAL_HELPERS = """
+    import pytest
+
+    from pytest_strategy import RNG
+
+    @pytest.fixture(scope="session")
+    def helper():
+        return RNG.integer(0, 10**9)
+"""
+
+EXTERNAL_STRATEGIES = """
+    from pytest_strategy import Parameter, TestArg, register
+
+    @register("ps_external")
+    def external(rng):
+        return Parameter(TestArg("e", value=rng.randint(0, 10**9)), nsamples=1)
+"""
+
+EXTERNAL_TESTS = """
+    import json
+
+    from pytest_strategy import export_strategies
+    from ps_draws import record
+
+    def test_external(helper):
+        record("fixture", helper)
+        exported = json.loads(export_strategies())["strategies"]
+        [external] = [e["parameter"] for e in exported if e["name"] == "ps_external"]
+        record("export", external["arguments"][0]["value"])
+"""
+
+
+def test_a_library_named_like_test_modules_draws_the_same_from_every_checkout_folder(
+    pytester, monkeypatch
+):
+    """
+    The library's extacme/test_helpers.py and extacme/strategies.py, which a
+    checkout's conftest.py imports, are outside its rootdir and testpaths and
+    imported by their module names only: they are keyed by those names, so the same
+    checkout draws the same in two folders (their paths relative to the rootdir
+    differ, ../../libs and ../../../../libs), in every import mode.
+    """
+    libs = pytester.mkdir("libs")
+    (libs / "ps_draws.py").write_text(dedent(DRAWS))
+    (libs / "extacme").mkdir()
+    (libs / "extacme" / "__init__.py").write_text("")
+    (libs / "extacme" / "test_helpers.py").write_text(dedent(EXTERNAL_HELPERS))
+    (libs / "extacme" / "strategies.py").write_text(dedent(EXTERNAL_STRATEGIES))
+    pythonpath = [str(libs), *filter(None, [os.environ.get("PYTHONPATH")])]
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(pythonpath))
+    draws = []
+    for checkout in ("a/proj", "b/x/y/proj"):
+        proj = pytester.path / checkout
+        (proj / "tests").mkdir(parents=True)
+        (proj / "pytest.ini").write_text("[pytest]\ntestpaths = tests\n")
+        (proj / "tests" / "conftest.py").write_text(
+            "import extacme.strategies\nfrom extacme.test_helpers import helper\n"
+        )
+        (proj / "tests" / "test_external.py").write_text(dedent(EXTERNAL_TESTS))
+        monkeypatch.chdir(proj)
+        for mode in ("prepend", "append", "importlib"):
+            result = pytester.runpytest_subprocess(
+                "-p", "no:cacheprovider", f"--rng-seed={SEED}", f"--import-mode={mode}"
+            )
+
+            result.assert_outcomes(passed=1)
+            draws.append(read_draws(proj))
+
+    fixture = StreamKey.root(
+        SEED, "fixture", "", "helper", 0, "extacme.test_helpers", "helper", "tests"
+    )
+    export = StreamKey.root(SEED, "export", "ps_external", "extacme.strategies")
+    assert draws == [{"fixture": randint(fixture), "export": randint(export)}] * 6
+
+
+LINKED_CONFTEST = """
+    import pytest
+
+    from pytest_strategy import RNG
+    from ps_draws import record
+
+    @pytest.fixture(scope="session")
+    def shared_fix():
+        value = RNG.integer(0, 10**9)
+        record("fixture", value)
+        return value
+"""
+
+LINKED_STRATEGIES = """
+    from pytest_strategy import RNG, Parameter, TestArg, register
+
+    DRAW = RNG.integer(0, 10**9)
+
+    @register("ps_linked")
+    def linked():
+        return Parameter(TestArg("d", value=DRAW), nsamples=1)
+"""
+
+LINKED_TESTS = """
+    from pytest_strategy import RNG, strategy
+    from ps_draws import record
+
+    record("module", RNG.integer(0, 10**9))
+
+    @strategy("ps_linked")
+    def test_linked(d, shared_fix):
+        record("file", d)
+"""
+
+
+def test_a_folder_linked_into_two_checkouts_draws_the_same(pytester, monkeypatch):
+    """
+    A test folder linked into checkouts at different depths from a place that does
+    not move with them: its module, strategy file and fixture streams are keyed by
+    the folder as linked, as pytest spells its node IDs, not by where it really is.
+    """
+    shared = pytester.mkdir("shared")
+    (shared / "conftest.py").write_text(dedent(LINKED_CONFTEST))
+    (shared / "x_strategies.py").write_text(dedent(LINKED_STRATEGIES))
+    (shared / "test_linked.py").write_text(dedent(LINKED_TESTS))
+    pytester.makepyfile(ps_draws=DRAWS)
+    draws = []
+    for base in ("one", "deeper/x/two"):
+        proj = pytester.path / base / "proj"
+        proj.mkdir(parents=True)
+        try:
+            os.symlink(shared, proj / "tests_shared", target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks are not available")
+        (proj / "pytest.ini").write_text(f"[pytest]\npythonpath = {pytester.path.as_posix()}\n")
+        monkeypatch.chdir(proj)
+
+        result = pytester.runpytest_subprocess("-p", "no:cacheprovider", f"--rng-seed={SEED}")
+
+        result.assert_outcomes(passed=1)
+        draws.append(read_draws(proj))
+
+    folder = "tests_shared"
+    fixture = ("shared_fix", 0, f"{folder}/conftest.py", "shared_fix", folder)
+    expected = {
+        "module": randint(StreamKey.root(SEED, "module", f"{folder}/test_linked.py")),
+        "file": randint(StreamKey.root(SEED, "file", f"{folder}/x_strategies.py")),
+        "fixture": randint(StreamKey.root(SEED, "fixture", "", *fixture)),
+    }
+    assert draws == [expected, expected]
+
+
+SHIPPED_TESTS = """
+    from pytest_strategy import RNG
+    from ps_draws import record
+
+    record("module", RNG.integer(0, 10**9))
+
+    def test_shipped():
+        record("body", RNG.integer(0, 10**9))
+"""
+
+
+def test_tests_an_installed_package_ships_draw_the_same_from_any_environment(pytester, monkeypatch):
+    """--pyargs: a test module's stream is keyed by its path below site-packages."""
+    pytester.makepyfile(ps_draws=DRAWS)
+    run = pytester.mkdir("run")
+    monkeypatch.chdir(run)
+    draws = []
+    for env in ("venv_a", "deeper/venv_b"):
+        tests = pytester.path / env / "lib" / "python3" / "site-packages" / "ps_shipped" / "tests"
+        tests.mkdir(parents=True)
+        (tests.parent / "__init__.py").write_text("")
+        (tests / "__init__.py").write_text("")
+        (tests / "test_shipped.py").write_text(dedent(SHIPPED_TESTS))
+        pythonpath = f"{tests.parent.parent.as_posix()} {pytester.path.as_posix()}"
+        (run / "pytest.ini").write_text(f"[pytest]\npythonpath = {pythonpath}\n")
+
+        result = pytester.runpytest_subprocess(
+            "-p", "no:cacheprovider", f"--rng-seed={SEED}", "--pyargs", "ps_shipped.tests"
+        )
+
+        result.assert_outcomes(passed=1)
+        draws.append(read_draws(run))
+        (tests / "test_shipped.py").unlink()
+
+    module = StreamKey.root(SEED, "module", "ps_shipped/tests/test_shipped.py")
+    assert draws[0] == draws[1]
+    assert draws[0]["module"] == randint(module)
+
+
+# ---------------------------------------------------------------------------
+# Sessions in one process
+# ---------------------------------------------------------------------------
+
+
+NESTED_STRATEGIES = """
+    from pytest_strategy import RNG, Parameter, RNGInteger, TestArg, register
+
+    RNG.seed(11)
+    DRAW = RNG.integer(0, 10**9)
+
+    @register("ps_nested")
+    def nested(rng):
+        RNG.seed(12)
+        return Parameter(
+            TestArg("d", value=(DRAW, rng.random())),
+            TestArg("x", rng_type=RNGInteger(0, 10**9)),
+            nsamples=3,
+        )
+"""
+
+NESTED_TESTS = """
+    from pytest_strategy import RNG, strategy
+
+    @strategy("ps_nested")
+    def test_nested(d, x):
+        RNG.seed(13)
+        RNG.integer(0, 9)
+"""
+
+
+class TestSessionsInOneProcess:
+    @pytest.fixture
+    def project(self, pytester, values_dump):
+        pytester.makepyfile(strategies=NESTED_STRATEGIES, test_ps_nested=NESTED_TESTS)
+        pytester.makeconftest(values_dump.conftest)
+        return values_dump
+
+    @pytest.mark.parametrize("args", [[], [f"--rng-seed={SEED}"]], ids=["seed-kept", "rng-seed"])
+    def test_a_nested_session_leaves_the_outer_state(self, project, args):
+        RNG.seed(1234)
+        RNG.generator().random()
+        before = (RNG.get_seed(), RNG._ambient.getstate())
+
+        project.run(*args, subprocess=False)
+
+        assert (RNG.get_seed(), RNG._ambient.getstate()) == before
+        assert RNG.generator() is RNG._ambient
+
+    def test_two_sessions_in_one_process_give_the_same_rows(self, project):
+        RNG.seed(1234)
+
+        first = project.collect(subprocess=False)
+        second = project.collect(subprocess=False)
+
+        assert len(first) == 3
+        assert second == first

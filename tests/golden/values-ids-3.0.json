@@ -1,0 +1,44 @@
+{
+  "default": [
+    "test_value_ids.py::test_named[addr=0,len=1]",
+    "test_value_ids.py::test_named[addr=4095,len=64]",
+    "test_value_ids.py::test_named[addr='a long register ...,len=8]",
+    "test_value_ids.py::test_record[addr=0,len=1,checked=False]",
+    "test_value_ids.py::test_record[addr=4095,len=64,checked=False]",
+    "test_value_ids.py::test_record[addr='a long register ...,len=8,checked=False]",
+    "test_value_ids.py::test_series[ch=0,dev='a'0]",
+    "test_value_ids.py::test_series[ch=0,dev='b'0]",
+    "test_value_ids.py::test_series[ch=2,dev='a'0]",
+    "test_value_ids.py::test_series[ch=2,dev='b'0]",
+    "test_value_ids.py::test_series[ch=2,dev='a'1]",
+    "test_value_ids.py::test_series[ch=2,dev='b'1]",
+    "test_value_ids.py::test_series[ch=0,dev='a'1]",
+    "test_value_ids.py::test_series[ch=0,dev='b'1]",
+    "test_value_ids.py::test_point[pt=(0, 0)]",
+    "test_value_ids.py::test_point[pt=('xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...]",
+    "test_value_ids.py::test_point[pt=object]"
+  ],
+  "--vector-mode=test": [
+    "test_value_ids.py::test_named[addr=2048,len=32]",
+    "test_value_ids.py::test_record[addr=2048,len=32,checked=False]",
+    "test_value_ids.py::test_series[ch=0,dev='a']",
+    "test_value_ids.py::test_point[pt=(1, 1)]"
+  ],
+  "--nsamples=auto": [
+    "test_value_ids.py::test_named[addr=0,len=1]",
+    "test_value_ids.py::test_named[addr=4095,len=64]",
+    "test_value_ids.py::test_named[addr='a long register ...,len=8]",
+    "test_value_ids.py::test_record[addr=0,len=1,checked=False]",
+    "test_value_ids.py::test_record[addr=4095,len=64,checked=False]",
+    "test_value_ids.py::test_record[addr='a long register ...,len=8,checked=False]",
+    "test_value_ids.py::test_series[ch=0,dev='a']",
+    "test_value_ids.py::test_series[ch=0,dev='b']",
+    "test_value_ids.py::test_series[ch=2,dev='a'0]",
+    "test_value_ids.py::test_series[ch=2,dev='b'0]",
+    "test_value_ids.py::test_series[ch=2,dev='a'1]",
+    "test_value_ids.py::test_series[ch=2,dev='b'1]",
+    "test_value_ids.py::test_point[pt=(0, 0)]",
+    "test_value_ids.py::test_point[pt=('xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...]",
+    "test_value_ids.py::test_point[pt=object]"
+  ]
+}

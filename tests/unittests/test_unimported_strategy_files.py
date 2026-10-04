@@ -9,27 +9,28 @@ from pytest_strategy._runtime import StrategyRuntime, runtime
 from pytest_strategy.plugin import PytestStrategyPlugin
 
 DECORATED = """
-from pytest_strategy import Strategy
+from pytest_strategy import Parameter, Strategy, TestArg
 
 @Strategy.register("unimp_strat")
 def strat(nsamples):
-    return ("x",), [(1,)]
+    return Parameter(TestArg("x", value=1), nsamples=1)
 """
 
 ALIASED = """
+from pytest_strategy import Parameter, TestArg
 from pytest_strategy import Strategy as S
 
 @S.register("unimp_strat")
 def strat(nsamples):
-    return ("x",), [(1,)]
+    return Parameter(TestArg("x", value=1), nsamples=1)
 """
 
 # Registers without a decorator, so discovery does not import it
 PLAIN_CALL = """
-from pytest_strategy import register
+from pytest_strategy import Parameter, TestArg, register
 
 def strat(nsamples):
-    return ("x",), [(1,)]
+    return Parameter(TestArg("x", value=1), nsamples=1)
 
 register("unimp_strat")(strat)
 """
@@ -116,8 +117,9 @@ class TestDiscoveryCollectsUnimportedFiles:
         path = tmp_path / "latin_strategies.py"
         path.write_bytes(
             b"# -*- coding: latin-1 -*-\n# caf\xe9\n"
-            b"from pytest_strategy import Strategy\n\n@Strategy.register('lat')\n"
-            b"def lat(nsamples):\n    return ('x', [1])\n"
+            b"from pytest_strategy import Parameter, Strategy, TestArg\n\n"
+            b"@Strategy.register('lat')\n"
+            b"def lat(nsamples):\n    return Parameter(TestArg('x', value=1), nsamples=1)\n"
         )
 
         unimported: list[Path] = []

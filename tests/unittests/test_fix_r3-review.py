@@ -29,9 +29,11 @@ from pytest_strategy import (
     RNGWeightedFloat,
     RNGWeightedInteger,
     Strategy,
+    StrategyOptions,
     TestArg,
+    Vector,
 )
-from pytest_strategy._resolver import call_factory
+from pytest_strategy._factory import FactoryInputs, call_factory
 from pytest_strategy._runtime import runtime
 from pytest_strategy.plugin import PytestStrategyPlugin
 from pytest_strategy.rng import RNGEnum, RNGValueError
@@ -40,11 +42,11 @@ from pytest_strategy.strategy import PytestStrategiesWarning
 SRC_DIR = Path(__file__).resolve().parents[2] / "src"
 
 STRATEGY_SOURCE = """
-from pytest_strategy import Strategy
+from pytest_strategy import Parameter, Strategy, TestArg
 
 @Strategy.register("r3_unit_strat")
 def r3_unit_strat(nsamples):
-    return ("x",), [(1,)]
+    return Parameter(TestArg("x", value=1), nsamples=1)
 """
 
 
@@ -168,7 +170,7 @@ class TestWeightTotals:
 
 
 class TestListVectors:
-    """A vector given as a list (e.g. from JSON or YAML) is stored as a tuple."""
+    """A vector given as a list (e.g. from JSON or YAML) is stored as a tuple (a Vector)."""
 
     def _single(self, **kwargs):
         return Parameter(TestArg("x", rng_type=RNGInteger(0, 10)), **kwargs)
@@ -191,9 +193,9 @@ class TestListVectors:
         assert param.directed_vectors == {"a": (1,)}
         assert param.test_vectors == {"b": (2,)}
 
-    def test_pytest_param_vector_is_kept(self):
-        """A tuple is not rebuilt, so a pytest.param keeps its marks and id."""
-        vector = pytest.param(1, 2, 3, marks=pytest.mark.xfail, id="pp")
+    def test_pytest_param_vector_keeps_its_marks(self):
+        """4.0 rebuilds a pytest.param around a Vector of its values, with its marks."""
+        vector = pytest.param(1, 2, 3, marks=pytest.mark.xfail)
         param = Parameter(
             TestArg("x", rng_type=RNGInteger(0, 10)),
             TestArg("y", rng_type=RNGInteger(0, 10)),
@@ -201,11 +203,18 @@ class TestListVectors:
             directed_vectors={"pp": vector},
         )
 
-        assert param.get_vector_by_name("pp") is vector
+        stored = param.get_vector_by_name("pp")
+
+        assert stored is not vector
+        assert stored == vector
+        assert isinstance(stored.values, Vector)
+        assert stored.values._fields == ("x", "y", "z")
+        assert stored.marks == vector.marks
+        assert stored.id is None
 
 
 class TestEmptyVectorName:
-    """Only None means "no filter"; an empty name is a name like any other."""
+    """Only None means "no filter"; an empty name is not a vector's name."""
 
     def test_empty_name_that_no_vector_has_raises(self):
         param = Parameter(
@@ -216,18 +225,28 @@ class TestEmptyVectorName:
         with pytest.raises(KeyError):
             param.generate_vectors(10, filter_by_name="")
 
-    def test_vector_named_empty_can_be_selected(self):
-        param = Parameter(
-            TestArg("x", rng_type=RNGInteger(0, 100)),
-            directed_vectors={"": (7,), "max": (100,)},
-        )
-
-        assert param.generate_vectors(10, filter_by_name="") == [(7,)]
+    def test_vector_named_empty_is_rejected(self):
+        """4.0: a vector's name selects it and becomes its ID, so "" is not a name."""
+        with pytest.raises(RNGValueError, match="^Directed vector names must be non-empty"):
+            Parameter(
+                TestArg("x", rng_type=RNGInteger(0, 100)),
+                directed_vectors={"": (7,), "max": (100,)},
+            )
 
 
 # ---------------------------------------------------------------------------
 # Factory calls
 # ---------------------------------------------------------------------------
+
+
+def _call_factory(factory, nsamples):
+    """Call ``factory`` as the resolver does: ctx comes from the session's hook."""
+    inputs = FactoryInputs(
+        options=StrategyOptions(strategy="s", nsamples=nsamples),
+        rng=RNG.generator(),
+        ctx=lambda: runtime.strategy_context(),
+    )
+    return call_factory("s", factory, inputs)
 
 
 def _logged(fn):
@@ -248,21 +267,21 @@ class TestDecoratedFactories:
         def factory():
             return "made"
 
-        assert call_factory("s", factory, 10) == "made"
+        assert _call_factory(factory, 10) == "made"
 
     def test_wrapped_zero_argument_factory(self):
         @_logged
         def factory():
             return "made"
 
-        assert call_factory("s", factory, 10) == "made"
+        assert _call_factory(factory, 10) == "made"
 
     def test_wrapped_positional_only_factory(self):
         @_logged
-        def factory(n, /):
-            return n
+        def factory(nsamples, /):
+            return nsamples
 
-        assert call_factory("s", factory, 10) == 10
+        assert _call_factory(factory, 10) == 10
 
     def test_wrapped_ctx_only_factory_gets_the_hook_result(self, monkeypatch):
         monkeypatch.setattr(runtime, "strategy_context", lambda: {"channels": [1, 2]})
@@ -271,7 +290,7 @@ class TestDecoratedFactories:
         def factory(ctx):
             return ctx
 
-        assert call_factory("s", factory, 10) == {"channels": [1, 2]}
+        assert _call_factory(factory, 10) == {"channels": [1, 2]}
 
     def test_nsamples_is_not_passed_as_a_ctx_that_keeps_its_default(self, monkeypatch):
         monkeypatch.setattr(runtime, "strategy_context", lambda: None)
@@ -280,7 +299,7 @@ class TestDecoratedFactories:
         def factory(ctx="default"):
             return ctx
 
-        assert call_factory("s", factory, 10) == "default"
+        assert _call_factory(factory, 10) == "default"
 
     def test_type_error_inside_a_wrapped_factory_calls_it_once(self):
         calls = []
@@ -291,7 +310,7 @@ class TestDecoratedFactories:
             raise TypeError("inside the factory")
 
         with pytest.raises(ValueError, match="TypeError: inside the factory"):
-            call_factory("s", factory, 10)
+            _call_factory(factory, 10)
         assert calls == [10]
 
     def test_args_only_wrapper_is_called_positionally(self):
@@ -306,16 +325,17 @@ class TestDecoratedFactories:
         def factory(nsamples):
             return nsamples
 
-        assert call_factory("s", factory, 3) == 3
+        assert _call_factory(factory, 3) == 3
 
     def test_mock_patch_still_gets_its_mock(self):
         from unittest import mock
 
+        # mock.patch passes its mocks to the first parameters
         @mock.patch("os.getcwd", return_value="/patched")
-        def factory(nsamples, getcwd=None):
+        def factory(getcwd, nsamples):
             return nsamples, os.getcwd()
 
-        assert call_factory("s", factory, 4) == (4, "/patched")
+        assert _call_factory(factory, 4) == (4, "/patched")
 
 
 # ---------------------------------------------------------------------------
@@ -405,27 +425,27 @@ class TestDuplicateRegistrationIsReported:
 
     def test_two_functions_of_the_same_name_in_one_file(self):
         source = """
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, Strategy, TestArg
 
             @Strategy.register("r3_small")
             def factory(nsamples):
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
 
             @Strategy.register("r3_small")
             def factory(nsamples):
-                return ("x",), [(2,)]
+                return Parameter(TestArg("x", value=2), nsamples=1)
             """
         with pytest.warns(PytestStrategiesWarning, match=r"my_strategies\.py:8:factory replaces"):
             _exec(source, "/virtual/r3/my_strategies.py")
 
     def test_decorated_factories_in_two_files_name_those_files(self):
         source = """
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, Strategy, TestArg
 
             @Strategy.register("r3_shared")
             @logged
             def factory(nsamples):
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
             """
         _exec(source, "/virtual/r3/a_strategies.py", {"logged": _logged})
         with pytest.warns(PytestStrategiesWarning) as record:
@@ -438,11 +458,11 @@ class TestDuplicateRegistrationIsReported:
     def test_cached_factories(self):
         @functools.cache
         def first(nsamples):
-            return ("x",), [(1,)]
+            return Parameter(TestArg("x", value=1), nsamples=1)
 
         @functools.cache
         def second(nsamples):
-            return ("x",), [(2,)]
+            return Parameter(TestArg("x", value=2), nsamples=1)
 
         Strategy.register("r3_cached")(first)
         with pytest.warns(PytestStrategiesWarning, match="second replaces"):
@@ -450,10 +470,10 @@ class TestDuplicateRegistrationIsReported:
 
     def test_partials_of_different_functions(self):
         def low(nsamples, bound):
-            return ("x",), [(bound,)]
+            return Parameter(TestArg("x", value=bound), nsamples=1)
 
         def high(nsamples, bound):
-            return ("x",), [(bound,)]
+            return Parameter(TestArg("x", value=bound), nsamples=1)
 
         Strategy.register("r3_partial")(functools.partial(low, bound=1))
         with pytest.warns(PytestStrategiesWarning, match="high replaces"):
@@ -462,21 +482,21 @@ class TestDuplicateRegistrationIsReported:
     def test_reexecuted_decorated_and_cached_factories_are_silent(self):
         source = """
             import functools
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, Strategy, TestArg
 
             @Strategy.register("r3_again")
             @logged
             def factory(nsamples):
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
 
             @Strategy.register("r3_again_cached")
             @functools.lru_cache
             def cached(nsamples):
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
 
             @Strategy.register("r3_again_partial")
             def _partial_target(nsamples, bound=0):
-                return ("x",), [(bound,)]
+                return Parameter(TestArg("x", value=bound), nsamples=1)
 
             Strategy.register("r3_again_partial")(functools.partial(_partial_target, bound=1))
             """

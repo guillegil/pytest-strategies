@@ -41,7 +41,7 @@ def _range_test(name, low):
 
 
 class TestPlainDecorators:
-    def test_plain_and_class_decorators_give_the_same_ids(self, pytester):
+    def test_plain_and_class_decorators_give_the_same_rows(self, pytester, values_dump):
         new_api = (
             "from pytest_strategy import Parameter, RNGInteger, TestArg, register, strategy\n\n"
             '@register("v3_same")\n'
@@ -60,11 +60,12 @@ class TestPlainDecorators:
             .replace("@strategy(", "@Strategy.strategy(")
         )
         args = ("-p", "no:cacheprovider", "--rng-seed=7", "--collect-only", "-q")
+        pytester.makeconftest(values_dump.conftest)
 
         pytester.makepyfile(test_same=new_api)
-        new = _node_ids(pytester.runpytest_subprocess(*args))
+        new = values_dump.collect(*args)
         pytester.makepyfile(test_same=old_api)
-        old = _node_ids(pytester.runpytest_subprocess(*args))
+        old = values_dump.collect(*args)
 
         assert len(new) == 10
         assert new == old
@@ -134,17 +135,20 @@ class TestFactoryReference:
 
         result.assert_outcomes(passed=10)
 
-    def test_ids_do_not_depend_on_how_the_factory_is_referenced(self, pytester):
+    def test_rows_do_not_depend_on_how_the_factory_is_referenced(self, pytester, values_dump):
         args = ("-p", "no:cacheprovider", "--rng-seed=3", "--collect-only", "-q")
+        pytester.makeconftest(values_dump.conftest)
         pytester.makepyfile(test_ref=self.SOURCE.format(ref="registered"))
-        by_object = _node_ids(pytester.runpytest_subprocess(*args))
+        by_object = values_dump.collect(*args)
         pytester.makepyfile(test_ref=self.SOURCE.format(ref='"v3_ref"'))
-        by_name = _node_ids(pytester.runpytest_subprocess(*args))
+        by_name = values_dump.collect(*args)
 
-        assert [i for i in by_object if "test_named" in i]
+        assert [row for row in by_object if "test_named" in row[0]]
         assert by_object == by_name
 
-    def test_partial_and_callable_object_ids_are_stable(self, pytester):
+    def test_partial_and_callable_object_rows_are_stable(self, pytester, values_dump):
+        pytest.importorskip("xdist")
+        pytester.makeconftest(values_dump.conftest)
         pytester.makepyfile(test_ref="""
             import functools
 
@@ -170,13 +174,15 @@ class TestFactoryReference:
             """)
         args = ("-p", "no:cacheprovider", "--rng-seed=5")
 
-        first = _node_ids(pytester.runpytest_subprocess(*args, "--collect-only", "-q"))
-        second = _node_ids(pytester.runpytest_subprocess(*args, "--collect-only", "-q"))
-        distributed = pytester.runpytest_subprocess(*args, "-n", "2")
+        first = values_dump.collect(*args, "--collect-only", "-q")
+        second = values_dump.collect(*args, "--collect-only", "-q")
+        distributed = values_dump.run(*args, "-n", "2")
 
         assert len(first) == 6
         assert first == second
         distributed.assert_outcomes(passed=6)
+        gw0 = values_dump.read("values-gw0.json")
+        assert gw0 == values_dump.read("values-gw1.json") == first
 
 
 class TestScopedNames:
@@ -365,7 +371,7 @@ class TestLoading:
         result.assert_outcomes(passed=1, failed=1)
         result.stdout.fnmatch_lines(["*assert (1 + 1) == 3*"])
 
-    def test_import_time_draws_do_not_depend_on_the_order(self, pytester):
+    def test_import_time_draws_do_not_depend_on_the_order(self, pytester, values_dump):
         drawn = (
             "from pytest_strategy import RNG, Parameter, RNGInteger, TestArg, register\n"
             "OFFSET = RNG.integer(0, 10**9)\n\n"
@@ -384,15 +390,19 @@ class TestLoading:
             **{f"{name}/test_{name}": using.format(name=name) for name in ("alpha", "beta")},
         )
         args = ("-p", "no:cacheprovider", "--rng-seed=11", "--collect-only", "-q")
+        pytester.makeconftest(values_dump.conftest)
 
-        full = _node_ids(pytester.runpytest_subprocess(*args))
-        beta = _node_ids(pytester.runpytest_subprocess(*args, "beta"))
-        reverse = _node_ids(pytester.runpytest_subprocess(*args, "beta", "alpha"))
+        def beta_rows(*paths):
+            return [row for row in values_dump.collect(*args, *paths) if "beta" in row[0]]
 
-        assert [i for i in full if "beta" in i] == beta == [i for i in reverse if "beta" in i]
+        full = beta_rows()
+        assert len(full) == 1
+        assert full == beta_rows("beta") == beta_rows("beta", "alpha")
 
     @pytest.mark.parametrize("import_mode", ["prepend", "append", "importlib"])
-    def test_file_imported_from_another_folder_keeps_its_stream(self, pytester, import_mode):
+    def test_file_imported_from_another_folder_keeps_its_stream(
+        self, pytester, values_dump, import_mode
+    ):
         # tests/a imports tests/b's strategies file before pytest reaches tests/b:
         # the plugin still runs it, once, with the file's own random stream
         runs = pytester.path / "runs.txt"
@@ -423,14 +433,15 @@ class TestLoading:
             }
         )
         args = ("-p", "no:cacheprovider", f"--import-mode={import_mode}", "--rng-seed=11")
+        pytester.makeconftest(values_dump.conftest)
 
-        full = pytester.runpytest_subprocess(*args, "-v")
-        subset = pytester.runpytest_subprocess(*args, "-v", "tests/b")
+        full = values_dump.run(*args, "-v")
+        (test_b,) = [row for row in values_dump.read() if "::test_b[" in row[0]]
+        subset = values_dump.run(*args, "-v", "tests/b")
 
         full.assert_outcomes(passed=2)
         subset.assert_outcomes(passed=1)
-        (test_b,) = [line.split()[0] for line in full.outlines if "::test_b[" in line]
-        assert [line.split()[0] for line in subset.outlines if "::test_b[" in line] == [test_b]
+        assert [row for row in values_dump.read() if "::test_b[" in row[0]] == [test_b]
         assert runs.read_text() == "run\nrun\n"
 
     def test_register_with_the_name_keyword(self, pytester):
@@ -570,7 +581,7 @@ class TestPrivateRandom:
             print("DRAW", random.random())
         """
 
-    def test_plain_random_is_not_seeded(self, pytester):
+    def test_plain_random_is_not_seeded(self, pytester, values_dump):
         pytester.makepyfile(test_rand=self.SOURCE)
         args = ("-p", "no:cacheprovider", "--rng-seed=5", "-s")
 
@@ -582,11 +593,10 @@ class TestPrivateRandom:
         ]
         assert draws[0] != draws[1]
         # The strategy's values are still reproduced by the seed
-        ids = [
-            _node_ids(pytester.runpytest_subprocess("--rng-seed=5", "--collect-only", "-q"))
-            for _ in range(2)
-        ]
-        assert ids[0] == ids[1]
+        pytester.makeconftest(values_dump.conftest)
+        values = [values_dump.collect("--rng-seed=5", "--collect-only", "-q") for _ in range(2)]
+        assert len(values[0]) == 1
+        assert values[0] == values[1]
 
 
 class TestSizeGuard:
@@ -711,6 +721,7 @@ class TestReporting:
         )
 
     def test_verbose_summary_under_xdist(self, pytester):
+        pytest.importorskip("xdist")
         pytester.makepyfile(test_report=self.SOURCE.replace("{condition}", "x >= 0"))
 
         result = pytester.runpytest_subprocess("-p", "no:cacheprovider", "-v", "-n", "2")

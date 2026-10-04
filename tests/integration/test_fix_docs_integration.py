@@ -3,9 +3,10 @@ End-to-end checks that documented examples and CLI options actually work.
 
 The package docstring, the runnable snippets of README.md / docs/dev.md and the
 scripts in examples/ are copied into a pytester sandbox and run the way a user
-would run them. These documents went stale before (they called the renamed
-``Parameter.generate_samples`` and a ``--seed`` flag that never existed), and
-nothing ran examples/, so a flaky example went unnoticed.
+would run them, the examples also with each command their docstrings show. These
+documents went stale before (they called the renamed ``Parameter.generate_samples``
+and a ``--seed`` flag that never existed), and nothing ran examples/, so a flaky
+example went unnoticed.
 """
 
 import argparse
@@ -55,10 +56,19 @@ def _cli_actions(parser: argparse.ArgumentParser) -> list:
     return actions
 
 
+def _bench_parser() -> argparse.ArgumentParser:
+    """The command-line parser of benchmarks/bench.py, which docs/dev.md describes."""
+    spec = importlib.util.spec_from_file_location("bench", REPO_ROOT / "benchmarks" / "bench.py")
+    assert spec is not None and spec.loader is not None
+    bench = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bench)
+    return bench.build_parser()
+
+
 def _package_docstring_example() -> str:
     """The "Example Usage" section of ``help(pytest_strategy)``."""
     doc = pytest_strategy.__doc__ or ""
-    return textwrap.dedent(doc.split("Example Usage:", 1)[1].split("Dataclass Support:", 1)[0])
+    return textwrap.dedent(doc.split("Example Usage:", 1)[1].split("Record Parameters:", 1)[0])
 
 
 def _package_docstring_cli_lines() -> list:
@@ -92,9 +102,22 @@ class TestPackageDocstring:
         assert result.parseoutcomes().get("passed", 0) > 0
 
     def test_example_honours_vector_mode(self, pytester):
-        """The factory must return a Parameter: the legacy tuple form ignores --vector-mode."""
+        """The example's directed vectors are the rows --vector-mode=directed_only keeps."""
         pytester.makepyfile(test_doc_example=_package_docstring_example())
         pytester.runpytest("--vector-mode", "directed_only").assert_outcomes(passed=2)
+
+    @pytest.mark.parametrize("seed", ["1", "2"])
+    def test_example_has_the_documented_ids(self, pytester, seed):
+        """The "Test IDs" section names the rows, the same for every seed."""
+        documented = ["directed-zeros", "directed-max", *(f"rand-{i}" for i in range(10))]
+        assert all(f"test_addition[{name}]" in pytest_strategy.__doc__ for name in documented[:3])
+        pytester.makepyfile(test_doc_example=_package_docstring_example())
+
+        result = pytester.runpytest("--collect-only", "-q", f"--rng-seed={seed}")
+
+        assert [line for line in result.stdout.lines if "::" in line] == [
+            f"test_doc_example.py::test_addition[{name}]" for name in documented
+        ]
 
 
 class TestMarkdownExamples:
@@ -109,10 +132,16 @@ class TestMarkdownExamples:
 
 class TestDocumentedCliOptions:
     def test_every_documented_option_exists(self, pytester):
-        """Every --option mentioned in the docs and examples must be accepted by pytest."""
+        """
+        Every --option mentioned in the docs and examples must be accepted by pytest,
+        except the names reserved for later releases, which must not be.
+        """
+        # The names the contributing guide reserves for later releases, which must
+        # not be options yet; only its sentence may name them
+        guide, reserved = _without_reserved((REPO_ROOT / "docs" / "dev.md").read_text("utf-8"))
         sources = [
             (REPO_ROOT / "README.md").read_text(encoding="utf-8"),
-            (REPO_ROOT / "docs" / "dev.md").read_text(encoding="utf-8"),
+            guide,
             pytest_strategy.__doc__ or "",
             *(path.read_text(encoding="utf-8") for path in EXAMPLES),
         ]
@@ -121,6 +150,8 @@ class TestDocumentedCliOptions:
         defined = {option for text in sources for option in DEFINED_OPTION_RE.findall(text)}
 
         known = set(OPTION_RE.findall(pytester.runpytest("--help").stdout.str()))
+        # An alias that pytest accepts but --help does not list (--junit-xml)
+        known.add("--junitxml")
         # The options of the pytest-strategies command (skill install)
         parser = _cli.build_parser()
         known.update(
@@ -129,9 +160,31 @@ class TestDocumentedCliOptions:
             for option in action.option_strings
             if option.startswith("--")
         )
+        # The options of the benchmark script
+        known.update(
+            option
+            for action in _cli_actions(_bench_parser())
+            for option in action.option_strings
+            if option.startswith("--")
+        )
         # Options of the other tools the contributing guide runs (black, mypy)
         known.update({"--check", "--strict"})
+        # The prefix of new options, as the naming rule writes it (--strategy-<x>)
+        known.add("--strategy-")
+        assert reserved
+        assert reserved & known == set()
         assert documented - known - defined == set()
+
+
+def _without_reserved(text: str) -> tuple[str, set[str]]:
+    """
+    Return docs/dev.md without its sentence that reserves names for later releases
+    (D20), and the options that sentence names.
+    """
+    match = re.search(r"Reserved for later releases:(.*?)\.(?:\s|$)", text, re.DOTALL)
+    assert match is not None
+    rest = text[: match.start()] + text[match.end() :]
+    return rest, set(OPTION_RE.findall(match.group(1)))
 
 
 def _load_example_factories(path: Path, monkeypatch) -> tuple:
@@ -176,7 +229,7 @@ class TestExamples:
         module, factories = _load_example_factories(
             REPO_ROOT / "examples" / "enum_example.py", monkeypatch
         )
-        param = factories["role_based_strategy"](nsamples=10)
+        param = factories["role_based_strategy"]()
 
         bad = []
         for seed in range(100):
@@ -187,3 +240,239 @@ class TestExamples:
                 if role is module.UserRole.GUEST and method is not module.RequestMethod.GET
             )
         assert bad == []
+
+    @staticmethod
+    def _run_as_ci(pytester, *args):
+        """
+        Run test_values_example.py as CI does, from the rootdir with the example's
+        folder as testpaths and no path on the command line.
+        """
+        example = REPO_ROOT / "examples" / "test_values_example.py"
+        pytester.mkdir("examples")
+        (pytester.path / "examples" / example.name).write_text(
+            example.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        return pytester.runpytest(
+            "-o", "testpaths=examples", "-o", "python_files=test_values_example.py", *args
+        )
+
+    @pytest.mark.parametrize("seed", [2, 4, 5])
+    def test_values_example_passes_with_its_constraint_turned_off(self, pytester, seed):
+        """CI runs test_values_example.py with --strategy-constraint-off=date_range_test:ordered."""
+        result = self._run_as_ci(
+            pytester,
+            f"--rng-seed={seed}",
+            "--strategy-constraint-off=date_range_test:ordered",
+            "-v",
+        )
+
+        assert result.ret == pytest.ExitCode.OK, result.stdout.str()
+        result.stdout.fnmatch_lines(["  date_range_test (*): *; off: ordered"])
+
+    def test_ci_run_of_the_example_counts_as_the_whole_suite(self, pytester):
+        """The run collects testpaths, so a misspelled name fails CI instead of
+        printing a red line."""
+        result = self._run_as_ci(pytester, "--strategy-constraint-off=date_range_test:orderd")
+
+        assert result.ret == pytest.ExitCode.USAGE_ERROR
+        result.stderr.fnmatch_lines(
+            [
+                "ERROR: --strategy-constraint-off=date_range_test:orderd matched no "
+                "constraint. Did you mean 'date_range_test:ordered'? *"
+            ]
+        )
+
+    def test_values_example_rejects_the_ranges_its_constraint_keeps_out(self, monkeypatch):
+        """With 'ordered' off, date_range_test draws ranges that end before they
+        start, and test_date_ranges expects days_in_range to reject them."""
+        module, factories = _load_example_factories(
+            REPO_ROOT / "examples" / "test_values_example.py", monkeypatch
+        )
+        param = factories["date_range_test"]()
+        assert list(param.vector_constraints) == ["ordered"]
+
+        RNG.seed(1)
+        assert all(row.start_day <= row.end_day for row in param.generate_vectors(50))
+        rows = param.generate_vectors(50, constraints_off=("ordered",))
+        reversed_rows = [row for row in rows if row.start_day > row.end_day]
+        assert reversed_rows
+        for row in reversed_rows:
+            module.test_date_ranges(*row)
+
+
+def _example_commands() -> list:
+    """The pytest command lines that the examples show, as (example, arguments)."""
+    params = []
+    for path in EXAMPLES:
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if line.lstrip().startswith("pytest "):
+                args = shlex.split(line, comments=True)[1:]
+                params.append(pytest.param(path, args, id=f"{path.name}:{number}"))
+    return params
+
+
+class TestExampleCommands:
+    """
+    The commands in the examples' docstrings run as shown from the repository root,
+    with its pytest configuration (strict markers, warnings as errors and
+    ``empty_parameter_set_mark = fail_at_collect``).
+    """
+
+    def test_each_example_shows_how_to_select_and_rerun_rows(self):
+        commands: dict[str, list[list[str]]] = {}
+        for param in _example_commands():
+            path, args = param.values
+            commands.setdefault(path.name, []).append(args)
+
+        assert sorted(commands) == [
+            "enum_example.py",
+            "sequence_example.py",
+            "strategy_example.py",
+            "test_values_example.py",
+        ]
+        for name, lines in commands.items():
+            assert any("-k" in args for args in lines), f"{name} shows no -k selection"
+            assert any("::" in args[0] for args in lines), f"{name} shows no node ID"
+
+    @pytest.mark.parametrize(("example", "args"), _example_commands())
+    def test_command_runs(self, pytester, example, args):
+        """
+        A command without --rng-seed runs with seed 1, so the test is deterministic.
+
+        A command that names one file collects only part of the suite, so a
+        --strategy-constraint-off name that matches no constraint is only printed
+        and the run passes: the output is checked for it.
+        """
+        pytester.makefile(".toml", pyproject=(REPO_ROOT / "pyproject.toml").read_text("utf-8"))
+        pytester.mkdir("examples")
+        (pytester.path / "examples" / example.name).write_text(
+            example.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        if not any(arg.startswith("--rng-seed") for arg in args):
+            args = [*args, "--rng-seed=1"]
+
+        result = pytester.runpytest(*args)
+
+        assert result.ret == pytest.ExitCode.OK, result.stdout.str()
+        assert "matched no constraint" not in result.stdout.str()
+        outcomes = result.parseoutcomes()
+        if "::" in args[0]:
+            assert outcomes.get("passed") == 1 and "deselected" not in outcomes
+        else:
+            assert outcomes.get("passed", 0) > 0
+
+
+# The context of the CHANGELOG's fixed-table recipe: a register map from the testbench
+REGISTERS_CONFTEST = """
+from types import SimpleNamespace
+
+import pytest
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_strategies_context(config):
+    return SimpleNamespace(registers=[("CTRL", 0x0), ("STAT", 0x4), ("DATA", 0x8)])
+"""
+
+# The same table as a Parameter of placeholder values, with the rows as directed vectors
+REGISTERS_PARAMETER = """
+from pytest_strategy import Parameter, TestArg, register, strategy
+
+@register("regs")
+def regs(ctx):
+    return Parameter(
+        TestArg("name", value=""),
+        TestArg("offset", value=0),
+        directed_vectors={{name: (name, offset) for name, offset in ctx.registers}},
+        {nsamples}
+    )
+
+@strategy("regs")
+def test_reg(name, offset):
+    pass
+"""
+
+
+RAND = [f"rand-{i}" for i in range(10)]
+
+
+def _changelog_context_table_recipe() -> str:
+    """The 4.0 half of the CHANGELOG's recipe for a fixed table built from the context."""
+    text = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    (block,) = [
+        textwrap.dedent(match.group(1))
+        for match in re.finditer(r"```python\n(.*?)```", text, re.S)
+        if "pytest_generate_tests" in match.group(1)
+    ]
+    return block.split("# 4.0, in the test module\n", 1)[1]
+
+
+def _collected_ids(result) -> list:
+    """The parametrization IDs of the collected items, from --collect-only -q."""
+    return [line.split("[", 1)[1].rstrip("]") for line in result.stdout.lines if "::" in line]
+
+
+class TestTupleFactoryMigration:
+    """
+    Migration item 4 of the CHANGELOG: a fixed table built from the context keeps
+    exactly its rows through pytest_generate_tests, while a Parameter whose
+    arguments are all value= gets nsamples rows of placeholder values.
+    """
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            [],
+            ["--nsamples=5"],
+            ["--nsamples=auto"],
+            ["--vector-mode=random_only"],
+            ["--vector-mode=test"],
+            ["-n", "2"],
+        ],
+        ids=" ".join,
+    )
+    def test_the_recipe_runs_exactly_the_table(self, pytester, args):
+        run = pytester.runpytest
+        if "-n" in args:
+            pytest.importorskip("xdist")
+            run = pytester.runpytest_subprocess
+        pytester.makeconftest(REGISTERS_CONFTEST)
+        pytester.makepyfile(test_regs=_changelog_context_table_recipe())
+
+        result = run("-p", "no:cacheprovider", *args)
+
+        result.assert_outcomes(passed=3)
+        if "-n" not in args:
+            collected = pytester.runpytest("-p", "no:cacheprovider", "--collect-only", "-q", *args)
+            assert _collected_ids(collected) == ["CTRL-0", "STAT-4", "DATA-8"]
+
+    @pytest.mark.parametrize(
+        ("nsamples", "args", "ids"),
+        [
+            ("", [], ["directed-CTRL", "directed-STAT", "directed-DATA", *RAND[:10]]),
+            ("nsamples=0,", [], ["directed-CTRL", "directed-STAT", "directed-DATA"]),
+            (
+                "nsamples=0,",
+                ["--nsamples=5"],
+                ["directed-CTRL", "directed-STAT", "directed-DATA", *RAND[:5]],
+            ),
+            ("nsamples=0,", ["--vector-mode=random_only"], []),
+            ("nsamples=0,", ["--vector-mode=test"], []),
+        ],
+        ids=["default", "nsamples_0", "nsamples_0 --nsamples=5", "random_only", "test"],
+    )
+    def test_a_parameter_of_values_gets_placeholder_rows(self, pytester, nsamples, args, ids):
+        """The caveats the CHANGELOG and the README give for this form."""
+        pytester.makeconftest(REGISTERS_CONFTEST)
+        pytester.makepyfile(test_regs=REGISTERS_PARAMETER.format(nsamples=nsamples))
+
+        result = pytester.runpytest("-p", "no:cacheprovider", "--rng-seed=1", "-rs", *args)
+
+        if ids:
+            collected = pytester.runpytest(
+                "-p", "no:cacheprovider", "--rng-seed=1", "--collect-only", "-q", *args
+            )
+            assert _collected_ids(collected) == ids
+            result.assert_outcomes(passed=len(ids))
+        else:
+            # No rows: pytest skips the test ("got empty parameter set")
+            result.assert_outcomes(skipped=1)

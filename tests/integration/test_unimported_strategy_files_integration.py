@@ -16,26 +16,27 @@ HINT = (
 )
 
 DECORATOR_REGISTRATION = """
-from pytest_strategy import Strategy
+from pytest_strategy import Parameter, Strategy, TestArg
 
 @Strategy.register("ns_strat")
 def strat(nsamples):
-    return ("x",), [(1,)]
+    return Parameter(TestArg("x", value=1), nsamples=1)
 """
 
 ALIAS_REGISTRATION = """
+from pytest_strategy import Parameter, TestArg
 from pytest_strategy import Strategy as S
 
 @S.register("ns_strat")
 def strat(nsamples):
-    return ("x",), [(1,)]
+    return Parameter(TestArg("x", value=1), nsamples=1)
 """
 
 CALL_REGISTRATION = """
-from pytest_strategy import Strategy
+from pytest_strategy import Parameter, Strategy, TestArg
 
 def strat(nsamples):
-    return ("x",), [(1,)]
+    return Parameter(TestArg("x", value=1), nsamples=1)
 
 Strategy.register("ns_strat")(strat)
 """
@@ -135,11 +136,11 @@ class TestFailedFileIsListed:
                 "sub/strategies": """
                     from ns_late_helpers import LIMIT
 
-                    from pytest_strategy import Strategy
+                    from pytest_strategy import Parameter, Strategy, TestArg
 
                     @Strategy.register("ns_late")
                     def late(nsamples):
-                        return ("x",), [(LIMIT,)]
+                        return Parameter(TestArg("x", value=LIMIT), nsamples=1)
                     """,
                 "sub/test_late": """
                     from ns_late_helpers import LIMIT
@@ -163,11 +164,11 @@ class TestFailedFileIsListed:
                 "sub/strategies": """
                     from ns_missing_helpers import LIMIT
 
-                    from pytest_strategy import Strategy
+                    from pytest_strategy import Parameter, Strategy, TestArg
 
                     @Strategy.register("ns_late")
                     def late(nsamples):
-                        return ("x",), [(LIMIT,)]
+                        return Parameter(TestArg("x", value=LIMIT), nsamples=1)
                     """,
                 "sub/test_late": """
                     from pytest_strategy import Strategy

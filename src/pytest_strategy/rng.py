@@ -1,35 +1,180 @@
 # rng.py
 
+import _random
 import builtins
 import math
+import os
 import random
+import threading
 import time
-import warnings
 from collections.abc import Callable, Mapping, Sequence
 from enum import Enum
 from typing import Any, Generic, TypeVar, cast
 
+from ._streams import StreamKey, seed_part
+
 T = TypeVar("T")
 E = TypeVar("E", bound=Enum)
+
+# The Mersenne Twister's own methods, which the ambient generator calls once its
+# stream is seeded
+_mt_random = _random.Random.random
+_mt_getrandbits = _random.Random.getrandbits
+_mt_seed = _random.Random.seed
+_mt_getstate = _random.Random.getstate
+_mt_setstate = _random.Random.setstate
 
 
 class RNGValueError(ValueError):
     """Exception raised when an invalid value is provided to RNG operations."""
 
 
+class _NoValidValue(RNGValueError):
+    """A predicate rejected every draw. TestArg.generate re-raises it naming the argument."""
+
+
+class _Ambient(random.Random):
+    """
+    The plugin's generator, ``RNG._ambient``: a ``random.Random`` that seeds the
+    streams it is put on (``_Stream``) only when they are used.
+
+    Entering a stream records the stream's key as pending; the generator seeds
+    itself from it at the first draw, or when its state is read, and only then
+    saves the state that the stream puts back when it ends. A stream that nothing
+    draws from, such as most test phases and fixtures, then costs no seeding,
+    saving or restoring of the Mersenne Twister state, about 20 us each.
+
+    ``random.Random`` draws only through ``random()`` and ``getrandbits()``: its
+    other methods call these two, and ``_randbelow`` stays the one that uses
+    ``getrandbits()``. So the values are those of a generator seeded when the
+    stream is entered. ``seed()`` and ``setstate()`` replace the state, so they
+    skip the pending seeding, but still save the state the stream puts back.
+
+    Seeding a pending stream, and entering or ending a stream, hold the
+    generator's lock: a thread that draws while another enters or ends a stream
+    (a stimulus thread started by a fixture) then never seeds the generator from
+    a stream that has ended, or saves the state on another stream. A stream
+    stays pending until it is seeded, so such a draw waits for the seeding
+    instead of drawing from the state the seeding replaces. Its draws still come
+    from whichever stream is in use. Streams that two threads enter may end in
+    any order (``_Stream.__exit__``).
+    """
+
+    # random.Random's cached second value of gauss(), part of its state
+    gauss_next: float | None
+
+    def __init__(self, x: Any = None) -> None:
+        # The key of the stream entered last, while nothing has seeded it (or a
+        # function that returns the key); None when the state in use is the real one
+        self._pending: StreamKey | Callable[[], StreamKey] | None = None
+        # The streams entered and not yet ended, the innermost last
+        self._streams: list[_Stream] = []
+        # Held while a stream is seeded, entered or ended (see the class docstring),
+        # and while a row is drawn (parameters.py); reentrant, so that a signal
+        # handler, or a finalizer the garbage collector runs, that draws while its
+        # thread holds it cannot deadlock. A forked child gets a new one.
+        self._lock = threading.RLock()
+        # True while the holder of the lock seeds a stream (_settle)
+        self._settling = False
+        super().__init__(x)
+
+    def _settle(self, seed: bool = True) -> None:
+        """
+        Make the pending stream's state the real one: save the state in use, which
+        belongs to the innermost stream seeded around it (or to no stream), for the
+        stream to put back when it ends, and seed the generator from the stream's
+        key, unless ``seed`` is False because the caller replaces the state.
+        """
+        with self._lock:
+            # Read again under the lock: another thread may have seeded the stream,
+            # or ended it, since the caller saw it pending. A draw from this thread
+            # while it seeds the stream (a signal handler, or a finalizer) draws from
+            # the state in use: seeding the stream there too would save the state of
+            # the stream as the one to put back.
+            pending = self._pending
+            if pending is None or self._settling:
+                return
+            # Saved first, so that such a draw while the key is built does not move
+            # the state the stream puts back
+            state = _mt_getstate(self)
+            self._settling = True
+            try:
+                # Such a draw before the flag was set seeded the stream itself
+                if self._pending is not pending:
+                    return
+                seed_int = None
+                if seed:
+                    seed_int = (pending if isinstance(pending, StreamKey) else pending()).seed_int()
+                stream = self._streams[-1]
+                # Unless a stream that ended before it handed its own over (_Stream)
+                if stream._state is None:
+                    stream._state = state
+                if seed_int is not None:
+                    # As random.Random.seed() seeds with an int; gauss_next was cleared
+                    # when the stream was entered
+                    _mt_seed(self, seed_int)
+                # Last: until then another thread's draw sees the stream pending, and
+                # waits for the lock
+                self._pending = None
+            finally:
+                self._settling = False
+
+    def random(self) -> float:
+        if self._pending is not None:
+            self._settle()
+        return _mt_random(self)
+
+    def getrandbits(self, k: int, /) -> int:
+        if self._pending is not None:
+            self._settle()
+        return _mt_getrandbits(self, k)
+
+    def seed(self, a: Any = None, version: int = 2) -> None:
+        if self._pending is not None:
+            self._settle(seed=False)
+        super().seed(a, version)
+
+    def getstate(self) -> tuple[Any, ...]:
+        if self._pending is not None:
+            self._settle()
+        return super().getstate()
+
+    def setstate(self, state: tuple[Any, ...]) -> None:
+        if self._pending is not None:
+            self._settle(seed=False)
+        super().setstate(state)
+
+    def _position(self) -> object:
+        """
+        Return what the generator would draw from: the pending key while nothing
+        has used the stream entered last, its state otherwise. It changes when
+        something draws from the generator, seeds it or sets its state, and costs
+        nothing while a stream is pending (the guard on the row streams compares it).
+        """
+        pending = self._pending
+        return pending if pending is not None else self.getstate()
+
+
 class RNG:
     """
     Core RNG singleton managing the seed and the random state.
 
-    Every value the RNG types draw comes from one generator the plugin owns
+    Every value the RNG types draw comes from a generator the plugin owns
     (:meth:`generator`), not from the global ``random`` state, so ``--rng-seed``
     reproduces them without seeding or disturbing the ``random`` calls of the
     code under test.
     """
 
     _seed = time.time_ns()
+    # The draws an RNG type's predicate= gets before RNGValueError (fixed)
     _max_retries = 100
-    _generator = random.Random(_seed)
+    # The plugin's generator. Each of the plugin's random streams (a factory call, a
+    # strategy file's import, a test phase; see _Stream) reseeds this object in
+    # place, when it is first used, and restores its state afterwards.
+    _ambient = _Ambient(_seed)
+    # The generator the RNG types and helpers draw from: the ambient generator,
+    # except while an argument of a random row is drawn, which has its own
+    _generator: random.Random = _ambient
 
     # ====
     # Seed Management
@@ -56,44 +201,37 @@ class RNG:
         Return the generator the RNG types draw from.
 
         A factory that needs other random operations (``shuffle``, ``gauss``) can
-        draw from it, and gets values that ``--rng-seed`` reproduces. The plugin
-        restarts it for each strategy and test.
+        draw from it, and gets values that ``--rng-seed`` reproduces. In a pytest
+        run the plugin positions it on a stream of its own for each factory call,
+        strategy file, test module, fixture and test phase (streams v1), so what
+        one of them draws does not depend on what the others drew. Call it when
+        you draw instead of keeping its result: while an argument of a random row
+        is drawn it returns that argument's own generator, and a generator kept
+        from a factory draws from whatever stream runs when it is used.
         """
         return RNG._generator
 
     @staticmethod
-    def refresh_seed(key: str | None = None) -> None:
+    def refresh_seed(key: str | int | None = None) -> None:
         """Restart the generator from the current seed.
 
         Args:
-            key: Optional stream name. With a key, the generator is seeded from the
-                seed and the key together, so each key gets its own stream that
-                is the same on every run with this seed and does not depend on
-                the order in which keys are used.
+            key: Optional stream name, a str (or an int). With a key, the generator
+                is seeded from the stream key ``(seed, "user", key)`` of streams v1,
+                so each key gets its own stream that is the same on every run with
+                this seed, in every process, and does not depend on the order in
+                which keys are used. Any other object (a ``pathlib.Path``, a
+                tuple) names the stream of its ``str()``, as 3.x formatted it.
         """
         if key is None:
             RNG._generator.seed(RNG._seed)
         else:
-            # A str seed is hashed with SHA-512, so it is stable across processes
-            # (unlike hash(), which is salted per process).
-            RNG._generator.seed(f"{RNG._seed}:{key}")
-
-    @staticmethod
-    def set_max_retries(retries: int) -> None:
-        """
-        Deprecated: set the number of draws the ``predicate=`` of an RNG type gets.
-
-        Use ``Parameter(max_retries=...)``, which bounds the draws for the
-        strategy's vector constraints, or a predicate that accepts more values.
-        Removed in 4.0.
-        """
-        warnings.warn(
-            "RNG.set_max_retries() is deprecated and will be removed in 4.0; "
-            "use Parameter(max_retries=...)",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        RNG._max_retries = retries
+            if not isinstance(key, (str, int)) or isinstance(key, bool):
+                key = str(key)
+            # Hashed with BLAKE2b (see _streams), so stable across processes, unlike
+            # hash(), which is salted per process
+            key_int = StreamKey.root(seed_part(RNG._seed), "user", key).seed_int()
+            RNG._generator.seed(key_int)
 
     # ====
     # Internal Helper
@@ -124,7 +262,7 @@ class RNG:
             if predicate(value):
                 return value
 
-        raise RNGValueError(f"No valid value found after {RNG._max_retries} attempts")
+        raise _NoValidValue(f"No valid value found after {RNG._max_retries} attempts")
 
     @staticmethod
     def _string_args_error(
@@ -183,6 +321,11 @@ class RNG:
             RNG.integer(1, 100)
             RNG.integer(1, 100, predicate=lambda x: x % 2 == 0)  # Even numbers only
         """
+        if predicate is None:
+            # The helper's draw without its call and closure, and with one lookup on
+            # RNG fewer: random rows assign RNG._generator before each argument's
+            # draw, and a lookup on a class whose attribute was just assigned costs more
+            return RNG._generator.randint(min, max)
         return RNG._generate_with_constraint(lambda: RNG._generator.randint(min, max), predicate)
 
     @staticmethod
@@ -204,6 +347,9 @@ class RNG:
             RNG.float(0.0, 10.0)
             RNG.float(0.0, 1.0, predicate=lambda x: x > 0.5)
         """
+        if predicate is None:
+            # The same draw without the helper (see integer())
+            return _uniform(min, max)
         return RNG._generate_with_constraint(lambda: _uniform(min, max), predicate)
 
     @staticmethod
@@ -350,6 +496,104 @@ class RNG:
         return RNG._generate_with_constraint(generator, predicate)
 
 
+class _Stream:
+    """
+    Run a block on one of the plugin's random streams (streams v1, D5): ``with
+    _Stream(key) as rng:``.
+
+    In the block the ambient generator (``RNG._ambient``) draws from the stream of
+    ``key``, as if reseeded in place from it, and is installed as
+    ``RNG._generator``, so ``rng is RNG.generator()`` in the block, and a generator
+    kept from it is the one the next stream reseeds. On exit its state, the seed
+    (``RNG._seed``) and the generator installed before are put back, also when the
+    block raises. Streams nest: an inner stream leaves the outer one where it was.
+    So what the block draws, and an ``RNG.seed()`` call in it, change only the rest
+    of the block.
+
+    The generator is seeded only when the block first uses it (see ``_Ambient``),
+    and ``key`` may be a function that returns the key, called then: a block that
+    draws nothing costs neither the seeding nor the key.
+
+    A class rather than a ``contextlib.contextmanager``: that one assigns the
+    exception's ``__traceback__`` on the way out, which a frozen dataclass exception
+    rejects.
+    """
+
+    __slots__ = ("_key", "_saved", "_state")
+
+    def __init__(self, key: StreamKey | Callable[[], StreamKey]) -> None:
+        self._key = key
+
+    def __enter__(self) -> random.Random:
+        ambient = RNG._ambient
+        # Under the generator's lock, so that another thread's draw seeds no stream
+        # meanwhile (see _Ambient)
+        with ambient._lock:
+            self._saved = (ambient, ambient._pending, ambient.gauss_next, RNG._generator, RNG._seed)
+            # The state to put back, saved when the stream is seeded (_Ambient._settle)
+            self._state: tuple[Any, ...] | None = None
+            ambient._streams.append(self)
+            ambient._pending = self._key
+            # random.Random.seed() clears it; a pending stream must not see the outer one's
+            ambient.gauss_next = None
+            RNG._generator = ambient
+        return ambient
+
+    def __exit__(self, *exc_info: object) -> None:
+        ambient, pending, gauss_next, generator, seed = self._saved
+        with ambient._lock:
+            streams = ambient._streams
+            if streams and streams[-1] is self:
+                streams.pop()
+            elif self in streams:
+                # Streams that two threads entered (export_strategies() in a thread)
+                # can end in any order. One that ends before a stream entered after it
+                # leaves the state in use, which is that stream's, and hands what it
+                # would put back to it: the state it saved, when it was seeded, and
+                # the pending key, seed and generator in use before it
+                later = streams[streams.index(self) + 1]
+                later._saved = self._saved
+                if self._state is not None:
+                    later._state = self._state
+                streams.remove(self)
+                return
+            if self._state is not None:
+                _mt_setstate(ambient, self._state)
+            ambient._pending = pending
+            ambient.gauss_next = gauss_next
+            RNG._generator = generator
+            RNG._seed = seed
+
+
+def _before_fork() -> None:
+    """
+    Before ``os.fork()`` (a multiprocessing pool that forks), wait for any other
+    thread to finish seeding, entering or ending a stream or drawing a row, so that
+    the child starts from a generator nothing is changing.
+    """
+    RNG._ambient._lock.acquire()
+
+
+def _after_fork_in_parent() -> None:
+    RNG._ambient._lock.release()
+
+
+def _after_fork_in_child() -> None:
+    """
+    Give the ambient generator a new lock in a forked child, as ``logging`` does for
+    its own: the one the parent held for the fork would otherwise stay held.
+    """
+    RNG._ambient._lock = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):  # not on Windows
+    os.register_at_fork(
+        before=_before_fork,
+        after_in_parent=_after_fork_in_parent,
+        after_in_child=_after_fork_in_child,
+    )
+
+
 # ====
 # RNG Type Classes
 # ====
@@ -466,16 +710,55 @@ def _check_weights(owner: str, weights: Mapping[Any, float]) -> None:
 
 
 class RNGType(Generic[T]):
-    """Base class for all RNG types"""
+    """
+    Base class for all RNG types.
+
+    A subclass implements ``generate()``, which is called once per draw of an
+    argument of a random or exhaustive row, while ``RNG.generator()`` is that
+    argument's own stream for the row (streams v1). So that a row's values depend
+    only on the seed, the test, the row and the argument:
+
+    - draw inside ``generate()``, from ``RNG.generator()`` or the ``RNG.*``
+      helpers called there; never from a generator kept from earlier, such as
+      the factory's ``rng``, which draws from whatever stream runs when it is used;
+    - return a value that does not depend on state kept between calls. A counter
+      that walks a pattern (walking ones, for example) makes row k depend on the
+      rows drawn before it.
+
+    The plugin warns (``PytestStrategiesWarning``) when something draws from its
+    generator while a test's rows are generated, as a kept ``rng`` does.
+    """
 
     def generate(self) -> T:
-        """Generate a random value based on this type's configuration"""
+        """
+        Generate a random value based on this type's configuration.
+
+        Draw from ``RNG.generator()`` or the ``RNG.*`` helpers here, not from a
+        generator kept from earlier, and keep no state between calls (see the
+        class).
+        """
         raise NotImplementedError
 
     @property
     def python_type(self) -> type[T]:
         """Return the Python type this RNG type generates"""
         raise NotImplementedError
+
+    def to_dict(self) -> dict[str, Any]:
+        """
+        Describe the RNG type as a JSON-ready dict, the ``rng`` of
+        ``TestArg.to_dict()``: ``{"type": <class qualname>, ...}``.
+
+        A built-in type adds its typed fields (``min`` and ``max``, ``choices``,
+        ``sequence`` and ``skip_if_empty``, ...; a predicate as a ``predicate``
+        flag). Any other class, a subclass of a built-in one included, adds
+        ``attributes``: its public instance attributes, each in the schema 1 value
+        encoding. A subclass can override this to write fields of its own.
+        """
+        # Imported here: the export module imports this one
+        from ._export import rng_type_dict
+
+        return rng_type_dict(self)
 
 
 class RNGInteger(RNGType[int]):
@@ -652,7 +935,7 @@ class RNGEnum(RNGType[E]):
 
         if sum(weights) <= 0:
             which = "weighted member with a positive weight" if self.weights else "member"
-            raise RNGValueError(
+            raise _NoValidValue(
                 f"No valid value found: no {which} of {self.enum_class.__name__} "
                 "satisfies the predicate"
             )
@@ -695,8 +978,8 @@ class SequenceLike(RNGType[T]):
     """
     Abstract base class for sequence-based RNG types.
 
-    Subclasses differ in how they produce an ordered sequence for exhaustive
-    (auto) mode via ``_get_auto_sequence()``. In finite mode, Parameter cycles
+    Subclasses differ in the order they give the sequence's positions in exhaustive
+    (auto) mode, via ``_auto_positions()``. In finite mode, Parameter cycles
     through Series values in order, and RNGSequence draws random elements via
     ``generate()``. With ``Parameter(per_sequence_samples=True)``, both are walked
     in declaration order with n rows for each value.
@@ -752,9 +1035,22 @@ class SequenceLike(RNGType[T]):
             )
 
     def _get_auto_sequence(self) -> list[T]:
-        """Return the ordered list to use for exhaustive (auto) mode.
+        """Return the ordered list to use for exhaustive (auto) mode: the values in
+        the order of ``_auto_positions()``.
 
-        Subclasses MUST override this method.
+        A subclass that overrides this instead of ``_auto_positions()`` gets each
+        value's position found in the sequence, so it must return values of its
+        sequence, each at most as often as the sequence lists it: any other value
+        fails ``--nsamples=auto`` with ``RNGValueError``.
+        """
+        return [self.sequence[position] for position in self._auto_positions()]
+
+    def _auto_positions(self) -> list[int]:
+        """Return the positions of the sequence in exhaustive (auto) mode's order.
+
+        The rows of exhaustive mode are keyed and labeled by these positions, so a
+        value listed twice still gives two rows. Subclasses MUST override this
+        method (or ``_get_auto_sequence()``).
         """
         raise NotImplementedError
 
@@ -788,9 +1084,12 @@ class RNGSequence(SequenceLike[T]):
     sequence (each value exactly once, random order).
     """
 
-    def _get_auto_sequence(self) -> list[T]:
-        """Return a random permutation of the sequence for exhaustive mode."""
-        return RNG._generator.sample(self.sequence, len(self.sequence))
+    def _auto_positions(self) -> list[int]:
+        """Return a random permutation of the sequence's positions for exhaustive mode."""
+        # sample() picks positions whatever the population holds, so this draws the
+        # permutation sample(self.sequence, ...) drew in 3.0
+        size = len(self.sequence)
+        return RNG._generator.sample(range(size), size)
 
 
 class Series(SequenceLike[T]):
@@ -804,9 +1103,9 @@ class Series(SequenceLike[T]):
     itertools.product order (leftmost arg is the slowest counter).
     """
 
-    def _get_auto_sequence(self) -> list[T]:
-        """Return sequence in original order for exhaustive mode."""
-        return list(self.sequence)
+    def _auto_positions(self) -> list[int]:
+        """Return the sequence's positions in their original order for exhaustive mode."""
+        return list(range(len(self.sequence)))
 
 
 class RNGString(RNGType[str]):

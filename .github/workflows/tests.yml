@@ -98,11 +98,59 @@ jobs:
       - name: Test vectors only (--vector-mode=test)
         run: python -m pytest examples/test_values_example.py --vector-mode=test
 
+      # Test IDs name the rows, so a seed changes the values but not the node IDs:
+      # the same list for seeds 1 and 2, and under --nsamples=auto, which permutes
+      # RNGSequence rows, the same set
+      - name: Node IDs do not depend on the seed
+        # bash in Actions runs with -o pipefail, so a failing pytest fails the step
+        shell: bash
+        run: |
+          for seed in 1 2; do
+            python -m pytest examples/*.py --collect-only -q --rng-seed=$seed | grep "::" > ids-$seed.txt
+            python -m pytest examples/*.py --collect-only -q --rng-seed=$seed --nsamples=auto | grep "::" | sort > ids-auto-$seed.txt
+          done
+          test -s ids-1.txt && test -s ids-auto-1.txt
+          diff ids-1.txt ids-2.txt
+          diff ids-auto-1.txt ids-auto-2.txt
+
+      - name: -k selects a directed vector by its name
+        shell: bash
+        run: |
+          python -m pytest examples/*.py --collect-only -q -k zeros | grep "::" > selected.txt
+          cat selected.txt
+          test "$(cat selected.txt)" = "examples/strategy_example.py::test_addition[directed-zeros]"
+
+      - name: One random row by its node ID
+        shell: bash
+        run: python -m pytest "examples/strategy_example.py::test_addition[rand-3]" --rng-seed=1 -q | tee row.txt && grep -q "^1 passed" row.txt
+
+      - name: Examples with the 3.0 test IDs (-o strategies_ids=values)
+        run: python -m pytest examples/*.py -o strategies_ids=values
+
+      # Started in the rootdir with no path on the command line, so the run collects
+      # its testpaths and counts as the whole suite: a name that matches no
+      # constraint stops it with a usage error instead of a red line.
+      - name: An example with its named constraint turned off (--strategy-constraint-off)
+        run: python -m pytest -o testpaths=examples -o python_files=test_values_example.py --strategy-constraint-off=date_range_test:ordered
+
       - name: Examples on two xdist workers, without a seed
         run: python -m pytest examples/*.py -n 2
 
       - name: Examples on two xdist workers, with a seed
         run: python -m pytest examples/*.py -n 2 --rng-seed=1
+
+      # The examples' runs above exit with code 4 if their two workers generated
+      # different values under the same test IDs. These projects check that on two
+      # workers: a context, a list built from a set under two hash seeds, the global
+      # random, Series values that change the IDs, and workers that agree
+      - name: Workers that generate different vectors fail the run (-n 2)
+        run: python -m pytest tests/integration/test_xdist_check_integration.py -v
+
+      # Informational: timings depend on the runner, so the step prints them and never
+      # fails the job. Compare versions by running the script on one machine
+      - name: Benchmark (informational)
+        continue-on-error: true
+        run: python benchmarks/bench.py --sweep --memory
 
   packaging:
     name: Packaging
@@ -172,10 +220,10 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Ruff
-        run: ruff check src/ tests/
+        run: ruff check src/ tests/ benchmarks/
 
       - name: Black
-        run: black --check src/ tests/
+        run: black --check src/ tests/ benchmarks/
 
   typecheck:
     name: Type check (mypy --strict)

@@ -17,6 +17,15 @@ To run this example with exhaustive sequence generation:
 
 To run with random sampling (normal mode):
     pytest examples/sequence_example.py --nsamples=5 -v
+
+Under --nsamples=auto each row's test ID shows the values it enumerates, the
+same for every seed: test_pairs[a=1-b=2], test_permissions[role=admin-active=True].
+-k cannot contain "=", so run one such row by its node ID:
+    pytest "examples/sequence_example.py::test_pairs[a=1-b=2]" --nsamples=auto -v
+
+With a finite --nsamples the RNGSequence values are drawn, and the rows are
+named test_pairs[rand-0] to test_pairs[rand-4]:
+    pytest examples/sequence_example.py --nsamples=5 -k "test_pairs" -v
 """
 
 from pytest_strategy import Parameter, RNGFloat, RNGInteger, RNGSequence, TestArg, register, strategy
@@ -24,7 +33,7 @@ from pytest_strategy import Parameter, RNGFloat, RNGInteger, RNGSequence, TestAr
 # 1. Basic Sequence Strategy
 # This strategy iterates through a list of user roles.
 @register("user_roles")
-def user_roles_strategy(nsamples):
+def user_roles_strategy():
     return Parameter(
         TestArg("role", rng_type=RNGSequence(["admin", "editor", "viewer", "guest"])),
         TestArg("active", rng_type=RNGSequence([True, False]))
@@ -45,7 +54,7 @@ def test_permissions(role, active):
 # 2. Mixed Sequence and Random Strategy
 # This strategy combines a sequence (endpoints) with random data (payloads).
 @register("api_endpoints")
-def api_endpoints_strategy(nsamples):
+def api_endpoints_strategy():
     return Parameter(
         # Exhaustive: We want to test ALL these endpoints
         TestArg("endpoint", rng_type=RNGSequence(["/users", "/products", "/orders"])),
@@ -70,12 +79,12 @@ def test_api_stability(endpoint, id, load_factor):
 
 # 3. Sequences with Constraints
 @register("constrained_sequence")
-def constrained_sequence_strategy(nsamples):
+def constrained_sequence_strategy():
     return Parameter(
         TestArg("a", rng_type=RNGSequence([1, 2, 3, 4])),
         TestArg("b", rng_type=RNGSequence([1, 2, 3, 4])),
         # Only test pairs where a < b
-        vector_constraints=[lambda v: v[0] < v[1]]
+        vector_constraints={"a_below_b": lambda v: v.a < v.b}
     )
 
 @strategy("constrained_sequence")
@@ -92,7 +101,7 @@ def test_pairs(a, b):
 
 # 4. Filtered Sequence (Predicate Support)
 @register("filtered_sequence")
-def filtered_sequence_strategy(nsamples):
+def filtered_sequence_strategy():
     return Parameter(
         # Use a predicate to filter the sequence during initialization
         # Here we take range(20) but keep only multiples of 3

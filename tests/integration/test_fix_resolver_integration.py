@@ -58,15 +58,17 @@ class TestAutoModeIntegration:
         result = pytester.runpytest("--nsamples=auto", "-v")
         # seq: corner + 3x2 product; noseq (no sequence args): edge + 4 random
         result.assert_outcomes(passed=7 + 5)
-        result.stdout.fnmatch_lines(["*test_seq[[]x=99,y='z'[]] PASSED*"])
-        result.stdout.fnmatch_lines(["*test_noseq[[]code=500[]] PASSED*"])
+        result.stdout.fnmatch_lines(["*test_seq[[]directed-corner[]] PASSED*"])
+        result.stdout.fnmatch_lines(["*test_seq[[]x=3-y=b[]] PASSED*"])
+        result.stdout.fnmatch_lines(["*test_noseq[[]directed-edge[]] PASSED*"])
+        result.stdout.fnmatch_lines(["*test_noseq[[]rand-3[]] PASSED*"])
 
     def test_auto_test_mode_runs_only_test_vectors(self, pytester):
         pytester.makepyfile(test_fix_auto=_unique_names(AUTO_MODULE, "fix_auto_", pytester))
         result = pytester.runpytest("--nsamples=auto", "--vector-mode=test", "-v")
         result.assert_outcomes(passed=2)
         result.stdout.fnmatch_lines(
-            ["*test_seq[[]x=42,y='t'[]] PASSED*", "*test_noseq[[]code=200[]] PASSED*"]
+            ["*test_seq[[]test-tv[]] PASSED*", "*test_noseq[[]test-ok[]] PASSED*"]
         )
 
     def test_auto_directed_only_mode(self, pytester):
@@ -74,7 +76,7 @@ class TestAutoModeIntegration:
         result = pytester.runpytest("--nsamples=auto", "--vector-mode=directed_only", "-v")
         result.assert_outcomes(passed=2)
         result.stdout.fnmatch_lines(
-            ["*test_seq[[]x=99,y='z'[]] PASSED*", "*test_noseq[[]code=500[]] PASSED*"]
+            ["*test_seq[[]directed-corner[]] PASSED*", "*test_noseq[[]directed-edge[]] PASSED*"]
         )
 
     def test_auto_vector_name_filters_across_strategies(self, pytester):
@@ -82,7 +84,7 @@ class TestAutoModeIntegration:
         result = pytester.runpytest("--nsamples=auto", "--vector-name=corner", "-v")
         # Only fix_auto_seq has "corner"; fix_auto_noseq gets an empty parameter set
         result.assert_outcomes(passed=1, skipped=1)
-        result.stdout.fnmatch_lines(["*test_seq[[]x=99,y='z'[]] PASSED*"])
+        result.stdout.fnmatch_lines(["*test_seq[[]directed-corner[]] PASSED*"])
 
 
 INDEX_MODULE = """
@@ -128,7 +130,7 @@ class TestVectorIndexIntegration:
         result = pytester.runpytest("--vector-index=1", "-v")
         # fix_idx_two has index 1 and test_plain is unaffected; the others are skipped
         result.assert_outcomes(passed=2, skipped=2)
-        result.stdout.fnmatch_lines(["*test_two[[]y=10[]] PASSED*"])
+        result.stdout.fnmatch_lines(["*test_two[[]directed-ten[]] PASSED*"])
 
     def test_index_zero_with_strategy_without_directed_vectors(self, pytester):
         pytester.makepyfile(test_fix_idx=_unique_names(INDEX_MODULE, "fix_idx_", pytester))
@@ -146,7 +148,7 @@ class TestVectorIndexIntegration:
 
 
 class TestSingleArgumentIdsIntegration:
-    """Tuple-valued single-argument strategies get IDs showing the whole value."""
+    """In the values format, tuple-valued single-argument strategies get IDs showing the whole value."""
 
     def test_tuple_values_get_distinct_ids(self, pytester):
         pytester.makepyfile(test_fix_single_ids="""
@@ -164,7 +166,9 @@ class TestSingleArgumentIdsIntegration:
             def test_point(pt):
                 assert len(pt) == 2
             """)
-        result = pytester.runpytest("--vector-mode=directed_only", "-v")
+        result = pytester.runpytest(
+            "--vector-mode=directed_only", "-v", "-o", "strategies_ids=values"
+        )
         result.assert_outcomes(passed=3)
         result.stdout.fnmatch_lines(
             [
@@ -175,62 +179,43 @@ class TestSingleArgumentIdsIntegration:
         )
 
 
-class TestLegacyTupleStrategiesIntegration:
-    """Legacy (argnames, samples) strategies behave like pytest.mark.parametrize."""
+class TestPytestParamVectorsIntegration:
+    """pytest.param vectors keep their marks, as in pytest.mark.parametrize."""
 
-    def test_comma_separated_argnames(self, pytester):
-        pytester.makepyfile(test_fix_legacy_csv="""
-            from pytest_strategy import Strategy
-
-            @Strategy.register("fix_legacy_csv")
-            def csv(nsamples):
-                return "x, y", [(1, 2), (3, 4)]
-
-            @Strategy.strategy("fix_legacy_csv")
-            def test_csv(x, y):
-                assert y == x + 1
-            """)
-        result = pytester.runpytest("-v")
-        result.assert_outcomes(passed=2)
-        result.stdout.fnmatch_lines(["*test_csv[[]x=1,y=2[]] PASSED*"])
-
-    def test_generator_samples(self, pytester):
-        pytester.makepyfile(test_fix_legacy_gen="""
-            from pytest_strategy import Strategy
-
-            @Strategy.register("fix_legacy_gen")
-            def gen(nsamples):
-                return ("a", "b"), ((i, i + 1) for i in range(3))
-
-            @Strategy.strategy("fix_legacy_gen")
-            def test_gen(a, b):
-                assert b == a + 1
-            """)
-        result = pytester.runpytest()
-        result.assert_outcomes(passed=3)
-
-    def test_pytest_param_marks_and_ids_are_kept(self, pytester):
-        pytester.makepyfile(test_fix_legacy_param="""
+    def test_pytest_param_marks_are_kept(self, pytester):
+        pytester.makepyfile(test_fix_param="""
             import pytest
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, RNGInteger, Strategy, TestArg
 
-            @Strategy.register("fix_legacy_param_one")
+            @Strategy.register("fix_param_one")
             def one(nsamples):
-                return ("x",), [
-                    pytest.param(1, marks=pytest.mark.xfail(strict=True)),
-                    pytest.param(5, id="five"),
-                    2,
-                ]
+                return Parameter(
+                    TestArg("x", rng_type=RNGInteger(1, 5)),
+                    directed_vectors={
+                        "one": pytest.param(1, marks=pytest.mark.xfail(strict=True)),
+                        "five": {"x": 5},
+                        "two": (2,),
+                    },
+                    nsamples=0,
+                )
 
-            @Strategy.register("fix_legacy_param_two")
+            @Strategy.register("fix_param_two")
             def two(nsamples):
-                return ("a", "b"), [pytest.param(1, 2, marks=pytest.mark.xfail(strict=True)), (3, 3)]
+                return Parameter(
+                    TestArg("a", rng_type=RNGInteger(1, 3)),
+                    TestArg("b", rng_type=RNGInteger(2, 3)),
+                    directed_vectors={
+                        "unequal": pytest.param(1, 2, marks=pytest.mark.xfail(strict=True)),
+                        "equal": (3, 3),
+                    },
+                    nsamples=0,
+                )
 
-            @Strategy.strategy("fix_legacy_param_one")
+            @Strategy.strategy("fix_param_one")
             def test_one(x):
                 assert x in (2, 5)
 
-            @Strategy.strategy("fix_legacy_param_two")
+            @Strategy.strategy("fix_param_two")
             def test_two(a, b):
                 assert a == b
             """)
@@ -238,11 +223,11 @@ class TestLegacyTupleStrategiesIntegration:
         result.assert_outcomes(passed=3, xfailed=2)
         result.stdout.fnmatch_lines(
             [
-                "*test_one[[]x=1[]] XFAIL*",
-                "*test_one[[]five[]] PASSED*",
-                "*test_one[[]x=2[]] PASSED*",
-                "*test_two[[]a=1,b=2[]] XFAIL*",
-                "*test_two[[]a=3,b=3[]] PASSED*",
+                "*test_one[[]directed-one[]] XFAIL*",
+                "*test_one[[]directed-five[]] PASSED*",
+                "*test_one[[]directed-two[]] PASSED*",
+                "*test_two[[]directed-unequal[]] XFAIL*",
+                "*test_two[[]directed-equal[]] PASSED*",
             ]
         )
 
@@ -252,18 +237,18 @@ class TestDuplicateRegistrationIntegration:
 
     def test_name_clash_in_one_folder_is_a_usage_error(self, pytester):
         pytester.makepyfile(fix_dup_strategies="""
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, Strategy, TestArg
 
             @Strategy.register("fix_dup_clash")
             def from_strategies_file(nsamples):
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
             """)
         pytester.makepyfile(test_fix_dup_clash="""
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, Strategy, TestArg
 
             @Strategy.register("fix_dup_clash")
             def from_test_module(nsamples):
-                return ("x",), [(2,)]
+                return Parameter(TestArg("x", value=2), nsamples=1)
 
             @Strategy.strategy("fix_dup_clash")
             def test_clash(x):
@@ -281,18 +266,18 @@ class TestDuplicateRegistrationIntegration:
 
     def test_same_name_in_another_folder_is_used_there(self, pytester):
         pytester.makepyfile(fix_dup_strategies="""
-            from pytest_strategy import register
+            from pytest_strategy import Parameter, TestArg, register
 
             @register("fix_dup_scoped")
             def outer(nsamples):
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
             """)
         pytester.makepyfile(**{"sub/fix_dup_strategies": """
-            from pytest_strategy import register
+            from pytest_strategy import Parameter, TestArg, register
 
             @register("fix_dup_scoped")
             def inner(nsamples):
-                return ("x",), [(2,)]
+                return Parameter(TestArg("x", value=2), nsamples=1)
             """})
         pytester.makepyfile(test_outer="""
             from pytest_strategy import strategy
@@ -309,15 +294,15 @@ class TestDuplicateRegistrationIntegration:
                 assert x == 2
             """})
         result = pytester.runpytest()
-        result.assert_outcomes(passed=2, warnings=2)
+        result.assert_outcomes(passed=2, warnings=0)
 
     def test_reloaded_strategies_file_is_silent(self, pytester):
         pytester.makepyfile(fix_reload_strategies="""
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, Strategy, TestArg
 
             @Strategy.register("fix_dup_reload")
             def factory(nsamples):
-                return ("x",), [(1,)]
+                return Parameter(TestArg("x", value=1), nsamples=1)
             """)
         pytester.makepyfile(test_fix_dup_reload="""
             from pytest_strategy import Strategy

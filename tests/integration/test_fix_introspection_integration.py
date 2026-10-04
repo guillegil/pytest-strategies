@@ -118,11 +118,11 @@ class TestDataclassConversion:
 
 
 class TestStableIds:
-    """Node IDs must not embed memory addresses, so reruns by node ID work."""
+    """Node IDs in the values format must not embed memory addresses, so reruns by node ID work."""
 
     def test_default_repr_values_give_stable_node_ids(self, pytester):
         pytester.makepyfile(fi_ids_a_strategies="""
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, RNGChoice, Strategy, TestArg
 
             class Codec:
                 pass
@@ -131,7 +131,11 @@ class TestStableIds:
 
             @Strategy.register("fi_ids_a")
             def factory(nsamples):
-                return ("codec",), [(CODECS[0],), (CODECS[1],)]
+                return Parameter(
+                    TestArg("codec", rng_type=RNGChoice(CODECS)),
+                    directed_vectors={"first": (CODECS[0],), "second": (CODECS[1],)},
+                    nsamples=0,
+                )
             """)
         pytester.makepyfile(test_fi_ids_a="""
             from pytest_strategy import Strategy
@@ -140,7 +144,7 @@ class TestStableIds:
             def test_codec(codec):
                 pass
             """)
-        result = pytester.runpytest_inprocess("--collect-only", "-q")
+        result = pytester.runpytest_inprocess("--collect-only", "-q", "-o", "strategies_ids=values")
         node_ids = [line for line in result.outlines if "::" in line]
         assert node_ids == [
             "test_fi_ids_a.py::test_codec[codec=Codec0]",

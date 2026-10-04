@@ -41,8 +41,11 @@ class TestSeriesConstraintsFiniteMode:
     def test_small_nsamples_takes_first_valid_rows(self, pytester):
         self._make_ordered_pairs(pytester, "fixser_b")
         result = pytester.runpytest_inprocess("--nsamples=2", "--collect-only", "-q")
-        result.stdout.fnmatch_lines(["*test_pairs[[]lo=1,hi=2[]]*", "*test_pairs[[]lo=1,hi=3[]]*"])
-        result.stdout.no_fnmatch_line("*lo=2,hi=3*")
+        # The IDs show the Series values: the first two combinations are kept
+        result.stdout.fnmatch_lines(
+            ["*test_pairs[[]lo=1-hi=2-rand-0[]]*", "*test_pairs[[]lo=1-hi=3-rand-0[]]*"]
+        )
+        result.stdout.no_fnmatch_line("*lo=2-hi=3*")
 
     def test_auto_still_filters(self, pytester):
         self._make_ordered_pairs(pytester, "fixser_c")

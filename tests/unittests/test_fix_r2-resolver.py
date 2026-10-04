@@ -2,8 +2,8 @@
 Regression tests for the second round of resolver, introspection, dataclass and ID fixes.
 
 Each test here failed before its fix, except those whose docstring says they guard
-behaviour that already worked. Most drive resolve_and_parametrize directly with a
-mocked pytest.Config and inspect the pytest.mark.parametrize it applies.
+behaviour that already worked. Most drive build_parametrization directly with a
+mocked pytest.Config and inspect the rows and IDs it parametrizes the test with.
 """
 
 import functools
@@ -25,11 +25,11 @@ from unittest.mock import MagicMock
 import pytest
 
 import pytest_strategy
-from pytest_strategy import RNG, RNGInteger, Strategy, _resolver
-from pytest_strategy._dataclass import convert_to_dataclass
+from pytest_strategy import RNG, RNGInteger, Strategy, StrategyOptions, _resolver
+from pytest_strategy._factory import FactoryInputs, call_factory
 from pytest_strategy._ids import generate_dataclass_ids, generate_test_ids
-from pytest_strategy._introspection import detect_dataclass_param
-from pytest_strategy._resolver import call_factory, resolve_and_parametrize
+from pytest_strategy._records import convert_to_dataclass, detect_record_param
+from pytest_strategy._resolver import build_parametrization
 from pytest_strategy.parameters import Parameter
 from pytest_strategy.rng import Series
 from pytest_strategy.strategy import PytestStrategiesWarning
@@ -76,18 +76,18 @@ def _make_test_fn(argnames):
     return _fn
 
 
-def _parametrize(factory, test_fn, *, validate=True, config=None):
-    """Resolve ``factory`` for ``test_fn``; return the mark's (argnames, values, ids)."""
-    marked = resolve_and_parametrize(
+def _parametrize(factory, test_fn, *, validate=True, config=None, fixturenames=None):
+    """Resolve ``factory`` for ``test_fn``; return the (argnames, values, ids) it gives."""
+    parametrization = build_parametrization(
         "strat",
+        factory,
         test_fn,
-        registry={"strat": factory},
         config=config if config is not None else _make_config(),
         pytest_fixtures=set(),
         validate=validate,
+        fixturenames=fixturenames,
     )
-    mark = marked.pytestmark[-1]
-    return mark.args[0], list(mark.args[1]), mark.kwargs["ids"]
+    return parametrization.argnames, parametrization.values, parametrization.ids
 
 
 def _resolve(factory, argnames, **options):
@@ -168,9 +168,36 @@ class TestParameterNsamplesAuto:
         assert len(samples) == 1 + 3
 
 
+class TestParameterNsamplesReassigned:
+    """A Parameter.nsamples reassigned to a non-int count fails instead of being converted."""
+
+    @pytest.mark.parametrize("nsamples", [2.5, True, "5"])
+    def test_a_non_int_count_fails(self, nsamples):
+        with pytest.raises(ValueError) as excinfo:
+            _resolve(lambda: _with_nsamples(_random_param(), nsamples), ["code"])
+        assert str(excinfo.value) == (
+            f"Error generating samples for strategy 'strat': n must be an int, got {nsamples!r}"
+        )
+
+    def test_an_int_count_is_used(self):
+        """Guards behaviour that already worked in the resolver."""
+        _, samples, _ = _resolve(lambda: _with_nsamples(_random_param(), 2), ["code"])
+        assert len(samples) == 1 + 2
+
+
 # ---------------------------------------------------------------------------
 # Decorated factories
 # ---------------------------------------------------------------------------
+
+
+def _call_factory(factory, nsamples=3):
+    """Call ``factory`` as the resolver does, with ``nsamples`` as the run's count."""
+    inputs = FactoryInputs(
+        options=StrategyOptions(strategy="s", nsamples=nsamples),
+        rng=RNG.generator(),
+        ctx=lambda: None,
+    )
+    return call_factory("s", factory, inputs)
 
 
 def _inject_rng(fn):
@@ -213,37 +240,43 @@ def _wraps_passthrough(fn):
 
 
 class TestDecoratedFactories:
-    """The signature of the wrapper that is called decides how nsamples is passed."""
+    """The signature of the wrapper that is called decides what a decorated factory gets."""
 
     def test_wraps_decorator_injecting_an_argument(self):
         @_inject_rng
         def make(nsamples, rng):
             return nsamples, rng
 
-        assert call_factory("s", make, 3) == (3, "rng")
+        assert _call_factory(make) == (3, "rng")
 
     def test_mock_patch_decorator(self):
+        # mock.patch passes its mocks to the first parameters
         @mock.patch("os.getcwd", return_value="/fake")
-        def make(nsamples, getcwd):
+        def make(getcwd, nsamples):
             return nsamples, os.getcwd()
 
-        assert call_factory("s", make, 3) == (3, "/fake")
+        assert _call_factory(make) == (3, "/fake")
 
     def test_wraps_adapter_around_zero_argument_function(self):
         @_adapt_zero_arg
         def make():
             return "called"
 
-        assert call_factory("s", make, 3) == "called"
+        assert _call_factory(make) == "called"
 
-    def test_var_args_wrapper_without_wraps_around_positional_factory(self):
+    def test_var_args_wrapper_without_wraps_around_zero_argument_factory(self):
+        calls = []
+
         @_passthrough
-        def make(n):
-            return n
+        def make():
+            calls.append("made")
+            return "made"
 
-        assert call_factory("s", make, 3) == 3
+        assert _call_factory(make) == "made"
+        assert calls == ["made"]
 
-    def test_var_args_wrapper_without_wraps_around_keyword_factory(self):
+    def test_var_args_wrapper_without_wraps_around_nsamples_factory(self):
+        """The wrapper hides the signature, so the factory is called with no arguments."""
         calls = []
 
         @_passthrough
@@ -251,15 +284,17 @@ class TestDecoratedFactories:
             calls.append(nsamples)
             return nsamples
 
-        assert call_factory("s", make, 3) == 3
-        assert calls == [3]
+        with pytest.raises(ValueError, match="@functools.wraps") as exc_info:
+            _call_factory(make)
+        assert "missing 1 required positional argument: 'nsamples'" in str(exc_info.value)
+        assert calls == []
 
     def test_wraps_var_args_wrapper(self):
         @_wraps_passthrough
-        def make(n):
-            return n
+        def make(nsamples):
+            return nsamples
 
-        assert call_factory("s", make, 3) == 3
+        assert _call_factory(make) == 3
 
     def test_opaque_wrapper_reports_the_original_error(self):
         @_passthrough
@@ -267,22 +302,23 @@ class TestDecoratedFactories:
             return a, b
 
         with pytest.raises(ValueError, match="Error calling strategy factory 's'") as exc_info:
-            call_factory("s", make, 3)
+            _call_factory(make)
 
-        assert "unexpected keyword argument 'nsamples'" in str(exc_info.value)
+        assert "missing 2 required positional arguments: 'a' and 'b'" in str(exc_info.value)
         assert isinstance(exc_info.value.__cause__, TypeError)
 
     def test_opaque_wrapper_non_type_error_is_not_retried(self):
         calls = []
 
         @_passthrough
-        def make(nsamples):
-            calls.append(nsamples)
+        def make():
+            calls.append("made")
             raise RuntimeError("boom")
 
-        with pytest.raises(ValueError, match="RuntimeError: boom"):
-            call_factory("s", make, 3)
-        assert calls == [3]
+        with pytest.raises(ValueError, match="RuntimeError: boom") as exc_info:
+            _call_factory(make)
+        assert "functools.wraps" not in str(exc_info.value)
+        assert calls == ["made"]
 
     def test_informative_wrapper_is_still_called_once(self):
         """A wrapper that names nsamples keeps the single-call guarantee."""
@@ -293,42 +329,44 @@ class TestDecoratedFactories:
             return None + 1
 
         with pytest.raises(ValueError, match="unsupported operand"):
-            call_factory("s", _inject_rng(make), 3)
+            _call_factory(_inject_rng(make))
         assert calls == [3]
 
     def test_resolver_uses_decorated_factory(self):
+        # The value carries the nsamples the factory received, which must be the run's:
+        # the row count alone comes from --nsamples, whatever the factory received
         @_inject_rng
         def make(nsamples, rng):
-            return ("x",), [(rng,)] * nsamples
+            return Parameter(TestArg("x", value=(nsamples, rng)))
 
         _, samples, _ = _resolve(make, ["x"], nsamples=2)
-        assert samples == ["rng", "rng"]
+        assert samples == [(2, "rng"), (2, "rng")]
 
     def test_export_strategies_lists_decorated_factories(self):
         @Strategy.register("fix_r2_injected")
         @_inject_rng
         def injected(nsamples, rng):
-            return ("x",), [(rng,)]
+            return Parameter(TestArg("x", value=rng), nsamples=1)
 
         @Strategy.register("fix_r2_patched")
         @mock.patch("os.getcwd", return_value="/fake")
-        def patched(nsamples, getcwd):
-            return ("x",), [(os.getcwd(),)]
+        def patched(getcwd, nsamples):
+            return Parameter(TestArg("x", value=os.getcwd()), nsamples=1)
 
         @Strategy.register("fix_r2_adapted")
         @_adapt_zero_arg
         def adapted():
-            return ("x",), [(1,)]
+            return Parameter(TestArg("x", value=1), nsamples=1)
 
         @Strategy.register("fix_r2_opaque")
         @_passthrough
-        def opaque(n):
-            return ("x",), [(n,)]
+        def opaque():
+            return Parameter(TestArg("x", value=1), nsamples=1)
 
-        data = json.loads(Strategy.export_strategies())
+        data = {e["name"]: e for e in json.loads(Strategy.export_strategies())["strategies"]}
 
         for name in ("fix_r2_injected", "fix_r2_patched", "fix_r2_adapted", "fix_r2_opaque"):
-            assert data[name] == {"type": "legacy_tuple", "argnames": ["x"]}
+            assert [arg["name"] for arg in data[name]["parameter"]["arguments"]] == ["x"]
 
 
 # ---------------------------------------------------------------------------
@@ -336,11 +374,11 @@ class TestDecoratedFactories:
 # ---------------------------------------------------------------------------
 
 STRATEGY_SOURCE = textwrap.dedent("""
-    from pytest_strategy import Strategy
+    from pytest_strategy import Parameter, Strategy, TestArg
 
     @Strategy.register("fix_r2_dup")
     def factory(nsamples):
-        return ("x",), [(1,)]
+        return Parameter(TestArg("x", value=1), nsamples=1)
     """)
 
 
@@ -401,10 +439,10 @@ class TestDuplicateRegistrationPaths:
     def test_warning_as_error_still_registers_the_new_factory(self):
         @Strategy.register("fix_r2_dup_error")
         def first(nsamples):
-            return ("x",), [(1,)]
+            return Parameter(TestArg("x", value=1), nsamples=1)
 
         def second(nsamples):
-            return ("y",), [(2,)]
+            return Parameter(TestArg("y", value=2), nsamples=1)
 
         with warnings.catch_warnings():
             warnings.simplefilter("error")
@@ -415,7 +453,7 @@ class TestDuplicateRegistrationPaths:
 
 
 # ---------------------------------------------------------------------------
-# Dataclass detection without signature validation
+# A dataclass-typed fixture that consumes the argnames
 # ---------------------------------------------------------------------------
 
 
@@ -438,62 +476,67 @@ class Point:
     y: int
 
 
+def _record(test_fn, argnames, fixturenames=None):
+    """The (parameter, record type) of record mode, or None in named mode."""
+    record = detect_record_param(test_fn, argnames, fixturenames)
+    return None if record is None else (record.name, record.record_type)
+
+
+def _one_server(nsamples):
+    """A strategy with the single row host="localhost", port=8000."""
+    return Parameter(TestArg("host", value="localhost"), TestArg("port", value=8000), nsamples=1)
+
+
+# The test's fixture names when its server fixture asks for host and port
+SERVER_FIXTURES = ["server", "client", "host", "port"]
+
+
 class TestDataclassTypedFixture:
-    """With allow_fixtures=False, a dataclass parameter next to others is a fixture."""
+    """
+    A fixture that asks for the argnames takes them: the test is then in named mode,
+    whatever its annotations. validate_signature no longer changes the choice (3.0
+    left a dataclass parameter next to others alone only with validation off).
+    """
 
     def test_exact_match_next_to_fixture_is_left_alone(self):
         def test_fn(server: Server, client):
             pass
 
-        assert detect_dataclass_param(test_fn, ["host", "port"], allow_fixtures=False) == (
-            False,
-            None,
-            None,
-        )
+        assert _record(test_fn, ["host", "port"], SERVER_FIXTURES) is None
 
     def test_field_mismatch_next_to_fixture_is_left_alone(self):
         def test_fn(server: StartedServer, client):
             pass
 
-        assert detect_dataclass_param(test_fn, ["host", "port"], allow_fixtures=False) == (
-            False,
-            None,
-            None,
-        )
+        assert _record(test_fn, ["host", "port"], SERVER_FIXTURES) is None
 
     def test_default_still_allows_fixtures(self):
         def test_fn(server: Server, client):
             pass
 
-        assert detect_dataclass_param(test_fn, ["host", "port"]) == (True, Server, "server")
+        assert _record(test_fn, ["host", "port"]) == ("server", Server)
+        assert _record(test_fn, ["host", "port"], ["server", "client"]) == ("server", Server)
 
     def test_only_parameter_is_still_dataclass_mode(self):
         def test_fn(p: Point):
             pass
 
-        assert detect_dataclass_param(test_fn, ["x", "y"], allow_fixtures=False) == (
-            True,
-            Point,
-            "p",
-        )
+        assert _record(test_fn, ["x", "y"], ["p"]) == ("p", Point)
 
     def test_self_and_builtin_fixtures_do_not_count(self):
         class TestPoints:
             def test_point(self, p: Point, tmp_path):
                 pass
 
-        assert detect_dataclass_param(TestPoints.test_point, ["x", "y"], allow_fixtures=False) == (
-            True,
-            Point,
-            "p",
-        )
+        assert _record(TestPoints.test_point, ["x", "y"], ["p", "tmp_path"]) == ("p", Point)
 
-    def test_resolver_parametrizes_the_argnames_without_validation(self):
+    @pytest.mark.parametrize("validate", [False, True])
+    def test_resolver_parametrizes_the_argnames_the_fixture_asks_for(self, validate):
         def test_server(server: Server, client):
             pass
 
         argstr, samples, _ = _parametrize(
-            lambda nsamples: (("host", "port"), [("localhost", 8000)]), test_server, validate=False
+            _one_server, test_server, validate=validate, fixturenames=SERVER_FIXTURES
         )
         assert argstr == "host,port"
         assert samples == [("localhost", 8000)]
@@ -502,8 +545,18 @@ class TestDataclassTypedFixture:
         def test_server(server: Server, client):
             pass
 
+        argstr, samples, _ = _parametrize(_one_server, test_server)
+        assert argstr == "server"
+        assert samples == [Server("localhost", 8000)]
+
+    def test_resolver_keeps_dataclass_mode_next_to_fixture_without_validation(self):
+        """3.0 gave named mode, which pytest then rejected: the test takes no 'host'."""
+
+        def test_server(server: Server, client):
+            pass
+
         argstr, samples, _ = _parametrize(
-            lambda nsamples: (("host", "port"), [("localhost", 8000)]), test_server
+            _one_server, test_server, validate=False, fixturenames=["server", "client"]
         )
         assert argstr == "server"
         assert samples == [Server("localhost", 8000)]
@@ -612,13 +665,15 @@ class TestIdsOfSets:
 
 
 class TestNoneDefaultDataclassParam:
-    """``p: DC = None`` is detected whether or not get_type_hints adds Optional."""
+    """``p: DC = None`` has a default, so pytest does not fill it."""
 
-    def test_none_default(self):
+    def test_none_default_is_not_record_mode(self):
+        """3.0 chose it, and pytest then refused to parametrize an argument with a default."""
+
         def test_fn(p: Point = None):
             pass
 
-        assert detect_dataclass_param(test_fn, ["x", "y"]) == (True, Point, "p")
+        assert _record(test_fn, ["x", "y"]) is None
 
     def test_explicit_optional_is_not_dataclass_mode(self):
         """An Optional written by the user is kept."""
@@ -626,7 +681,7 @@ class TestNoneDefaultDataclassParam:
         def test_fn(p: Optional[Point] = None):  # noqa: UP045
             pass
 
-        assert detect_dataclass_param(test_fn, ["x", "y"]) == (False, None, None)
+        assert _record(test_fn, ["x", "y"]) is None
 
 
 # ---------------------------------------------------------------------------
@@ -685,9 +740,14 @@ class TestConvertCustomInit:
         def test_rect(r: Rect):
             pass
 
-        _, samples, ids = _parametrize(lambda nsamples: (("width", "height"), [(1, 2)]), test_rect)
+        _, samples, ids = _parametrize(
+            lambda nsamples: Parameter(
+                TestArg("width", value=1), TestArg("height", value=2), nsamples=1
+            ),
+            test_rect,
+        )
         assert [(r.width, r.height) for r in samples] == [(1, 2)]
-        assert ids == ["width=1,height=2"]
+        assert ids == ["rand-0"]
 
 
 # ---------------------------------------------------------------------------
@@ -696,18 +756,24 @@ class TestConvertCustomInit:
 
 
 class TestDataclassModePytestParam:
-    """A pytest.param sample is converted from its values and keeps its marks and id."""
+    """A pytest.param sample is converted from its values and keeps its marks."""
 
-    def test_values_marks_and_id_are_kept(self):
+    def test_values_and_marks_are_kept(self):
         slow = pytest.mark.slow
 
         def test_point(p: Point):
             pass
 
         argstr, samples, ids = _parametrize(
-            lambda nsamples: (
-                ("x", "y"),
-                [(1, 2), pytest.param(3, 4, marks=slow), pytest.param(5, 6, id="custom")],
+            lambda nsamples: Parameter(
+                TestArg("x", rng_type=RNGInteger(0, 9)),
+                TestArg("y", rng_type=RNGInteger(0, 9)),
+                directed_vectors={
+                    "plain": (1, 2),
+                    "slow": pytest.param(3, 4, marks=slow),
+                    "custom": {"y": 6, "x": 5},
+                },
+                nsamples=0,
             ),
             test_point,
         )
@@ -715,8 +781,9 @@ class TestDataclassModePytestParam:
         assert argstr == "p"
         assert samples[0] == Point(1, 2)
         assert samples[1] == pytest.param(Point(3, 4), marks=slow)
-        assert samples[2] == pytest.param(Point(5, 6), id="custom")
-        assert ids == ["x=1,y=2", "x=3,y=4", "x=5,y=6"]
+        assert samples[2] == Point(5, 6)
+        # The vector's name is its ID
+        assert ids == ["directed-plain", "directed-slow", "directed-custom"]
 
     def test_parameter_rows_are_still_converted(self):
         """Guards behaviour that already worked for rows that are not pytest.param."""
@@ -735,7 +802,7 @@ class TestDataclassModePytestParam:
             config=_make_config(vector_mode="directed_only"),
         )
         assert samples == [Point(0, 0)]
-        assert ids == ["x=0,y=0"]
+        assert ids == ["directed-origin"]
 
 
 # ---------------------------------------------------------------------------

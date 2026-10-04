@@ -1,22 +1,25 @@
 """
 Regression tests for resolver and strategy registration fixes.
 
-Most tests mock the pytest.Config and registry to drive resolve_and_parametrize
-directly and inspect the pytest.mark.parametrize it applies.
+Most tests mock the pytest.Config and registry to drive build_parametrization
+directly and inspect the rows and IDs it parametrizes the test with.
 """
 
 import inspect
 import json
 import textwrap
 import warnings
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import DEFAULT, MagicMock
 
 import pytest
 
-from pytest_strategy import RNGInteger, Strategy
-from pytest_strategy._resolver import call_factory, resolve_and_parametrize
+from pytest_strategy import RNG, RNGInteger, Strategy, StrategyOptions
+from pytest_strategy._factory import FactoryInputs, call_factory
+from pytest_strategy._resolver import build_parametrization
+from pytest_strategy._runtime import runtime
 from pytest_strategy.parameters import Parameter
-from pytest_strategy.rng import RNGChoice, Series
+from pytest_strategy.rng import RNGChoice, RNGValueError, Series
 from pytest_strategy.strategy import PytestStrategiesWarning
 from pytest_strategy.test_args import TestArg
 
@@ -25,13 +28,28 @@ from pytest_strategy.test_args import TestArg
 # ---------------------------------------------------------------------------
 
 
-def _make_config(**options):
-    """Return a mock pytest.Config whose getoption() serves the given CLI options."""
+def _make_config(*, ids=None, **options):
+    """
+    Return a mock pytest.Config whose getoption() serves the given CLI options, and
+    whose getini() serves ``ids`` as the strategies_ids ini option when it is given.
+    """
     values = {"nsamples": None, "vector_mode": "all", "vector_name": None, "vector_index": None}
     values.update(options)
     config = MagicMock()
     config.getoption.side_effect = lambda opt, default=None: values.get(opt, default)
+    if ids is not None:
+        config.getini.side_effect = lambda name: ids if name == "strategies_ids" else DEFAULT
     return config
+
+
+def _call_factory(name, factory, nsamples):
+    """Call ``factory`` as the resolver does, with ``nsamples`` as the run's count."""
+    inputs = FactoryInputs(
+        options=StrategyOptions(strategy=name, nsamples=nsamples),
+        rng=RNG.generator(),
+        ctx=lambda: None,
+    )
+    return call_factory(name, factory, inputs)
 
 
 def _make_test_fn(argnames):
@@ -49,18 +67,17 @@ def _make_test_fn(argnames):
 def _resolve(factory, argnames, *, validate=False, **options):
     """Resolve ``factory`` for a test taking ``argnames`` under the given CLI options.
 
-    Returns the (argstr, samples, ids) passed to pytest.mark.parametrize.
+    Returns the (argstr, samples, ids) the test is parametrized with.
     """
-    marked = resolve_and_parametrize(
+    parametrization = build_parametrization(
         "strat",
+        factory,
         _make_test_fn(argnames),
-        registry={"strat": factory},
         config=_make_config(**options),
         pytest_fixtures=set(),
         validate=validate,
     )
-    mark = marked.pytestmark[-1]
-    return mark.args[0], list(mark.args[1]), mark.kwargs["ids"]
+    return parametrization.argnames, parametrization.values, parametrization.ids
 
 
 def _series_param(**kwargs):
@@ -248,7 +265,7 @@ class TestVectorIndexOutOfRange:
 
     def test_index_error_without_filter_still_raises(self):
         class BrokenParameter(Parameter):
-            def generate_vectors(self, *args, **kwargs):
+            def _generate_rows(self, *args, **kwargs):
                 raise IndexError("boom")
 
         param = BrokenParameter(TestArg("w", rng_type=RNGInteger(0, 9)))
@@ -271,43 +288,47 @@ def restore_registry():
 
 
 class TestCallFactory:
-    """call_factory passes nsamples the way the factory's signature accepts it."""
+    """call_factory passes the inputs a factory declares, by name (the 4.0 contract)."""
 
     def test_keyword_only_parameter(self):
         def factory(*, nsamples):
             return nsamples
 
-        assert call_factory("s", factory, 3) == 3
+        assert _call_factory("s", factory, 3) == 3
 
-    def test_var_keyword(self):
+    def test_var_keyword_receives_nothing(self):
         def factory(**kwargs):
             return kwargs
 
-        assert call_factory("s", factory, 3) == {"nsamples": 3}
+        assert _call_factory("s", factory, 3) == {}
 
-    def test_positional_parameter_with_another_name(self):
+    def test_positional_parameter_with_another_name_fails(self):
+        calls = []
+
         def factory(n):
-            return n
+            calls.append(n)
 
-        assert call_factory("s", factory, 3) == 3
+        with pytest.raises(ValueError, match="parameter 'n'.*Did you mean 'nsamples'"):
+            _call_factory("s", factory, 3)
+        assert calls == []
 
     def test_positional_only_parameter(self):
         def factory(nsamples, /):
             return nsamples
 
-        assert call_factory("s", factory, 3) == 3
+        assert _call_factory("s", factory, 3) == 3
 
-    def test_var_positional(self):
+    def test_var_positional_receives_nothing(self):
         def factory(*args):
             return args
 
-        assert call_factory("s", factory, 3) == (3,)
+        assert _call_factory("s", factory, 3) == ()
 
     def test_zero_argument_factory(self):
         def factory():
             return "called"
 
-        assert call_factory("s", factory, 3) == "called"
+        assert _call_factory("s", factory, 3) == "called"
 
     def test_unsupported_signature_is_not_called(self):
         calls = []
@@ -315,8 +336,8 @@ class TestCallFactory:
         def factory(a, b):
             calls.append((a, b))
 
-        with pytest.raises(ValueError, match="Strategy factory 's'.*nsamples"):
-            call_factory("s", factory, 3)
+        with pytest.raises(ValueError, match="Strategy factory 's' .* parameter 'a'"):
+            _call_factory("s", factory, 3)
         assert calls == []
 
     def test_type_error_in_body_is_reported_once(self):
@@ -327,14 +348,14 @@ class TestCallFactory:
             return None + 1
 
         with pytest.raises(ValueError) as exc_info:
-            call_factory("buggy", factory, 10)
+            _call_factory("buggy", factory, 10)
 
         assert calls == [10]
         message = str(exc_info.value)
         assert "'buggy'" in message
         assert "TypeError" in message
         assert "unsupported operand" in message
-        assert "should accept" not in message
+        assert "does not provide" not in message
         assert isinstance(exc_info.value.__cause__, TypeError)
 
     def test_transient_error_is_not_retried(self):
@@ -347,12 +368,12 @@ class TestCallFactory:
             return "second call"
 
         with pytest.raises(ValueError, match="transient"):
-            call_factory("s", factory, 10)
+            _call_factory("s", factory, 10)
         assert calls == [10]
 
 
 class TestResolverFactoryCalling:
-    """resolve_and_parametrize goes through call_factory."""
+    """build_parametrization goes through call_factory."""
 
     def test_type_error_in_body_is_reported_once(self):
         calls = []
@@ -366,7 +387,7 @@ class TestResolverFactoryCalling:
 
         assert calls == [10]
         assert "TypeError" in str(exc_info.value)
-        assert "should accept" not in str(exc_info.value)
+        assert "does not provide" not in str(exc_info.value)
 
     def test_zero_argument_factory(self):
         def factory():
@@ -375,12 +396,16 @@ class TestResolverFactoryCalling:
         _, samples, _ = _resolve(factory, ["x"])
         assert len(samples) == 3
 
-    def test_legacy_factory_under_auto_reports_real_error(self):
+    def test_factory_failing_under_auto_reports_real_error(self):
         calls = []
 
         def factory(nsamples):
             calls.append(nsamples)
-            return ("x",), [(i,) for i in range(nsamples)]
+            return Parameter(
+                TestArg("x", rng_type=RNGInteger(0, 9)),
+                directed_vectors={f"row_{i}": (i,) for i in range(nsamples)},
+                nsamples=0,
+            )
 
         with pytest.raises(ValueError) as exc_info:
             _resolve(factory, ["x"], nsamples="auto")
@@ -389,13 +414,59 @@ class TestResolverFactoryCalling:
         message = str(exc_info.value)
         assert "nsamples='auto'" in message
         assert "TypeError" in message
-        assert "should accept" not in message
+        assert "does not provide" not in message
+
+
+def _exported():
+    """The entries of export_strategies(), by strategy name (one registration each)."""
+    entries = json.loads(Strategy.export_strategies())["strategies"]
+    return {entry["name"]: entry for entry in entries}
 
 
 class TestExportStrategiesFactoryCalling:
-    """export_strategies calls factories the same way the resolver does."""
+    """export_strategies calls factories as the resolver does, with the session's options."""
 
-    def test_keyword_only_var_keyword_and_zero_arg_factories(self, restore_registry):
+    @staticmethod
+    def _own_session(monkeypatch, **options):
+        """
+        Make the active session one of the test's own, whose config serves
+        ``options``, so the options of the run that runs this test do not count.
+        """
+        monkeypatch.setattr(runtime, "_stack", [])
+        config = SimpleNamespace(getoption=lambda name, default=None: options.get(name, default))
+        # No strategy files to load: the factories are the test's own
+        runtime.push(config).all_loaded = True
+        return config
+
+    @staticmethod
+    def _watched_context(monkeypatch, value):
+        """
+        Make every folder's context ``value``, and return the list that gets an
+        entry each time a factory asks for one.
+        """
+        asked = []
+
+        class Context:
+            """The context of a folder, as runtime.path_context() returns it."""
+
+            def __call__(self):
+                asked.append(True)
+                return value
+
+            def answer(self):
+                return SimpleNamespace(fingerprint=None if value is None else "f1ngerpr")
+
+            def why_none(self):
+                return None
+
+        monkeypatch.setattr(runtime, "path_context", lambda path=None: Context())
+        return asked
+
+    @pytest.mark.parametrize(("options", "nsamples"), [({}, 10), ({"nsamples": 4}, 4)])
+    def test_keyword_only_var_keyword_and_zero_arg_factories(
+        self, monkeypatch, restore_registry, options, nsamples
+    ):
+        self._own_session(monkeypatch, **options)
         received = []
 
         @Strategy.register("fix_export_kwonly")
@@ -409,134 +480,219 @@ class TestExportStrategiesFactoryCalling:
 
         @Strategy.register("fix_export_noargs")
         def noargs():
-            return ("x",), [(1,)]
+            return Parameter(TestArg("x", value=1), nsamples=1)
 
-        data = json.loads(Strategy.export_strategies())
+        data = _exported()
 
-        assert received == [1]
-        assert data["fix_export_kwonly"]["arguments"][0]["name"] == "x"
-        assert data["fix_export_varkw"]["arguments"][0]["name"] == "x"
-        assert data["fix_export_noargs"] == {"type": "legacy_tuple", "argnames": ["x"]}
+        # The session's count: --nsamples, or 10 without it (3.0 passed 1)
+        assert received == [nsamples]
+        assert data["fix_export_kwonly"]["parameter"]["arguments"][0]["name"] == "x"
+        assert data["fix_export_varkw"]["parameter"]["arguments"][0]["name"] == "x"
+        assert data["fix_export_noargs"]["parameter"]["arguments"][0]["name"] == "x"
+
+    def test_rng_and_options_factory(self, monkeypatch, restore_registry):
+        config = self._own_session(monkeypatch, nsamples=4)
+        received = []
+
+        @Strategy.register("fix_export_rng_options")
+        def rng_options(rng, options):
+            received.append((rng, options))
+            return Parameter(TestArg("x", rng_type=RNGInteger(0, 9)))
+
+        data = _exported()
+
+        assert data["fix_export_rng_options"]["parameter"]["arguments"][0]["name"] == "x"
+        [(rng, options)] = received
+        assert rng is RNG.generator()
+        # The instance the session's collection gives the strategy
+        assert options is runtime.strategy_options("fix_export_rng_options", config)
+        assert options.strategy == "fix_export_rng_options"
+        assert (options.nsamples, options.nsamples_source) == (4, "--nsamples")
+
+    def test_without_a_session_the_defaults_apply(self, monkeypatch, restore_registry):
+        monkeypatch.setattr(runtime, "_stack", [])
+        received = []
+
+        @Strategy.register("fix_export_no_session")
+        def no_session(nsamples, options):
+            received.append((nsamples, options))
+            return Parameter(TestArg("x", rng_type=RNGInteger(0, 9)))
+
+        data = _exported()
+
+        assert "parameter" in data["fix_export_no_session"]
+        assert received == [(10, StrategyOptions(strategy="fix_export_no_session"))]
+
+    def test_only_a_ctx_factory_asks_for_the_context(self, monkeypatch, restore_registry):
+        # Only this test's factories: another registered one may declare ctx
+        Strategy._registry.clear()
+        asked = self._watched_context(monkeypatch, "bench")
+
+        @Strategy.register("fix_export_without_ctx")
+        def without_ctx(nsamples, rng, options):
+            return Parameter(TestArg("x", rng_type=RNGInteger(0, 9)))
+
+        data = _exported()
+
+        assert "parameter" in data["fix_export_without_ctx"]
+        assert data["fix_export_without_ctx"]["context"] is None
+        assert asked == []
+
+        received = []
+
+        @Strategy.register("fix_export_with_ctx")
+        def with_ctx(ctx):
+            received.append(ctx)
+            return Parameter(TestArg("x", rng_type=RNGInteger(0, 9)))
+
+        data = _exported()
+
+        assert "parameter" in data["fix_export_with_ctx"]
+        # The fingerprint of the context the factory received
+        assert data["fix_export_with_ctx"]["context"] == "f1ngerpr"
+        assert received == ["bench"]
+        assert asked == [True]
 
     def test_factory_error_is_still_recorded(self, restore_registry):
         @Strategy.register("fix_export_broken")
         def broken(nsamples):
             raise RuntimeError("boom")
 
-        data = json.loads(Strategy.export_strategies())
+        data = _exported()
 
-        assert "RuntimeError: boom" in data["fix_export_broken"]["error"]
+        assert data["fix_export_broken"]["error"] == {"type": "RuntimeError", "message": "boom"}
+
+    def test_rejected_signatures_are_recorded_without_calling_anything(
+        self, monkeypatch, restore_registry
+    ):
+        # Only this test's factories: another registered one may declare ctx
+        Strategy._registry.clear()
+        self._own_session(monkeypatch)
+        asked = self._watched_context(monkeypatch, None)
+        called = []
+
+        @Strategy.register("fix_export_burst")
+        def burst(n):
+            called.append("burst")
+
+        @Strategy.register("fix_export_reserved")
+        def reserved(nsamples, config=None):
+            called.append("reserved")
+
+        @Strategy.register("fix_export_rejected_ctx")
+        def rejected(a, ctx):
+            called.append("rejected")
+
+        data = _exported()
+
+        errors = {
+            name: entry["error"]["message"] for name, entry in data.items() if "error" in entry
+        }
+        assert set(errors) == {"fix_export_burst", "fix_export_reserved", "fix_export_rejected_ctx"}
+        assert "has a parameter 'n'" in errors["fix_export_burst"]
+        assert "Did you mean 'nsamples'" in errors["fix_export_burst"]
+        assert "'config', a name the plugin reserves" in errors["fix_export_reserved"]
+        assert "has a parameter 'a'" in errors["fix_export_rejected_ctx"]
+        # Rejected before the factory or the context hook runs: no context either
+        assert {data[name]["context"] for name in errors} == {None}
+        # Rejected before the factory or the context hook runs
+        assert called == []
+        assert asked == []
 
 
 # ---------------------------------------------------------------------------
-# Single-argument strategies: IDs show the whole value passed to the test
+# Single-argument strategies: values-format IDs show the whole value passed to the test
 # ---------------------------------------------------------------------------
 
 
 class TestSingleArgumentIds:
-    """IDs are built from the values passed to parametrize, unwrapped exactly once."""
+    """
+    In the values format, IDs are built from the values passed to parametrize,
+    unwrapped exactly once.
+    """
 
     def test_tuple_valued_directed_vectors(self):
         param = Parameter(
             TestArg("pt", rng_type=RNGChoice([(1, 2)])),
             directed_vectors={"a": ((1, 2),), "b": ((1, 3),)},
         )
-        _, samples, ids = _resolve(lambda nsamples: param, ["pt"], vector_mode="directed_only")
+        _, samples, ids = _resolve(
+            lambda nsamples: param, ["pt"], vector_mode="directed_only", ids="values"
+        )
         assert samples == [(1, 2), (1, 3)]
         assert ids == ["pt=(1, 2)", "pt=(1, 3)"]
 
     def test_tuple_valued_random_samples(self):
         param = Parameter(TestArg("pt", rng_type=RNGChoice([(7, 8)])))
         _, samples, ids = _resolve(
-            lambda nsamples: param, ["pt"], nsamples=2, vector_mode="random_only"
+            lambda nsamples: param, ["pt"], nsamples=2, vector_mode="random_only", ids="values"
         )
         assert samples == [(7, 8), (7, 8)]
         # Repeated rows are suffixed as pytest would, so strict IDs accept them
         assert ids == ["pt=(7, 8)0", "pt=(7, 8)1"]
 
-    def test_legacy_one_tuple_rows(self):
-        _, samples, ids = _resolve(lambda nsamples: (("x",), [(1,), (2,)]), ["x"])
-        assert samples == [1, 2]
-        assert ids == ["x=1", "x=2"]
-
-    def test_legacy_bare_values(self):
-        _, samples, ids = _resolve(lambda nsamples: ("x", [1, "a"]), ["x"])
-        assert samples == [1, "a"]
-        assert ids == ["x=1", "x='a'"]
-
-    def test_legacy_tuple_value_in_one_tuple_row(self):
-        _, samples, ids = _resolve(lambda nsamples: (("x",), [((1, 2),)]), ["x"])
-        assert samples == [(1, 2)]
-        assert ids == ["x=(1, 2)"]
+    def test_the_names_format_does_not_read_the_values(self):
+        param = Parameter(TestArg("pt", rng_type=RNGChoice([(7, 8)])))
+        _, samples, ids = _resolve(lambda nsamples: param, ["pt"], nsamples=2)
+        assert samples == [(7, 8), (7, 8)]
+        assert ids == ["rand-0", "rand-1"]
 
 
 # ---------------------------------------------------------------------------
-# Legacy tuple strategies: comma argnames, generators and pytest.param samples
+# pytest.param vectors: marks are kept, and the vector's name is its ID
 # ---------------------------------------------------------------------------
 
 
-class TestLegacyTupleStrategies:
-    """Legacy (argnames, samples) strategies behave like pytest.mark.parametrize."""
-
-    @pytest.mark.parametrize("argnames", ["x,y", "x, y", " x , y "])
-    def test_comma_separated_argnames(self, argnames):
-        argstr, samples, ids = _resolve(
-            lambda nsamples: (argnames, [(1, 2), (3, 4)]), ["x", "y"], validate=True
-        )
-        assert argstr == "x,y"
-        assert samples == [(1, 2), (3, 4)]
-        assert ids == ["x=1,y=2", "x=3,y=4"]
-
-    def test_single_string_argname_stays_one_name(self):
-        argstr, samples, ids = _resolve(lambda nsamples: ("x", [(1,), (2,)]), ["x"], validate=True)
-        assert argstr == "x"
-        assert samples == [1, 2]
-        assert ids == ["x=1", "x=2"]
-
-    def test_generator_samples_multi_arg(self):
-        _, samples, ids = _resolve(
-            lambda nsamples: (("a", "b"), ((i, i + 1) for i in range(3))), ["a", "b"]
-        )
-        assert samples == [(0, 1), (1, 2), (2, 3)]
-        assert ids == ["a=0,b=1", "a=1,b=2", "a=2,b=3"]
-
-    def test_generator_samples_single_arg(self):
-        _, samples, ids = _resolve(lambda nsamples: ("a", (i for i in range(3))), ["a"])
-        assert samples == [0, 1, 2]
-        assert ids == ["a=0", "a=1", "a=2"]
+class TestPytestParamVectors:
+    """A pytest.param vector reaches parametrize like a pytest.param row would."""
 
     def test_pytest_param_single_arg_is_not_unwrapped(self):
         xfail = pytest.mark.xfail(strict=True)
-        _, samples, ids = _resolve(
-            lambda nsamples: (
-                ("x",),
-                [pytest.param(1, marks=xfail), pytest.param(5, id="five"), (2,)],
-            ),
-            ["x"],
+        param = Parameter(
+            TestArg("x", rng_type=RNGInteger(0, 9)),
+            directed_vectors={
+                "one": pytest.param(1, marks=xfail),
+                "five": {"x": 5},
+                "two": (2,),
+            },
+            nsamples=0,
         )
+        _, samples, ids = _resolve(lambda nsamples: param, ["x"])
         assert samples[0] == pytest.param(1, marks=xfail)
-        assert samples[1] == pytest.param(5, id="five")
+        assert samples[1] == 5
         assert samples[2] == 2
-        assert ids == ["x=1", "x=5", "x=2"]
+        assert ids == ["directed-one", "directed-five", "directed-two"]
 
     def test_pytest_param_multi_arg_ids_use_values(self):
         xfail = pytest.mark.xfail(strict=True)
-        _, samples, ids = _resolve(
-            lambda nsamples: (("a", "b"), [pytest.param(1, 2, marks=xfail), (3, 3)]),
-            ["a", "b"],
+        param = Parameter(
+            TestArg("a", rng_type=RNGInteger(0, 9)),
+            TestArg("b", rng_type=RNGInteger(0, 9)),
+            directed_vectors={"unequal": pytest.param(1, 2, marks=xfail), "equal": (3, 3)},
+            nsamples=0,
         )
+        _, samples, ids = _resolve(lambda nsamples: param, ["a", "b"], ids="values")
         assert samples == [pytest.param(1, 2, marks=xfail), (3, 3)]
         assert ids == ["a=1,b=2", "a=3,b=3"]
 
-    def test_pytest_param_id_repeating_another_row_is_suffixed(self):
+    def test_pytest_param_repeating_another_row_is_suffixed(self):
         xfail = pytest.mark.xfail(strict=True)
-        _, samples, ids = _resolve(
-            lambda nsamples: ("x", [1, pytest.param(2, id="x=1", marks=xfail)]),
-            ["x"],
+        param = Parameter(
+            TestArg("x", rng_type=RNGInteger(0, 9)),
+            directed_vectors={"one": (1,), "two": pytest.param(1, marks=xfail)},
+            nsamples=0,
         )
-        # The row keeps its marks; its ids entry, which pytest ignores, is unchanged
-        assert samples == [1, pytest.param(2, id="x=1_1", marks=xfail)]
-        assert ids == ["x=1_0", "x=2"]
+        _, samples, ids = _resolve(lambda nsamples: param, ["x"], ids="values")
+        # The row keeps its marks; its ID is in the ids list
+        assert samples == [1, pytest.param(1, marks=xfail)]
+        assert ids == ["x=1_0", "x=1_1"]
+
+    def test_pytest_param_with_an_id_fails(self):
+        with pytest.raises(RNGValueError, match="the vector's name is its ID"):
+            Parameter(
+                TestArg("x", rng_type=RNGInteger(0, 9)),
+                directed_vectors={"five": pytest.param(5, id="five")},
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -544,11 +700,11 @@ class TestLegacyTupleStrategies:
 # ---------------------------------------------------------------------------
 
 STRATEGY_SOURCE = textwrap.dedent("""
-    from pytest_strategy import Strategy
+    from pytest_strategy import Parameter, Strategy, TestArg
 
     @Strategy.register("fix_dup_source")
     def factory(nsamples):
-        return ("x",), [(1,)]
+        return Parameter(TestArg("x", value=1), nsamples=1)
     """)
 
 
@@ -558,13 +714,13 @@ class TestDuplicateRegistration:
     def test_different_function_warns_and_last_wins(self, restore_registry):
         @Strategy.register("fix_dup")
         def first(nsamples):
-            return ("x",), [(1,)]
+            return Parameter(TestArg("x", value=1), nsamples=1)
 
         with pytest.warns(PytestStrategiesWarning, match="'fix_dup'") as record:
 
             @Strategy.register("fix_dup")
             def second(nsamples):
-                return ("y",), [(2,)]
+                return Parameter(TestArg("y", value=2), nsamples=1)
 
         assert Strategy._registry["fix_dup"] is second
         assert len(record) == 1
@@ -579,7 +735,7 @@ class TestDuplicateRegistration:
 
     def test_same_function_again_is_silent(self, restore_registry):
         def factory(nsamples):
-            return ("x",), [(1,)]
+            return Parameter(TestArg("x", value=1), nsamples=1)
 
         Strategy.register("fix_dup_same")(factory)
         with warnings.catch_warnings():

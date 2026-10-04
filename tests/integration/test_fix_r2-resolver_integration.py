@@ -49,7 +49,7 @@ class TestDecoratedFactories:
             import os
             from unittest import mock
 
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, RNGChoice, Strategy, TestArg
 
             def with_rng(fn):
                 @functools.wraps(fn)
@@ -68,36 +68,40 @@ class TestDecoratedFactories:
                     return fn(*args, **kwargs)
                 return wrapper
 
+            # The values carry the nsamples each factory received, which must be the
+            # run's: the row count alone comes from --nsamples, whatever it received
             @Strategy.register("r2_injected")
             @with_rng
             def injected(nsamples, rng):
-                return ("x",), [(rng,)] * nsamples
+                return Parameter(TestArg("x", value=(nsamples, rng)))
 
+            # mock.patch passes its mocks to the first parameters
             @Strategy.register("r2_patched")
             @mock.patch("os.getcwd", return_value="/fake")
-            def patched(nsamples, getcwd):
-                return ("x",), [(os.getcwd(),)] * nsamples
+            def patched(getcwd, nsamples):
+                return Parameter(TestArg("x", value=(nsamples, os.getcwd())))
 
             @Strategy.register("r2_adapted")
             @adapt
             def adapted():
-                return ("x",), [(1,), (2,)]
+                return Parameter(TestArg("x", rng_type=RNGChoice([1, 2])))
 
+            # A wrapper without functools.wraps hides the signature: no arguments
             @Strategy.register("r2_logged")
             @logged
-            def logged_factory(n):
-                return ("x",), [(i,) for i in range(n)]
+            def logged_factory():
+                return Parameter(TestArg("x", value="logged"))
             """)
         pytester.makepyfile(test_deco="""
             from pytest_strategy import Strategy
 
             @Strategy.strategy("r2_injected")
             def test_injected(x):
-                assert x == 7
+                assert x == (3, 7)
 
             @Strategy.strategy("r2_patched")
             def test_patched(x):
-                assert x == "/fake"
+                assert x == (3, "/fake")
 
             @Strategy.strategy("r2_adapted")
             def test_adapted(x):
@@ -105,12 +109,12 @@ class TestDecoratedFactories:
 
             @Strategy.strategy("r2_logged")
             def test_logged(x):
-                assert 0 <= x < 3
+                assert x == "logged"
             """)
 
         result = pytester.runpytest_inprocess("--nsamples=3")
 
-        result.assert_outcomes(passed=3 + 3 + 2 + 3)
+        result.assert_outcomes(passed=3 + 3 + 3 + 3)
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +132,7 @@ class TestDuplicateRegistrationSameFile:
         shared = pytester.mkdir("shared")
         (shared / "api_strategies.py").write_text(
             "from dataclasses import dataclass\n"
-            "from pytest_strategy import Strategy\n"
+            "from pytest_strategy import Parameter, RNGChoice, Strategy, TestArg\n"
             "\n"
             "@dataclass\n"
             "class Req:\n"
@@ -137,7 +141,12 @@ class TestDuplicateRegistrationSameFile:
             "\n"
             '@Strategy.register("r2_reqs")\n'
             "def make(nsamples):\n"
-            '    return ("method", "path"), [("GET", "/a"), ("POST", "/b")]\n'
+            "    return Parameter(\n"
+            '        TestArg("method", rng_type=RNGChoice(["GET", "POST"])),\n'
+            '        TestArg("path", rng_type=RNGChoice(["/a", "/b"])),\n'
+            '        directed_vectors={"get": ("GET", "/a"), "post": ("POST", "/b")},\n'
+            "        nsamples=0,\n"
+            "    )\n"
         )
         (shared / "test_api.py").write_text(
             "from api_strategies import Req\n"
@@ -159,11 +168,15 @@ class TestDuplicateRegistrationSameFile:
         tests = original / "tests"
         tests.mkdir()
         (tests / "test_strategies.py").write_text(
-            "from pytest_strategy import Strategy\n"
+            "from pytest_strategy import Parameter, RNGInteger, Strategy, TestArg\n"
             "\n"
             '@Strategy.register("r2_inline")\n'
             "def make(nsamples):\n"
-            '    return ("x",), [(1,), (2,)]\n'
+            "    return Parameter(\n"
+            '        TestArg("x", rng_type=RNGInteger(1, 2)),\n'
+            '        directed_vectors={"one": (1,), "two": (2,)},\n'
+            "        nsamples=0,\n"
+            "    )\n"
             "\n"
             '@Strategy.strategy("r2_inline")\n'
             "def test_inline(x):\n"
@@ -187,11 +200,16 @@ class TestDuplicateRegistrationSameFile:
 # ---------------------------------------------------------------------------
 
 HOSTPORT_STRATEGIES = """
-    from pytest_strategy import Strategy
+    from pytest_strategy import Parameter, RNGChoice, RNGInteger, Strategy, TestArg
 
     @Strategy.register("r2_hostport")
     def hostport(nsamples):
-        return ("host", "port"), [("localhost", 8000), ("127.0.0.1", 9000)]
+        return Parameter(
+            TestArg("host", rng_type=RNGChoice(["localhost", "127.0.0.1"])),
+            TestArg("port", rng_type=RNGInteger(8000, 9000)),
+            directed_vectors={"local": ("localhost", 8000), "loopback": ("127.0.0.1", 9000)},
+            nsamples=0,
+        )
     """
 
 SERVER_FIXTURES = textwrap.dedent("""
@@ -255,19 +273,31 @@ class TestDataclassTypedFixture:
 
 
 class TestIdsInRealRuns:
-    """IDs keep string data and do not depend on PYTHONHASHSEED."""
+    """IDs in the values format keep string data and do not depend on PYTHONHASHSEED."""
 
     def test_strings_containing_at_0x_keep_their_value(self, pytester):
         pytester.makepyfile(fault_strategies="""
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, RNGChoice, RNGInteger, Strategy, TestArg
 
             @Strategy.register("r2_lines")
             def lines(nsamples):
-                return ("line",), [("segfault at 0x0",), ("jump at 0x401000",)]
+                return Parameter(
+                    TestArg("line", rng_type=RNGChoice(["segfault at 0x0", "jump at 0x401000"])),
+                    directed_vectors={
+                        "segfault": ("segfault at 0x0",),
+                        "jump": ("jump at 0x401000",),
+                    },
+                    nsamples=0,
+                )
 
             @Strategy.register("r2_pairs")
             def pairs(nsamples):
-                return ("msg", "code"), [("fault at 0x10", 1), ("fault at 0x20", 2)]
+                return Parameter(
+                    TestArg("msg", rng_type=RNGChoice(["fault at 0x10", "fault at 0x20"])),
+                    TestArg("code", rng_type=RNGInteger(1, 2)),
+                    directed_vectors={"first": ("fault at 0x10", 1), "second": ("fault at 0x20", 2)},
+                    nsamples=0,
+                )
             """)
         pytester.makepyfile(test_faults="""
             from pytest_strategy import Strategy
@@ -281,7 +311,7 @@ class TestIdsInRealRuns:
                 pass
             """)
 
-        result = pytester.runpytest_inprocess("--collect-only", "-q")
+        result = pytester.runpytest_inprocess("--collect-only", "-q", "-o", "strategies_ids=values")
 
         assert _ids(result, "test_parse") == ["line='segfault at 0x0'", "line='jump at 0x401000'"]
         assert _ids(result, "test_pairs") == [
@@ -320,7 +350,9 @@ class TestIdsInRealRuns:
         collected = []
         for hash_seed in ("1", "2", "3"):
             monkeypatch.setenv("PYTHONHASHSEED", hash_seed)
-            result = pytester.runpytest_subprocess("--collect-only", "-q", "--rng-seed=1")
+            result = pytester.runpytest_subprocess(
+                "--collect-only", "-q", "--rng-seed=1", "-o", "strategies_ids=values"
+            )
             collected.append(_ids(result, "test_perms"))
 
         assert len(collected[0]) == 11
@@ -334,7 +366,9 @@ class TestIdsInRealRuns:
         pytester.makepyfile(set_strategies=self.SET_STRATEGIES)
         pytester.makepyfile(test_sets=self.SET_TESTS)
 
-        result = pytester.runpytest_subprocess("-n", "3", "--rng-seed=1")
+        result = pytester.runpytest_subprocess(
+            "-n", "3", "--rng-seed=1", "-o", "strategies_ids=values"
+        )
 
         result.stdout.no_fnmatch_line("*Different tests were collected*")
         result.assert_outcomes(passed=11)
@@ -346,15 +380,23 @@ class TestIdsInRealRuns:
 
 
 class TestDataclassModeSamples:
-    """Custom __init__ dataclasses are built; pytest.param keeps its marks and id."""
+    """
+    Custom __init__ dataclasses are built; pytest.param keeps its marks, and the
+    vector's name is its ID.
+    """
 
     def test_custom_init_dataclass(self, pytester):
         pytester.makepyfile(rect_strategies="""
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, RNGInteger, Strategy, TestArg
 
             @Strategy.register("r2_rect")
             def rect(nsamples):
-                return ("width", "height"), [(1, 2), (3, 4)]
+                return Parameter(
+                    TestArg("width", rng_type=RNGInteger(1, 3)),
+                    TestArg("height", rng_type=RNGInteger(2, 4)),
+                    directed_vectors={"small": (1, 2), "large": (3, 4)},
+                    nsamples=0,
+                )
             """)
         pytester.makepyfile(test_rect="""
             from dataclasses import dataclass
@@ -378,24 +420,29 @@ class TestDataclassModeSamples:
         result = pytester.runpytest_inprocess("-v")
 
         result.assert_outcomes(passed=2)
-        result.stdout.fnmatch_lines(["*test_rect[[]width=1,height=2[]] PASSED*"])
+        result.stdout.fnmatch_lines(["*test_rect[[]directed-small[]] PASSED*"])
 
-    def test_pytest_param_marks_and_id(self, pytester):
+    def test_pytest_param_marks_and_names(self, pytester):
         pytester.makeini("[pytest]\nmarkers =\n    slow: slow tests\n")
         pytester.makepyfile(point_strategies="""
             import pytest
 
-            from pytest_strategy import Strategy
+            from pytest_strategy import Parameter, RNGInteger, Strategy, TestArg
 
             @Strategy.register("r2_points")
             def points(nsamples):
-                return ("x", "y"), [
-                    (1, 2),
-                    pytest.param(3, 4, marks=pytest.mark.slow),
-                    pytest.param(5, 6, marks=pytest.mark.xfail(strict=True)),
-                    pytest.param(7, 8, marks=pytest.mark.skip),
-                    pytest.param(9, 10, id="custom"),
-                ]
+                return Parameter(
+                    TestArg("x", rng_type=RNGInteger(1, 9)),
+                    TestArg("y", rng_type=RNGInteger(2, 10)),
+                    directed_vectors={
+                        "plain": (1, 2),
+                        "slow": pytest.param(3, 4, marks=pytest.mark.slow),
+                        "strict_xfail": pytest.param(5, 6, marks=pytest.mark.xfail(strict=True)),
+                        "skipped": pytest.param(7, 8, marks=pytest.mark.skip),
+                        "custom": {"y": 10, "x": 9},
+                    },
+                    nsamples=0,
+                )
             """)
         pytester.makepyfile(test_points="""
             from dataclasses import dataclass
@@ -416,7 +463,8 @@ class TestDataclassModeSamples:
         result = pytester.runpytest_inprocess("-v")
         result.assert_outcomes(passed=3, xfailed=1, skipped=1)
         result.stdout.fnmatch_lines(
-            ["*test_dc[[]x=3,y=4[]] PASSED*", "*test_dc[[]custom[]] PASSED*"], consecutive=False
+            ["*test_dc[[]directed-slow[]] PASSED*", "*test_dc[[]directed-custom[]] PASSED*"],
+            consecutive=False,
         )
 
         slow = pytester.runpytest_inprocess("-m", "slow")
@@ -431,7 +479,9 @@ class TestDataclassModeSamples:
 class TestStreamKeyIgnoresImportMode:
     """The same --rng-seed gives the same values under prepend and importlib."""
 
-    def test_values_are_identical_across_import_modes_and_selection(self, pytester, monkeypatch):
+    def test_values_are_identical_across_import_modes_and_selection(
+        self, pytester, monkeypatch, values_dump
+    ):
         pytester.makeini("[pytest]\n")
         sub = pytester.path / "tests" / "sub"
         sub.mkdir(parents=True)
@@ -457,9 +507,11 @@ class TestStreamKeyIgnoresImportMode:
             "    pass\n"
         )
 
+        pytester.makeconftest(values_dump.conftest)
+
         def collect(*args):
-            result = pytester.runpytest_subprocess("--collect-only", "-q", "--rng-seed=7", *args)
-            return _ids(result, "test_b")
+            rows = values_dump.collect("--collect-only", "-q", "--rng-seed=7", *args)
+            return [row for row in rows if "::test_b[" in row[0]]
 
         prepend = collect("--import-mode=prepend")
         runs = {
