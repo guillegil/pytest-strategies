@@ -585,9 +585,11 @@ Each row's test ID names it; the same for every seed in the default `names` form
 - A test with stacked `@strategy` or `@pytest.mark.parametrize` decorators gets the
   parts joined with `-`, the decorator closest to the `def` first:
   `test_two[directed-zeros-fast]`.
-- **`-k`:** `-k zeros` selects `directed-zeros`, `-k directed` every directed row,
-  `-k "not rand"` no random row. `-k "rand-3"` also matches `rand-30`: use
-  `-k "test_w[rand-3]"` or the node ID. `-k` cannot contain `=`, so select a
+- **`-k`:** `-k zeros` selects `directed-zeros`, `-k directed-` every directed row,
+  `-k "not rand-"` no random row. Keep the `-`: `-k` matches substrings of the whole
+  node name, so a test, module or vector whose name holds the word
+  (`test_random_io`, `operand_max`) matches too. `-k "rand-3"` also matches
+  `rand-30`: use `-k "test_w[rand-3]"` or the node ID. `-k` cannot contain `=`, so select a
   sequence value's rows by node ID (`pytest "tests/test_esm.py::test_esm[ch=2-rand-1]"`).
   A name in it can hold only letters, digits and `_ - . : / + \ [ ]` (not
   whitespace, parentheses, commas or quotes), and a non-ASCII name needs
@@ -1050,7 +1052,9 @@ Deprecated in 3.0 and removed in 4.0, with what a 4.0 run shows:
   `directed_vectors` and `test_vectors` are read-only mappings (iterating
   `vector_constraints` gives names); two constraints with one name fail; argument
   names must be identifiers; a namedtuple vector is placed by its field names; a
-  bare value as a vector and an `id=` on a `pytest.param` vector fail.
+  dict vector gives its values by key (3.0 passed the key strings); a bare value as
+  a vector, an `id=` on a `pytest.param` vector and a `pytest.param` with more or
+  fewer values than arguments fail.
 - **Context per folder:** a conftest below the rootdir answers only for its folder,
   a conftest answers before a plugin, the hook can run once per implementation, and
   `export_strategies()` uses each factory's own folder. Under pytest-xdist, workers

@@ -258,7 +258,7 @@ pytest examples/enum_example.py --vector-name=success -o empty_parameter_set_mar
 
 # Select rows by the names in their test IDs (the same for every seed)
 pytest examples/enum_example.py -k guest_read -v
-pytest examples/enum_example.py -k "test_http_status and not rand" -v
+pytest examples/enum_example.py -k "test_http_status and not rand-" -v
 
 # Run one random row again with the values it had in the run with seed 42
 pytest "examples/enum_example.py::test_role_based_access[rand-3]" --rng-seed=42 -v

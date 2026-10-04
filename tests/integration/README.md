@@ -47,7 +47,7 @@ pytest tests/integration/test_full_integration.py -v
 pytest tests/integration/test_full_integration.py -k zero -v
 
 # Leave out the random rows
-pytest tests/integration/test_full_integration.py -k "not rand"
+pytest tests/integration/test_full_integration.py -k "not rand-"
 
 # Run one row again, with the values it had in the run with seed 42
 pytest "tests/integration/test_full_integration.py::test_simple_integer[rand-3]" --rng-seed=42

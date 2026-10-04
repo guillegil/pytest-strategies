@@ -167,9 +167,9 @@ pytest examples/strategy_example.py --rng-seed=42
 pytest examples/strategy_example.py --nsamples=50 --vector-mode=all --rng-seed=42
 
 # Select rows by the names in their test IDs
-pytest examples/strategy_example.py -k zeros       # The directed vector "zeros"
-pytest examples/strategy_example.py -k directed    # Every directed vector
-pytest examples/strategy_example.py -k "not rand"  # Leave out the random rows
+pytest examples/strategy_example.py -k zeros        # The directed vector "zeros"
+pytest examples/strategy_example.py -k directed-    # Every directed vector
+pytest examples/strategy_example.py -k "not rand-"  # Leave out the random rows
 pytest examples/strategy_example.py -k "test_addition[rand-3]"  # One random row
 
 # Run one random row again with the values it had in the run with seed 42

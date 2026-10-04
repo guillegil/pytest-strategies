@@ -77,7 +77,7 @@ CLI Options:
     pytest --vector-name "zeros"      # Run specific directed vector
     pytest --vector-index 0           # Run the directed vector at index 0
     pytest -k zeros                   # Select the rows named zeros
-    pytest -k "not rand"              # Leave out the random rows
+    pytest -k "not rand-"             # Leave out the random rows
     pytest --strategy-constraint-off=addition_strategy:bounded  # Turn a constraint off
 """
 

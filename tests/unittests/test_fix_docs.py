@@ -16,6 +16,7 @@ its ``@Strategy.strategy`` decorators and registers its strategies globally.
 """
 
 import ast
+import inspect
 import os
 import re
 import subprocess
@@ -425,22 +426,30 @@ class TestPackagingMetadata:
         MANIFEST.in ships what the suite needs, but 4.0.0's tests read release.yml,
         which it left out: run from the sdist, two of them failed.
         """
+        # This test names the workflows too: leave its own text out of the scan
+        own = inspect.getsource(type(self).test_the_sdist_holds_the_workflows_the_tests_read)
+        assert own in _read("tests/unittests/test_fix_docs.py")
         sources = [*REPO_ROOT.glob("tests/**/*.py"), *REPO_ROOT.glob("benchmarks/**/*.py")]
-        read = {
-            f".github/workflows/{name}"
-            for path in sources
-            for name in re.findall(
-                r"workflows\W{1,6}([\w-]+\.ya?ml)", path.read_text(encoding="utf-8")
-            )
-        }
+        readers: dict[str, set[str]] = {}
+        for path in sources:
+            text = path.read_text(encoding="utf-8").replace(own, "")
+            for name in re.findall(r"workflows\W{1,6}([\w-]+\.ya?ml)", text):
+                readers.setdefault(f".github/workflows/{name}", set()).add(
+                    path.relative_to(REPO_ROOT).as_posix()
+                )
         included = {
             name
             for line in _read("MANIFEST.in").splitlines()
             if line.startswith("include ")
             for name in line.split()[1:]
         }
-        assert {".github/workflows/tests.yml", ".github/workflows/release.yml"} <= read
-        assert sorted(read - included) == []
+        # The scan finds the readers it was written for
+        assert {
+            "tests/unittests/test_bench.py",
+            "tests/unittests/test_xdist_check.py",
+        } <= readers[".github/workflows/tests.yml"]
+        assert "tests/unittests/test_fix_docs.py" in readers[".github/workflows/release.yml"]
+        assert sorted(set(readers) - included) == []
 
     def test_license_is_the_same_everywhere(self, pyproject):
         """LICENSE said GPL-3.0, the metadata Apache-2.0 and the README MIT."""

@@ -13,6 +13,7 @@ import ast
 import dataclasses
 import inspect
 import re
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -42,11 +43,45 @@ DEFAULTS_NAMESPACE: dict[str, Any] = {"__builtins__": {}, "frozenset": frozenset
 
 
 def _python_blocks(text: str) -> list[tuple[int, str]]:
-    """Return (line, source) for every ```python block of a Markdown text."""
+    """
+    Return (line, source) for every ```python block of a Markdown text, dedented, the
+    indented blocks of list items included.
+    """
     return [
-        (text[: match.start()].count("\n") + 2, match.group(1))
-        for match in re.finditer(r"^```python\n(.*?)^```", text, re.S | re.M)
+        (text[: match.start()].count("\n") + 2, textwrap.dedent(match.group(2)))
+        for match in re.finditer(r"^([ \t]*)```python\n(.*?)^\1```", text, re.S | re.M)
     ]
+
+
+# The methods whose second argument, or values=, is a vector
+VECTOR_METHODS = {"add_directed_vector", "add_test_vector"}
+
+
+def one_element_tuple_vectors(text: str) -> list[str]:
+    """
+    Return ``line: vector`` for each one-element tuple that a Markdown text's python
+    blocks give as a vector: a value of a dict, such as ``directed_vectors={"neg":
+    (-2,)}``, or the vector of an ``add_directed_vector()`` or ``add_test_vector()``
+    call.
+    """
+    found = []
+    for line, source in _python_blocks(text):
+        for node in ast.walk(ast.parse(source)):
+            vectors: list[ast.expr] = []
+            if isinstance(node, ast.Dict):
+                vectors = node.values
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in VECTOR_METHODS
+            ):
+                vectors = [*node.args[1:2], *(k.value for k in node.keywords if k.arg == "values")]
+            found += [
+                f"{line + vector.lineno - 1}: {ast.unparse(vector)}"
+                for vector in vectors
+                if isinstance(vector, ast.Tuple) and len(vector.elts) == 1
+            ]
+    return found
 
 
 def _section(text: str, heading: str) -> str:
@@ -495,8 +530,45 @@ class TestSkillContent:
 
     def test_skill_vectors_use_dicts_for_one_argument(self, skill_md):
         """The skill never shows a one-element tuple as a vector."""
-        for _, source in _python_blocks(skill_md):
-            for node in ast.walk(ast.parse(source)):
-                if isinstance(node, ast.Dict):
-                    for value in node.values:
-                        assert not (isinstance(value, ast.Tuple) and len(value.elts) == 1)
+        assert len(_python_blocks(skill_md)) == skill_md.count("```python\n")
+        assert one_element_tuple_vectors(skill_md) == []
+
+    @pytest.mark.parametrize(
+        ("block", "expected"),
+        [
+            ('directed_vectors={"neg": {"n": -2}}', []),
+            ('directed_vectors={"neg": (-2,)}', ["4: (-2,)"]),
+            ('test_vectors={"pair": (1, 2), "one": (3,)}', ["4: (3,)"]),
+            ('param.add_directed_vector("neg", (-2,))', ["4: (-2,)"]),
+            ('param.add_test_vector("neg", values=(-2,))', ["4: (-2,)"]),
+            ('param.add_test_vector("neg", {"n": -2})', []),
+            ('param.add_test_vector("pair", (1, 2))', []),
+            ("make((-2,), (-3,))", []),
+        ],
+    )
+    def test_one_element_tuple_vectors_are_found(self, block, expected):
+        """The block's code starts on line 4 of the text."""
+        assert one_element_tuple_vectors(f"Text.\n\n```python\n{block}\n```\n") == expected
+
+    def test_one_element_tuple_vectors_are_found_in_list_items(self):
+        """SKILL.md's list items hold indented blocks."""
+        text = (
+            "- **A trap.** Text:\n\n"
+            "  ```python\n"
+            '  @register("neg")\n'
+            "  def neg():\n"
+            "      return Parameter(\n"
+            '          TestArg("n", RNGInteger(-9, 9)),\n'
+            '          directed_vectors={"neg": (-2,)},\n'
+            "      )\n"
+            "  ```\n"
+        )
+        assert _python_blocks(text) == [
+            (
+                4,
+                '@register("neg")\ndef neg():\n    return Parameter(\n'
+                '        TestArg("n", RNGInteger(-9, 9)),\n'
+                '        directed_vectors={"neg": (-2,)},\n    )\n',
+            )
+        ]
+        assert one_element_tuple_vectors(text) == ["8: (-2,)"]

@@ -104,7 +104,10 @@ Each row is named in the test ID, the same for every seed:
 | the row of an empty `skip_if_empty` sequence | `test_esm[skipped]` |
 
 - `-k zeros` runs the directed vector `zeros` (so does `--vector-name=zeros`),
-  `-k directed` every directed row and `-k "not rand"` no random row.
+  `-k directed-` every directed row and `-k "not rand-"` no random row. Keep the
+  `-`: `-k` matches substrings of the whole node name, so without it a test,
+  module or vector whose name holds the word (`test_random_io`, `operand_max`)
+  matches too.
 - `-k "rand-3"` also matches `rand-30`: for one row use `-k "test_burst[rand-3]"`
   or the node ID. `-k` cannot contain `=`, so select a sequence value's rows by
   node ID: `pytest "tests/test_esm.py::test_esm[ch=2-rand-1]"`.
@@ -379,7 +382,7 @@ is a `VectorInfo` with `strategy`, `kind`, `name`, `index`, `values` (a `Vector`
   fixtures built on the same object: `strategies_ctx`, or
   `get_context(request.config, __file__)` in a folder with its own hook.
 - **Select rows by name, not by value.** IDs carry the row's name, so `-k zeros`,
-  `-k "not rand"`, `--deselect` and node IDs keep working from one seed to the
+  `-k "not rand-"`, `--deselect` and node IDs keep working from one seed to the
   next, but no drawn value appears in an ID: to find a failing value, read the
   row's `pytest-strategies` section. `-k` cannot use `=`; select `ch=2` rows by
   node ID.

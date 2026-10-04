@@ -77,8 +77,8 @@ pytest test_example.py --rng-seed 42
 
 # Select rows by name: one directed vector, every directed row, no random rows
 pytest test_example.py -k zeros
-pytest test_example.py -k directed
-pytest test_example.py -k "not rand"
+pytest test_example.py -k directed-
+pytest test_example.py -k "not rand-"
 
 # Run one random row again with the values it had in the run with seed 42
 pytest "test_example.py::test_addition[rand-3]" --rng-seed 42

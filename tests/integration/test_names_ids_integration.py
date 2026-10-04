@@ -337,6 +337,55 @@ class TestSelectingRows:
         assert len(expected) == 5
         assert _collected(result) == expected
 
+    def test_the_documented_k_recipes_select_rows_by_kind(self, pytester):
+        """
+        -k "directed-" selects exactly the directed rows and -k "not rand-" leaves out
+        exactly the random rows. The bare words, which the docs first gave, also match
+        a test or a vector whose name contains them.
+        """
+        pytester.makepyfile(
+            kinds_strategies="""
+            from pytest_strategy import Parameter, RNGInteger, TestArg, register
+
+
+            @register("ops")
+            def ops():
+                return Parameter(
+                    TestArg("x", rng_type=RNGInteger(0, 9)),
+                    directed_vectors={"zeros": {"x": 0}, "operand_max": {"x": 9}},
+                    nsamples=2,
+                )
+            """,
+            test_kinds="""
+            from pytest_strategy import strategy
+
+
+            @strategy("ops")
+            def test_write(x):
+                pass
+
+
+            def test_random_access():
+                pass
+
+
+            def test_directed_mode():
+                pass
+            """,
+        )
+
+        def selected(expression):
+            result = pytester.runpytest(*COLLECT, "--rng-seed=1", "-k", expression)
+            return [line.split("::")[1] for line in result.outlines if "::" in line]
+
+        directed = ["test_write[directed-zeros]", "test_write[directed-operand_max]"]
+        others = ["test_random_access", "test_directed_mode"]
+        assert selected("directed-") == directed
+        assert selected("not rand-") == [*directed, *others]
+        # Substrings of the whole node name
+        assert selected("directed") == [*directed, "test_directed_mode"]
+        assert selected("not rand") == ["test_write[directed-zeros]", "test_directed_mode"]
+
     def test_vector_name_keeps_the_rows_id(self, names_project):
         full = _collected(names_project.runpytest(*COLLECT, "--rng-seed=1"))
 
