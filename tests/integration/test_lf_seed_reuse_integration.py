@@ -10,7 +10,8 @@ Every run is a subprocess with pytest's cache plugin, as a user runs pytest. The
 project's context hook draws, and its conftest.py computes the context in
 ``pytest_configure``, before the plugin seeds the RNG, so a rerun shows the same
 context only when it reused the seed from the start. The conftest.py writes the
-node ID of every test it sets up to ``ran.txt`` in the rootdir.
+node ID of every test it sets up to ``ran-<pid>.txt`` in the rootdir, a file per
+process: on Windows, xdist workers appending to one file can lose a line.
 """
 
 import json
@@ -30,6 +31,8 @@ S1 = 5
 S2 = 77
 
 CONFTEST = """
+import os
+
 from pytest_strategy import RNG, get_context
 
 def pytest_strategies_context(config):
@@ -40,7 +43,7 @@ def pytest_configure(config):
     get_context(config, config.rootpath)
 
 def pytest_runtest_setup(item):
-    with open(item.config.rootpath / "ran.txt", "a", encoding="utf-8") as ran:
+    with open(item.config.rootpath / f"ran-{os.getpid()}.txt", "a", encoding="utf-8") as ran:
         ran.write(item.nodeid + "\\n")
 """
 
@@ -88,14 +91,15 @@ def project(pytester, folders=("tests",), failing=FAILING):
 
 def run(pytester, *args, rootdir="."):
     """Run pytest in a subprocess, with pytest's cache, from the top folder."""
-    (pytester.path / rootdir / "ran.txt").unlink(missing_ok=True)
+    for path in (pytester.path / rootdir).glob("ran-*.txt"):
+        path.unlink()
     return pytester.runpytest_subprocess(*args)
 
 
 def ran(pytester, rootdir="."):
     """The node IDs the last run set up, sorted."""
-    path = pytester.path / rootdir / "ran.txt"
-    return sorted(path.read_text(encoding="utf-8").splitlines()) if path.exists() else []
+    paths = (pytester.path / rootdir).glob("ran-*.txt")
+    return sorted(line for path in paths for line in path.read_text(encoding="utf-8").splitlines())
 
 
 def values(result):
