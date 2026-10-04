@@ -206,9 +206,10 @@ class SessionState:
         # (_repro.keyword)
         self.deselected_items: list[pytest.Item] = []
         self.keyword_matchers: list[tuple[pytest.Item, Any]] | None = None
-        # The rows of ``recorded`` whose call passed, with the options of their
-        # rerun command in this run, by node ID: an entry leaves the failed-seeds
-        # map when its row passes under its seed and its options
+        # The rows of ``recorded`` that passed (their call passed and their teardown
+        # did not fail), with the options of their rerun command in this run, by
+        # node ID: an entry leaves the failed-seeds map when its row passes under
+        # its seed and its options
         self.passed_rows: dict[str, tuple[str, ...]] = {}
         # On the controller: what each worker sent of those, by worker ID
         self.worker_reuse: dict[str, dict[str, Any]] = {}

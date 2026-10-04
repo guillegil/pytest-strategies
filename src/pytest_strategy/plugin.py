@@ -745,10 +745,12 @@ class PytestStrategyPlugin:
         raised an error goes into the same section, before the row. A failure
         reported as plain text gets it as a section of the report's own.
 
-        A passing call of a row the failed-seeds map holds under this run's seed
-        (``SessionState.recorded``) notes the options of its rerun command run from
-        the rootdir, as the map holds them, so the entry leaves the map when they
-        are the ones it was recorded with.
+        A row the failed-seeds map holds under this run's seed
+        (``SessionState.recorded``) whose call passed notes the options of its
+        rerun command run from the rootdir, as the map holds them, once its
+        teardown did not fail, so the entry leaves the map when they are the ones
+        it was recorded with. pytest counts a test whose teardown failed as failed,
+        and keeps it in its last-failed set: the entry stays for the next ``--lf``.
 
         It wraps the other wrappers, so it sees the outcome they set: skipping's,
         which turns an XPASS(strict) into a failure, registered before the plugin,
@@ -767,7 +769,13 @@ class PytestStrategyPlugin:
                     options = _repro.generation_options(
                         item.config, infos, start=item.config.rootpath
                     )
-                    state.passed_rows[item.nodeid] = tuple(options)
+                    item.stash[_PASSED_CALL] = tuple(options)
+        elif call.when == "teardown" and _PASSED_CALL in item.stash:
+            passed = item.stash[_PASSED_CALL]
+            del item.stash[_PASSED_CALL]
+            state = runtime.session_of(item.config)
+            if state is not None and not report.failed:
+                state.passed_rows[item.nodeid] = passed
         elif report.failed and call.when in ("setup", "call"):
             infos = item.stash.get(VECTORS_KEY, ())
             if infos:
@@ -1086,6 +1094,27 @@ class PytestStrategyPlugin:
                 if isinstance(row, dict) and report.nodeid not in state.failed_rows:
                     state.failed_rows[report.nodeid] = row
 
+    @pytest.hookimpl(trylast=True, specname="pytest_runtest_logreport")
+    def pytest_runtest_logreport_encodable(self, report: pytest.TestReport) -> None:
+        """
+        Make what a failed test's report shows in its ``pytest-strategies`` section
+        encodable by the terminal (``_repro.encodable``), in the process that writes
+        it: on the pytest-xdist controller, which gets the workers' reports. pytest
+        writes a section in one piece, so a character the terminal cannot encode,
+        such as a Greek letter in a value in a Windows CI log written in cp1252,
+        would make it write the whole section escaped, on one line, with the
+        backslashes of the rerun command's node ID doubled. trylast: the other
+        plugins, such as junitxml, which writes UTF-8, have read the report as it
+        was.
+        """
+        state = runtime.current
+        if not report.failed or state is None or state.config is None:
+            return
+        reporter = state.config.pluginmanager.get_plugin("terminalreporter")
+        encoding = _repro.terminal_encoding(reporter)
+        if encoding is not None:
+            _encodable_sections(report, encoding)
+
     @pytest.hookimpl
     def pytest_terminal_summary(
         self, terminalreporter: Any, exitstatus: int, config: Config
@@ -1103,7 +1132,17 @@ class PytestStrategyPlugin:
         workers printed after their collection (the contexts, the unmatched
         --strategy-constraint-off items), and then, in red, what the workers
         generated differently (see ``pytest_sessionfinish``).
+
+        Each line is written so that the terminal can encode it
+        (``_repro.encodable``): pytest would write a line with a character it
+        cannot encode escaped as a whole, with the backslashes of the node IDs in
+        its commands doubled.
         """
+        encoding = _repro.terminal_encoding(terminalreporter)
+
+        def write_line(line: str, **markup: bool) -> None:
+            terminalreporter.write_line(_repro.encodable(line, encoding), **markup)
+
         state = runtime.current
         summary = state.worker_summary if state is not None else None
         if state is not None and state.worker_summaries:
@@ -1113,30 +1152,28 @@ class PytestStrategyPlugin:
             )
             text = _contexts_text(collected)
             if text is not None:
-                terminalreporter.write_line(f"pytest-strategies: {text}")
+                write_line(f"pytest-strategies: {text}")
         # Unmatched --strategy-constraint-off items a pytest-xdist worker reported
         for line in (summary or {}).get("unmatched_constraints_off", []):
-            terminalreporter.write_line(f"pytest-strategies: {line}", red=True)
+            write_line(f"pytest-strategies: {line}", red=True)
         if state is not None and state.worker_differences:
             for line in [_DIFFERENT_VECTORS, *state.worker_differences, *_DIFFERENT_VECTORS_HINT]:
-                terminalreporter.write_line(line, red=True)
+                write_line(line, red=True)
         failed = exitstatus in (pytest.ExitCode.TESTS_FAILED, pytest.ExitCode.INTERRUPTED)
         distributed = getattr(config.option, "dist", "no") != "no"
         if failed and state is not None and (state.resolutions or distributed):
             # Exactly the 3.0 line when no failed test's factory received a context
             contexts = _contexts_text(state.failed_contexts)
             suffix = f" ({contexts})" if contexts is not None else ""
-            terminalreporter.write_line(
-                f"pytest-strategies: reproduce with --rng-seed={_run_seed()}{suffix}"
-            )
+            write_line(f"pytest-strategies: reproduce with --rng-seed={_run_seed()}{suffix}")
             for line in _failed_rows_lines(state.failed_rows, self._verbosity(config)):
-                terminalreporter.write_line(line)
+                write_line(line)
         if state is not None:
             if exitstatus in _FINISHED:
                 for line in _uncollected_lines(state, config):
-                    terminalreporter.write_line(line)
+                    write_line(line)
             for line in _deselected_lines(state, config):
-                terminalreporter.write_line(line)
+                write_line(line)
 
         if self._verbosity(config) < 1:
             return
@@ -1144,15 +1181,15 @@ class PytestStrategyPlugin:
         if summary is None:
             summary = _summary(state)
         if not summary["count"]:
-            terminalreporter.write_line("No strategies registered")
+            write_line("No strategies registered")
         else:
-            terminalreporter.write_line(f"Registered strategies: {summary['count']}")
+            write_line(f"Registered strategies: {summary['count']}")
             for line in summary["lines"]:
-                terminalreporter.write_line(f"  {line}")
+                write_line(f"  {line}")
             if self._verbosity(config) >= 2:
                 # Show all strategy names in very verbose mode
                 for name in summary["names"]:
-                    terminalreporter.write_line(f"  - {name}")
+                    write_line(f"  - {name}")
         entries: dict[str, str] = summary.get("contexts", {})
         if state is not None and state.worker_summaries:
             # Every worker's: a context computed only when a test ran (through
@@ -1160,9 +1197,9 @@ class PytestStrategyPlugin:
             # that ran it
             entries = _merged(s.get("contexts", {}) for s in _by_worker(state.worker_summaries))
         if entries:
-            terminalreporter.write_line(f"Contexts: {len(entries)}")
+            write_line(f"Contexts: {len(entries)}")
             for label, text in sorted(entries.items()):
-                terminalreporter.write_line(f"  {label}: {text}")
+                write_line(f"  {label}: {text}")
 
     @pytest.hookimpl(tryfirst=True, specname="pytest_sessionfinish")
     def pytest_sessionfinish_junit(self, session: Session) -> None:
@@ -2082,6 +2119,28 @@ def _contexts_text(fingerprints: Mapping[str, str]) -> str | None:
 _FAILED_ROWS_SHOWN = 10
 
 
+def _encodable_sections(report: pytest.TestReport, encoding: str) -> None:
+    """
+    Make a report's ``pytest-strategies`` sections encodable by ``encoding``
+    (``_repro.encodable``): the one below its traceback, the whole text of a
+    report pytest-xdist carried as text (a ``SectionedRepr``, which pytest writes in
+    one piece too), and the one among its captured output (the guard's message of
+    a failure reported as plain text).
+    """
+    longrepr = report.longrepr
+    if isinstance(longrepr, str):
+        if _SECTION in longrepr:
+            report.longrepr = _repro.encodable(longrepr, encoding)
+    elif isinstance(sections := getattr(longrepr, "sections", None), list):
+        for position, section in enumerate(sections):
+            if isinstance(section, tuple) and len(section) == 3 and section[0] == _SECTION:
+                name, content, sep = section
+                sections[position] = (name, _repro.encodable(content, encoding), sep)
+    for position, (name, content) in enumerate(report.sections):
+        if name == _SECTION:
+            report.sections[position] = (name, _repro.encodable(content, encoding))
+
+
 def _failed_rows_lines(rows: Mapping[str, Mapping[str, str]], verbosity: int) -> list[str]:
     """
     Return the lines that list the failed strategy rows after the line that says how
@@ -2112,8 +2171,9 @@ _DESELECT = "pytest_strategies_deselect"
 _REUSED = "pytest_strategies_reused"
 _RECORDED = "pytest_strategies_recorded"
 
-# What a worker sends back (workeroutput): the options of the recorded rows whose
-# call passed, and the reused rows it collected
+# What a worker sends back (workeroutput): the options of the recorded rows that
+# passed (their call passed and their teardown did not fail), and the reused rows it
+# collected
 _REUSE = "pytest_strategies_reuse"
 
 # The exit statuses of a session that ran its tests: the rows a --lf run reused the
@@ -2620,6 +2680,10 @@ _CTX_FIXTURE = "strategies_ctx"
 # of the report section that shows it, with a failed strategy row's repro section
 _CTX_MESSAGES = pytest.StashKey[dict[str, str]]()
 _SECTION = _repro.SECTION
+
+# The options of the rerun command of a recorded row whose call passed, run from the
+# rootdir, until its teardown report says whether the row passed
+_PASSED_CALL = pytest.StashKey[tuple[str, ...]]()
 
 
 @pytest.fixture(scope="session")

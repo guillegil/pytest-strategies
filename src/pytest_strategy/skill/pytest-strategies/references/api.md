@@ -879,8 +879,12 @@ class VectorInfo:
   same folder, and what the row is (`  pytest 'tests/t.py::test_w[rand-3]'
   --rng-seed=S  # burst random 3`): at most 10 below `-v` (`... and N more`),
   none under `-qq`. The command adds the run's `--nsamples`, `--vector-mode`,
-  `--vector-name`, `--vector-index`, `-o strategies_*`, `-c`, `--rootdir`, and
-  the constraints turned off in the row's strategies (`STRATEGY:NAME`).
+  `--vector-name`, `--vector-index`, `-o strategies_*`, `-o
+  empty_parameter_set_mark` (the rerun collects the whole module, where a strategy
+  without the selected vector has an empty parameter set), `-c`, `--rootdir`, and
+  the constraints turned off in the row's strategies (`STRATEGY:NAME`). A
+  character the terminal cannot encode (a Windows CI log in cp1252) is written as
+  a backslash escape (`\u03a9`), so the commands run as printed.
 - Each failed row also gets a `pytest-strategies` section under its traceback:
 
   ```text
@@ -928,8 +932,8 @@ class VectorInfo:
   `pytest-strategies: deselected 2 failed rows recorded under another seed; run
   them with:` and `  pytest --lf --rng-seed=S1 tests/a/test_dma.py  # 2 rows`
   (their files, or their node IDs when a file holds other failed tests). A row
-  leaves the record when it passes under its seed and options. `--rng-seed` wins;
-  `--ff`, `--nf` and `--sw-reset` draw a new seed.
+  leaves the record when it passes under its seed and options, its teardown
+  included. `--rng-seed` wins; `--ff`, `--nf` and `--sw-reset` draw a new seed.
 - Once a failure is understood, keep its values as a directed vector
   (`"bug_1234": {"addr": 4096, "len": 17}`): it runs under every seed, and
   `-k bug_1234` or `--vector-name=bug_1234` runs it alone.

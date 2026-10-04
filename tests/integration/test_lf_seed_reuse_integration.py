@@ -76,6 +76,26 @@ def test_w(request, addr, len):
 """
 
 
+TEARDOWN = f"""
+import pytest
+
+from pytest_strategy import strategy
+
+FAILING = {FAILING!r}
+
+@pytest.fixture
+def dut(request):
+    yield
+    if request.node.name in FAILING:
+        params = request.node.callspec.params
+        raise RuntimeError(f"{{request.node.name}}: addr={{params['addr']}} len={{params['len']}}")
+
+@strategy("burst")
+def test_w(addr, len, dut):
+    pass
+"""
+
+
 def project(pytester, folders=("tests",), failing=FAILING):
     """The conftest.py, tests/strategies.py and a test module in each folder."""
     pytester.makeini("[pytest]\n")
@@ -105,6 +125,11 @@ def ran(pytester, rootdir="."):
 def values(result):
     """The values the failed rows showed (their assertion messages), sorted."""
     return sorted(line for line in result.stdout.lines if "AssertionError: test_w[" in line)
+
+
+def teardown_errors(result):
+    """The values the rows whose teardown failed showed (``TEARDOWN``), sorted."""
+    return sorted(line for line in result.stdout.lines if "RuntimeError: test_w[" in line)
 
 
 def sections(result):
@@ -796,6 +821,30 @@ class TestTheMap:
 
         result.assert_outcomes(passed=2)
         assert failed_seeds(pytester) == {}
+
+    @pytest.mark.parametrize("xdist", [False, True], ids=["one_process", "xdist"])
+    def test_a_row_whose_teardown_fails_stays(self, pytester, xdist):
+        # The call passes, but the fixture's teardown fails: pytest counts the row as
+        # failed and keeps it in its last-failed set, so the next --lf reuses its seed
+        args = ["-n", "2"] if xdist else []
+        if xdist:
+            pytest.importorskip("xdist")
+        project(pytester)
+        run(pytester, f"--rng-seed={S1}", *args).assert_outcomes(failed=2, passed=4)
+        before = failed_seeds(pytester)
+        (pytester.path / "tests" / "test_lfr_tests.py").write_text(TEARDOWN, encoding="utf-8")
+
+        second = run(pytester, "--lf", *args)
+        third = run(pytester, "--lf", *args)
+
+        second.assert_outcomes(passed=2, errors=2)
+        assert header(second) == [f"pytest-strategies: RNG seed = {S1}", REUSED.format("--lf")]
+        assert failed_seeds(pytester) == before
+        assert lastfailed(pytester) == set(nodeids())
+        third.assert_outcomes(passed=2, errors=2)
+        assert header(third) == header(second)
+        assert ran(pytester) == nodeids()
+        assert teardown_errors(third) == teardown_errors(second) != []
 
     @pytest.mark.parametrize(
         "args",

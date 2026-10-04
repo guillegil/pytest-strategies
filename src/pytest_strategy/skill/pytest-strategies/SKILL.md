@@ -351,9 +351,10 @@ To reproduce a failure:
    the same commands (also under `-q`).
 2. Run that command from the folder the failing run started in, as it is:
    `pytest 'tests/dma/test_dma.py::test_burst[rand-3]' --rng-seed=S`, plus the
-   run's `--nsamples`, `--vector-mode`, `-c`, `--rootdir`, `-o strategies_*` and
-   `--strategy-constraint-off` when it had them. The node ID names the row, and the
-   seed and options give its values, whether the row runs alone or in the suite.
+   run's `--nsamples`, `--vector-mode`, `-c`, `--rootdir`, `-o strategies_*`, `-o
+   empty_parameter_set_mark` and `--strategy-constraint-off` when it had them. The
+   node ID names the row, and the seed and options give its values, whether the
+   row runs alone or in the suite.
 3. If the values differ, compare the `rootdir:` line of both logs (the test's path
    relative to the rootdir is part of its random stream; without an ini file the
    rootdir depends on where pytest is run from) and the `context` lines when the

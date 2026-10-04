@@ -20,6 +20,7 @@ from pytest_strategy._repro import (
     VALUE_LIMIT,
     SectionedRepr,
     describe,
+    encodable,
     generation_options,
     ignore_args,
     keyword_command,
@@ -31,10 +32,16 @@ from pytest_strategy._repro import (
     section,
     start_args,
     suite_properties,
+    terminal_encoding,
     testcase_properties,
 )
 from pytest_strategy._vector import vector_type
-from pytest_strategy.plugin import _failed_rows_lines, _junit_family, _junit_xml
+from pytest_strategy.plugin import (
+    _encodable_sections,
+    _failed_rows_lines,
+    _junit_family,
+    _junit_xml,
+)
 
 SEED = 1763926297314361000
 
@@ -366,6 +373,29 @@ class TestGenerationOptions:
 
         assert args == ["-o", "strategies_max_exhaustive=50", "-o", "strategies_ids=names"]
 
+    def test_the_empty_parameter_set_mark_override_comes_too(self):
+        # A rerun of a node ID collects the whole module, where a strategy without
+        # the selected vector gets an empty parameter set
+        config = Config(
+            vector_name="zeros",
+            override_ini=[
+                "empty_parameter_set_mark=xfail",
+                "strategies_ids=names",
+                "empty_parameter_set_mark=skip",
+                "python_files=*.py",
+            ],
+        )
+
+        args = generation_options(config, [info()])
+
+        assert args == [
+            "--vector-name=zeros",
+            "-o",
+            "strategies_ids=names",
+            "-o",
+            "empty_parameter_set_mark=skip",
+        ]
+
     def test_only_the_row_strategies_constraints_turned_off(self):
         # The run turned off a_only and b_only; this row's strategy has only a_only
         config = Config(strategy_constraint_off=["a_only,b_only"])
@@ -428,6 +458,75 @@ class TestGenerationOptions:
 
         assert args == ["-c", str(ini), "--rootdir=."]
         assert generation_options(config, [info()]) == ["-c", inifilename, "--rootdir=."]
+
+
+class TestEncodable:
+    # cp1252, a Windows CI log's encoding, has no Greek capital omega; it has the e acute
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            ("r='1k\u03a9'", r"r='1k\u03a9'"),
+            ("caf\xe9", "caf\xe9"),
+            (
+                r"pytest 't.py::t[r=1k\u03a9]'" + "  # load directed \u03a9",
+                r"pytest 't.py::t[r=1k\u03a9]'  # load directed \u03a9",
+            ),
+            ("one\ntwo", "one\ntwo"),
+        ],
+        ids=["value", "encodable", "escapes_kept", "lines_kept"],
+    )
+    def test_cp1252(self, text, expected):
+        assert encodable(text, "cp1252") == expected
+
+    @pytest.mark.parametrize("encoding", ["utf-8", None, "not-an-encoding"])
+    def test_left_as_it_is(self, encoding):
+        assert encodable("r='1k\u03a9'", encoding) == "r='1k\u03a9'"
+
+    def test_the_terminal_reporter_s_stream(self):
+        reporter = Namespace(_tw=Namespace(_file=Namespace(encoding="cp1252")))
+
+        assert terminal_encoding(reporter) == "cp1252"
+
+    def test_none_without_the_terminal_reporter(self):
+        assert terminal_encoding(None) is None
+
+    def test_the_sections_of_a_report(self):
+        # The pytest-strategies ones only: pytest's own text is written line by line
+        sections = [("pytest-strategies", "values    r='1k\u03a9'", "-"), ("other", "\u03a9", "-")]
+        report = Namespace(
+            longrepr=Namespace(sections=list(sections)),
+            sections=[("pytest-strategies", "\u03a9"), ("Captured stdout call", "\u03a9")],
+        )
+
+        _encodable_sections(report, "cp1252")
+
+        assert report.longrepr.sections == [
+            ("pytest-strategies", r"values    r='1k\u03a9'", "-"),
+            ("other", "\u03a9", "-"),
+        ]
+        assert report.sections == [
+            ("pytest-strategies", r"\u03a9"),
+            ("Captured stdout call", "\u03a9"),
+        ]
+
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            (
+                "E   \u03a9\n--- pytest-strategies ---\nvalues    r='1k\u03a9'",
+                r"E   \u03a9" + "\n--- pytest-strategies ---\n" + r"values    r='1k\u03a9'",
+            ),
+            ("E   \u03a9", "E   \u03a9"),
+        ],
+        ids=["with_the_section", "without"],
+    )
+    def test_a_report_carried_as_text(self, text, expected):
+        # pytest-xdist carries a SectionedRepr as its text, which pytest writes in one piece
+        report = Namespace(longrepr=text, sections=[])
+
+        _encodable_sections(report, "cp1252")
+
+        assert report.longrepr == expected
 
 
 class TestQuote:

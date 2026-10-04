@@ -445,6 +445,39 @@ def test_name(request, a):
         assert command == f"pytest {quote(nodeid)} --rng-seed={SEED}"
         assert_reruns(command, pytester.path, pytester.path, nodeid, section, result.stdout.lines)
 
+    @pytest.mark.parametrize(
+        "option, row",
+        [
+            ("--vector-mode=test", "test-max"),
+            ("--vector-name=zeros", "directed-zeros"),
+            ("--vector-index=0", "directed-zeros"),
+        ],
+        ids=["vector_mode", "vector_name", "vector_index"],
+    )
+    def test_a_project_whose_empty_parameter_sets_fail_at_collect(self, pytester, option, row):
+        # test_chan's strategy has no such vector: its empty parameter set needs the
+        # run's -o, the last one, which the rerun of the node ID needs too, as it
+        # collects the whole module
+        pytester.makeini("[pytest]\nempty_parameter_set_mark = fail_at_collect\n")
+        chan = '\n@strategy("chan")\ndef test_chan(ch, dev, x):\n    pass\n'
+        project(pytester.path, module("True") + chan)
+        mark = ["-o", "empty_parameter_set_mark=xfail", "-o", "empty_parameter_set_mark=skip"]
+
+        refused = run(pytester, option)
+        result = run(pytester, option, *mark)
+
+        assert refused.ret == pytest.ExitCode.INTERRUPTED
+        result.assert_outcomes(failed=1, skipped=1)
+        (section,) = sections(result.stdout.lines)
+        command = rerun_command(section)
+        nodeid = f"test_dma.py::test_write[{row}]"
+        assert command == " ".join(
+            ["pytest", quote(nodeid), f"--rng-seed={SEED}", quote(option), "-o"]
+            + [quote("empty_parameter_set_mark=skip")]
+        )
+        assert failed_rows(result.stdout.lines) == [f"{command}  # burst {row.replace('-', ' ')}"]
+        assert_reruns(command, pytester.path, pytester.path, nodeid, section, result.stdout.lines)
+
     def test_an_exhaustive_row(self, pytester):
         project(
             pytester.path,
@@ -737,6 +770,83 @@ def strat_b():
             section,
             result.stdout.lines,
         )
+
+    @pytest.mark.parametrize("xdist", [False, True], ids=["one_process", "xdist"])
+    def test_a_terminal_that_cannot_encode_a_value_or_a_name(self, pytester, xdist):
+        # A Windows CI log is written in cp1252, which has no Greek letters, arrows or
+        # CJK characters. pytest writes a text that holds one escaped as a whole: the
+        # section would print as one line, and the backslashes of the escapes pytest
+        # puts in the node ID would be doubled, so the command would run no test
+        if xdist:
+            pytest.importorskip("xdist")
+        write(
+            pytester.path,
+            {"conftest.py": CONFTEST, "strategies.py": PHASE, "test_dma.py": PHASE_TEST},
+        )
+        nodeid = r"test_dma.py::test_phase[directed-\u03b8\u2192max]"
+        command = f"pytest {quote(nodeid)} --rng-seed={SEED}"
+
+        done = subprocess.run(
+            [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", f"--rng-seed={SEED}"]
+            + (["-n", "2"] if xdist else []),
+            cwd=pytester.path,
+            capture_output=True,
+            env={**os.environ, "PYTHONIOENCODING": "cp1252"},
+            timeout=300,
+        )
+
+        lines = done.stdout.decode("cp1252").splitlines()
+        assert done.returncode == 1, "\n".join(lines)
+        assert sections(lines) == [
+            [
+                r"strategy  \u7b56\u7565 (strategies.py:4)",
+                r"vector    directed-\u03b8\u2192max (directed vector '\u03b8\u2192max', #0)",
+                r"values    r='1k\u03a9'",
+                "          deg=360",
+                f"seed      {SEED}",
+                f"rerun     {command}",
+            ]
+        ], "\n".join(lines)
+        assert failed_rows(lines) == [command + r"  # \u7b56\u7565 directed \u03b8\u2192max"]
+        # Run as printed, on a terminal that writes every character
+        assert_reruns(
+            command,
+            pytester.path,
+            pytester.path,
+            nodeid,
+            [
+                "strategy  \u7b56\u7565 (strategies.py:4)",
+                "vector    directed-\u03b8\u2192max (directed vector '\u03b8\u2192max', #0)",
+                "values    r='1k\u03a9'",
+                "          deg=360",
+                f"seed      {SEED}",
+                f"rerun     {command}",
+            ],
+        )
+
+
+# A strategy whose name, directed vector name and value hold characters cp1252 has
+# not, and its test. The files hold escapes, so they are ASCII.
+PHASE = r"""
+from pytest_strategy import Parameter, RNGInteger, Series, TestArg, register
+
+@register("\u7b56\u7565")
+def phase():
+    return Parameter(
+        TestArg("r", rng_type=Series(["1k\u03a9"])),
+        TestArg("deg", rng_type=RNGInteger(0, 99)),
+        directed_vectors={"\u03b8\u2192max": {"r": "1k\u03a9", "deg": 360}},
+        nsamples=1,
+    )
+"""
+
+PHASE_TEST = r"""
+from pytest_strategy import strategy
+
+@strategy("\u7b56\u7565")
+def test_phase(r, deg):
+    assert deg < 100
+"""
 
 
 class TestFailedRows:

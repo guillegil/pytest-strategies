@@ -21,8 +21,12 @@ its own (``--nsamples``, ``--vector-mode``, ``--vector-name``, ``--vector-index`
 its ``-o strategies_*`` overrides, its ``-c`` and ``--rootdir`` (node IDs and the
 random streams are relative to the rootdir), and the constraints turned off in
 the row's strategies, as ``STRATEGY:NAME`` items, so a rerun never names a
-constraint that only another module's strategy has. Options that shape the
-context cannot be known; its fingerprint shows when the rerun got another one.
+constraint that only another module's strategy has. Its ``-o
+empty_parameter_set_mark`` override comes too: the rerun collects the row's whole
+module, where under ``--vector-name`` a strategy without that vector gets an
+empty parameter set, which ``fail_at_collect`` turns into a collection error.
+Options that shape the context cannot be known; its fingerprint shows when the
+rerun got another one.
 
 A test file outside the rootdir (``-c ci/pytest.ini`` makes ``ci`` the rootdir) is
 named by pytest relative to the path the run started from that contains it, so a
@@ -32,6 +36,11 @@ run's ``--ignore`` and ``--ignore-glob`` left out, and selects the row with ``-k
 ``pytest . --rng-seed=S -c ci/pytest.ini -k 'test_write[rand-3]'``. When no ``-k``
 expression selects only that row, the node ID command is given, and the section
 says that it does not reproduce the row (``note``).
+
+The section and the list of failed rows are written so that the terminal can
+encode them (``encodable``): pytest writes a text that holds a character it
+cannot encode escaped as a whole, which would put a section on one line and
+double the backslashes of the escapes pytest puts in a node ID.
 
 A ``--junitxml`` report gets the section in the failure text, the seed and each
 failed row's command as properties of the test suite (``suite_properties``), and,
@@ -46,6 +55,7 @@ import json
 import os
 import re
 import shlex
+import sys
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -78,6 +88,10 @@ _LABEL = 10
 # are its operators
 _KEYWORD_NAME = re.compile(r"[\w:+\-.\[\]\\/]+")
 _KEYWORD_OPERATORS = frozenset({"and", "or", "not"})
+
+# pytest's ini option that decides what an empty parameter set gives, such as the one
+# --vector-name gives a strategy without that vector
+_EMPTY_PARAMETER_SET_MARK = "empty_parameter_set_mark"
 
 # The arguments cmd.exe and PowerShell leave as they are (no ",", which PowerShell
 # reads as an array, no "%", "@", "&", quotes or brackets)
@@ -146,6 +160,42 @@ def quote(arg: str, *, windows: bool | None = None) -> str:
     return '"' + "".join(quoted) + '"'
 
 
+def encodable(text: str, encoding: str | None) -> str:
+    """
+    Return ``text`` with each character that ``encoding`` cannot encode written as
+    a backslash escape (``\\u03a9``), as pytest writes the non-ASCII characters of a
+    test ID, or ``text`` itself when there is none or the encoding is not known.
+
+    pytest's TerminalWriter writes a text that holds such a character escaped as a
+    whole (``unicode-escape``): its line breaks as ``\\n``, and each backslash
+    doubled, those of the escapes in a node ID too, so a section would print as one
+    line and its rerun command would name another test.
+    """
+    if not encoding:
+        return text
+    try:
+        text.encode(encoding)
+    except UnicodeEncodeError:
+        return text.encode(encoding, "backslashreplace").decode(encoding)
+    except LookupError:
+        # An encoding Python does not know
+        return text
+    return text
+
+
+def terminal_encoding(reporter: object) -> str | None:
+    """
+    Return the encoding of the stream pytest's terminal reporter ``reporter``
+    writes to (its TerminalWriter's private ``_file``, by default ``sys.stdout``),
+    or None without the terminal reporter (``-p no:terminal``) or a known encoding.
+    """
+    if reporter is None:
+        return None
+    stream = getattr(getattr(reporter, "_tw", None), "_file", sys.stdout)
+    encoding = getattr(stream, "encoding", None)
+    return encoding if isinstance(encoding, str) else None
+
+
 def path_from(folder: Path, path: Path) -> str:
     """
     Write ``path`` relative to ``folder`` when it is ``folder`` or below it, and
@@ -166,9 +216,10 @@ def generation_options(
     Return the options of a row's rerun command after ``--rng-seed``, unquoted:
     ``--nsamples``, ``--vector-mode``, ``--vector-name`` and ``--vector-index`` when
     the run gave them (read from the run's options, so a value from the ini file's
-    addopts or a conftest counts too), each ``-o strategies_*`` override, ``-c``
-    and ``--rootdir`` as given, and the constraints the row's strategies turned off
-    (``--strategy-constraint-off=STRATEGY:NAME,...``).
+    addopts or a conftest counts too), each ``-o strategies_*`` override and the
+    ``-o empty_parameter_set_mark`` override (the last of each name, as pytest
+    applies it), ``-c`` and ``--rootdir`` as given, and the constraints the row's
+    strategies turned off (``--strategy-constraint-off=STRATEGY:NAME,...``).
 
     Args:
         config: The run's config
@@ -187,11 +238,13 @@ def generation_options(
         args.append(f"--vector-name={base.vector_name}")
     if base.vector_index is not None:
         args.append(f"--vector-index={base.vector_index}")
-    # The last value of each strategies_* ini option that -o overrides (pytest's rule)
+    # The last value of each strategies_* ini option that -o overrides (pytest's rule),
+    # and of empty_parameter_set_mark: a node ID's rerun collects the whole module,
+    # where a strategy without the selected vectors gets an empty parameter set
     overrides: dict[str, str] = {}
     for override in getattr(config.option, "override_ini", None) or ():
         name = override.partition("=")[0].strip()
-        if name.startswith("strategies_"):
+        if name.startswith("strategies_") or name == _EMPTY_PARAMETER_SET_MARK:
             overrides.pop(name, None)
             overrides[name] = override
     for override in overrides.values():

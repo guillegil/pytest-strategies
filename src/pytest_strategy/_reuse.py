@@ -17,7 +17,8 @@ relative to the folder it was started in. An ini file outside the rootdir (``-c
 rootdir is. The process that reports the run (the pytest-xdist controller, not a
 worker) writes the map when the session finishes: it records the rows that
 failed, as the newest, and removes an entry only when its row passed under its
-seed and its options.
+seed and its options: its call passed and its teardown did not fail, as pytest
+keeps a test whose teardown failed in its last-failed set.
 
 With ``--lf`` or ``--sw`` (``--sw-skip`` too) and no ``--rng-seed``, the run reads
 pytest's own last-failed set (``cache/lastfailed``) or the test ``--sw`` resumes
@@ -218,7 +219,8 @@ def updated(
     Args:
         entries: The map, newest last
         seed: The run's seed
-        passed: The options of the rows whose call passed in the run, by node ID
+        passed: The options of the rows that passed in the run (their call
+            passed and their teardown did not fail), by node ID
         failed: The ``pytest_strategies`` attributes of the rows whose setup or
             call failed, by node ID, in the order they failed
         own: The ``-c`` and ``--rootdir`` units of the ini file and the rootdir

@@ -1255,13 +1255,28 @@ included); a plain-string longrepr (XPASS(strict)) gets no section. `pytest_runt
 keeps each attribute in `SessionState.failed_rows` by node ID, and
 `pytest_terminal_summary` prints them after the reproduce line
 (`_failed_rows_lines()`: at most `_FAILED_ROWS_SHOWN` below `-v`, nothing under
-`-qq`). The command is `pytest <node id> --rng-seed=S` with the node ID from
+`-qq`). pytest's TerminalWriter writes a text that holds a character the stream
+cannot encode escaped as a whole (`unicode-escape`), and it writes a section in
+one piece: a Greek letter in a value, in a Windows CI log written in cp1252,
+would put the section on one line and double the backslashes of the escapes in
+its node ID. So `pytest_runtest_logreport_encodable` (trylast, after junitxml
+has read the report; on the pytest-xdist controller, the process that writes
+the terminal) rewrites the report's `pytest-strategies` sections, and the whole
+text of a report pytest-xdist carried as text, with `_repro.encodable()`, which
+writes each character the encoding of the terminal reporter's stream
+(`_repro.terminal_encoding()`, from the TerminalWriter's private `_file`) cannot
+encode as a backslash escape; `pytest_terminal_summary` writes each of its lines
+the same way.
+
+The command is `pytest <node id> --rng-seed=S` with the node ID from
 `config.cwd_relative_nodeid`, then `generation_options()`: `--nsamples` when
 `StrategyOptions.nsamples_source` says it was given, `--vector-mode` when not
 `all`, `--vector-name`, `--vector-index`, the last `-o` override of each
-`strategies_*` ini option, `config.option.inifilename` (`-c`),
-`config.option.rootdir`, and `--strategy-constraint-off` built from the rows'
-`constraints_off` with `constraint_off_item()`, so the items name the row's
+`strategies_*` ini option and of `empty_parameter_set_mark` (a node ID's rerun
+collects the whole module, where `--vector-name` can give a strategy an empty
+parameter set, and `fail_at_collect` stops it), `config.option.inifilename`
+(`-c`), `config.option.rootdir`, and `--strategy-constraint-off` built from the
+rows' `constraints_off` with `constraint_off_item()`, so the items name the row's
 strategies. `quote()` uses `shlex.quote` on POSIX, and on Windows double quotes
 with the C runtime's backslash rules, leaving arguments of
 `[A-Za-z0-9_+=:./\-]` bare. pytest gives a file outside the rootdir a node ID
@@ -1334,10 +1349,13 @@ agrees with rows recorded without it, as they were recorded under the rootdir
 whose cache holds them). The makereport wrapper takes a passing row's options
 (`generation_options(..., start=rootpath)`) from a passing call report, only for
 the items in `SessionState.recorded`, the node IDs of the map's entries under the
-run's seed. A pytest-xdist worker gets `recorded`, `deselect` and `reused`
-through `workerinput` and sends its passed rows' options and the reused rows it
-collected through `workeroutput`, which
-`pytest_testnodedown` keeps in `SessionState.worker_reuse`. The map is written only when it changed, so a run
+run's seed, and keeps them in the item's stash until the teardown report: they
+go to `SessionState.passed_rows` only when the teardown did not fail, as pytest's
+own `--lf` keeps a test whose teardown failed in its last-failed set. A
+pytest-xdist worker gets `recorded`, `deselect` and `reused` through
+`workerinput` and sends its passed rows' options and the reused rows it
+collected through `workeroutput`, which `pytest_testnodedown` keeps in
+`SessionState.worker_reuse`. The map is written only when it changed, so a run
 that never failed creates nothing. With `--lf`, `--sw` or `--sw-skip` (not
 `--sw-reset`) and no seed given, the tryfirst `pytest_configure` calls
 `_reuse.plan()`. It reads the cache through `Cache.for_config(config,
