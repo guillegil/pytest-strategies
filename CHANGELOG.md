@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.1.0] - 2026-10-04
+
+4.1.0 adds `Parameter.extend()`, to build a strategy on another, and makes failure reports short by default. It removes nothing, and a seed recorded with 4.0.0 gives the same rows.
+
+### Added
+
+- `Parameter.extend(*test_args, directed_vectors=, test_vectors=, vector_constraints=, defaults=, ...)` returns a new `Parameter` built on another, which does not change: a `TestArg` with a known name replaces that argument in place, a new one is added last (`defaults` or its fixed `value=` gives its value in the kept vectors), vectors and constraints are added, replaced or removed (`None`) by name, and the other settings are kept unless given. See "Reusing and Extending Strategies" in the README.
+- `--strategy-details` shows the `pytest-strategies` section under each failed strategy row's traceback.
+
+### Changed
+
+- A failed strategy row no longer gets the `pytest-strategies` section under its traceback, nor in the `--junitxml` failure text, unless `--strategy-details` is given: a run where thousands of rows fail printed one block per row. The terminal summary still prints `reproduce with --rng-seed=S` and the list of failed rows' rerun commands (10 below `-v`), now followed by a line pointing to `--strategy-details`; the JUnit suite and test case properties are unchanged. Put `--strategy-details` in `addopts` to keep the 4.0.0 output.
+
 ## [4.0.0] - 2026-10-04
 
 4.0.0 changes the node ID of every strategy row once: a row is named, `test_write[directed-zeros]` or `test_write[rand-3]`, instead of being described by its values, so it keeps its node ID for every seed, and `-k`, `--deselect`, `--lf` and a rerun of one node ID work from one seed to the next. For the same `--rng-seed`, random rows get new values once more, as in 2.0.0, now from row-stable streams: a row's values no longer depend on `nsamples`, the vector filters, the other rows, or the other arguments while the constraints accept its draws as before. Directed and test vectors and `Series` values do not change. The APIs that 3.0 deprecated are removed, and some options become keyword-only. A failed row now shows its values and the command that reruns it, and `--lf` reruns it with the values it failed with; factories receive their inputs by name, each folder can have a testbench context of its own, and constraints have names that a run can turn off. Later 4.x releases only add to this: a test suite, a factory, a recorded seed and an export reader that work with 4.0.0 keep working, with the same values. Start with "Migrating from 3.x" below.
@@ -483,7 +496,8 @@ These emit a `DeprecationWarning` that points at your code, keep working in 3.x,
 - Fixed `AttributeError: 'Parameter' object has no attribute 'generate_samples'` by renaming method to `generate_vectors`.
 - Improved error handling in `Strategy` decorator.
 
-[Unreleased]: https://github.com/guillegil/pytest-strategies/compare/v4.0.0...HEAD
+[Unreleased]: https://github.com/guillegil/pytest-strategies/compare/v4.1.0...HEAD
+[4.1.0]: https://github.com/guillegil/pytest-strategies/compare/v4.0.0...v4.1.0
 [4.0.0]: https://github.com/guillegil/pytest-strategies/compare/v3.0.0...v4.0.0
 [3.0.0]: https://github.com/guillegil/pytest-strategies/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/guillegil/pytest-strategies/compare/v1.0.0...v2.0.0

@@ -43,6 +43,18 @@ _ParameterSet = type(pytest.param())
 _Ids = Literal["names", "values"] | Callable[[VectorInfo], str | None] | None
 
 
+class _Keep(Enum):
+    """The default of Parameter.extend()'s settings: keep the base Parameter's value."""
+
+    KEEP = "KEEP"
+
+    def __repr__(self) -> str:
+        return "<keep>"
+
+
+_KEEP = _Keep.KEEP
+
+
 def _check_ids(ids: object) -> None:
     """
     Check a value of ``Parameter(ids=...)``.
@@ -152,6 +164,34 @@ def _normalize_vector(kind: str, name: object, raw: object, arg_names: tuple[str
             f"{where} is {shown} ({type(raw).__name__}), not a tuple of values. {hint}"
         )
     return _vector_by_position(where, tuple(values), row_type)
+
+
+def _completed(
+    kind: str, name: str, vector: Vector, added: Sequence[TestArg], fill: Mapping[str, Any]
+) -> Any:
+    """
+    Return a vector kept by ``Parameter.extend()`` as a dict of argument names to
+    values, with the added arguments' values from ``fill`` (a pytest.param(...)
+    keeps its marks).
+
+    Raises:
+        RNGValueError: If ``fill`` has no value for an added argument
+    """
+    lacking = [arg.name for arg in added if arg.name not in fill]
+    if lacking:
+        first = lacking[0]
+        raise RNGValueError(
+            f"The {kind} vector {name!r} has no value for the added argument {first!r}: "
+            f"pass defaults={{{first!r}: ...}}, give the TestArg a fixed value=, give "
+            f"the vector again in {kind}_vectors=, or remove it with "
+            f"{kind}_vectors={{{name!r}: None}}"
+        )
+    extra = {arg.name: fill[arg.name] for arg in added}
+    if isinstance(vector, _ParameterSet):
+        # Its values are the Vector (_normalize_vector)
+        row = dict(cast(Vector, vector.values)._asdict(), **extra)
+        return pytest.param(row, marks=vector.marks)
+    return dict(vector._asdict(), **extra)
 
 
 def _record_kind(value: object) -> str | None:
@@ -2463,6 +2503,189 @@ class Parameter:
         """Remove all vector constraints."""
         self._constraints.clear()
         self._unnamed.clear()
+
+    # ====
+    # Reuse
+    # ====
+
+    def extend(
+        self,
+        *test_args: TestArg,
+        directed_vectors: Mapping[str, Iterable[Any] | None] | None = None,
+        test_vectors: Mapping[str, Iterable[Any] | None] | None = None,
+        vector_constraints: (
+            Mapping[str, Callable[[Vector], object] | None]
+            | Iterable[Callable[[Vector], object]]
+            | None
+        ) = None,
+        defaults: Mapping[str, Any] | None = None,
+        always_include_directed: bool | _Keep = _KEEP,
+        max_retries: int | _Keep = _KEEP,
+        nsamples: int | str | None | _Keep = _KEEP,
+        per_sequence_samples: bool | _Keep = _KEEP,
+        max_exhaustive: int | None | _Keep = _KEEP,
+        ids: _Ids | _Keep = _KEEP,
+    ) -> Parameter:
+        """
+        Return a new Parameter built on this one; this one is not changed.
+
+        Arguments:
+
+        - A TestArg whose name this Parameter has replaces that argument, in its
+          place (to narrow a range, or fix a value); the vectors keep their values.
+        - A TestArg with a new name is added after the others. Every vector this
+          call does not give again needs a value for it: ``defaults[name]``, or else
+          the TestArg's fixed ``value=``; without either the call fails and names
+          the vectors.
+
+        Vectors and constraints, by name, as a dict:
+
+        - A new name is added after the others, and a name this Parameter has
+          replaces that vector or constraint in its place.
+        - ``None`` as the value removes that vector or constraint; a name it does
+          not have fails.
+        - A list of constraints is added after the others and named as
+          add_constraint() names them (a lambda at position 3 is ``constraint_3``).
+
+        Vectors are given in the new argument list, in any form the constructor
+        takes. A pytest.param(...) vector keeps its marks.
+
+        Every other setting (nsamples, max_retries, per_sequence_samples,
+        max_exhaustive, ids, always_include_directed) is this Parameter's unless
+        given.
+
+        Args:
+            *test_args: Arguments to replace (same name) or add (new name)
+            directed_vectors: Directed vectors to add, replace or (None) remove
+            test_vectors: Test vectors to add, replace or (None) remove
+            vector_constraints: Constraints to add, replace or (None) remove, as a
+                dict, or a list to add
+            defaults: The values of the added arguments in the vectors kept from
+                this Parameter, by argument name
+
+        Returns:
+            The new Parameter
+
+        Raises:
+            RNGValueError: If two of test_args have one name, a defaults key is not
+                an added argument, a kept vector has no value for an added argument,
+                a vector or constraint to remove does not exist, or anything the
+                constructor rejects
+
+        Example:
+            base = dma_burst()
+            short = base.extend(TestArg("length", rng_type=RNGInteger(1, 8)))
+            prio = base.extend(
+                TestArg("prio", rng_type=RNGChoice([0, 1, 2])),
+                defaults={"prio": 0},
+                directed_vectors={"high": {"addr": 0, "length": 4, "prio": 2}},
+                vector_constraints={"aligned": None},
+            )
+        """
+        # The arguments: replaced in place, or added at the end
+        args = list(self.test_args)
+        positions = {arg.name: i for i, arg in enumerate(args)}
+        given: set[str] = set()
+        added: list[TestArg] = []
+        for arg in test_args:
+            if not isinstance(arg, TestArg):
+                raise TypeError(
+                    f"extend() takes TestArg instances as positional arguments, got {arg!r}"
+                )
+            if arg.name in given:
+                raise RNGValueError(f"extend() got two test args named {arg.name!r}")
+            given.add(arg.name)
+            if arg.name in positions:
+                args[positions[arg.name]] = arg
+            else:
+                args.append(arg)
+                added.append(arg)
+
+        fill = dict(defaults or {})
+        unknown = [name for name in fill if name not in {arg.name for arg in added}]
+        if unknown:
+            new = ", ".join(arg.name for arg in added) or "none"
+            raise RNGValueError(
+                f"extend()'s defaults name {', '.join(map(repr, unknown))}, which "
+                f"extend() does not add (the arguments it adds: {new})"
+            )
+        for arg in added:
+            if arg.name not in fill and arg.is_static:
+                fill[arg.name] = arg.generate()
+
+        def merged(
+            kind: str,
+            current: Mapping[str, Vector],
+            changes: Mapping[str, Iterable[Any] | None] | None,
+        ) -> dict[str, Any]:
+            changes = dict(changes or {})
+            missing = [name for name, v in changes.items() if v is None and name not in current]
+            if missing:
+                names = ", ".join(current) or "none"
+                raise RNGValueError(
+                    f"extend() removes the {kind} vector {missing[0]!r}, which the base "
+                    f"Parameter does not have ({kind} vectors: {names})"
+                )
+            out: dict[str, Any] = {}
+            for name, vector in current.items():
+                if name in changes:
+                    if changes[name] is not None:
+                        out[name] = changes[name]
+                    continue
+                out[name] = _completed(kind, name, vector, added, fill)
+            for name, change in changes.items():
+                if name not in current and change is not None:
+                    out[name] = change
+            return out
+
+        new_directed = merged("directed", self._directed_vectors, directed_vectors)
+        new_test = merged("test", self._test_vectors, test_vectors)
+
+        # The constraints: a dict replaces, removes (None) or adds by name
+        constraints = dict(self._constraints)
+        unnamed = set(self._unnamed)
+        listed: list[Callable[[Vector], object]] = []
+        if isinstance(vector_constraints, Mapping):
+            for name, fn in vector_constraints.items():
+                if fn is None:
+                    if name not in constraints:
+                        names = ", ".join(constraints) or "none"
+                        raise RNGValueError(
+                            f"extend() removes the constraint {name!r}, which the base "
+                            f"Parameter does not have (constraints: {names})"
+                        )
+                    del constraints[name]
+                else:
+                    constraints[_check_constraint_name(name)] = fn
+                unnamed.discard(name)
+        elif vector_constraints is not None:
+            if isinstance(vector_constraints, (str, bytes)) or callable(vector_constraints):
+                raise TypeError(
+                    "extend()'s vector_constraints must be a dict of names to constraints "
+                    f"(None removes one) or a list of them, not {vector_constraints!r}"
+                )
+            listed = list(vector_constraints)
+
+        def keep(value: Any, current: Any) -> Any:
+            return current if value is _KEEP else value
+
+        result = Parameter(
+            *args,
+            directed_vectors=new_directed,
+            test_vectors=new_test,
+            always_include_directed=keep(always_include_directed, self.always_include_directed),
+            vector_constraints=constraints,
+            max_retries=keep(max_retries, self.max_retries),
+            nsamples=keep(nsamples, self.nsamples),
+            per_sequence_samples=keep(per_sequence_samples, self.per_sequence_samples),
+            max_exhaustive=keep(max_exhaustive, self.max_exhaustive),
+            ids=keep(ids, self.ids),
+        )
+        result._unnamed = unnamed & set(result._constraints)
+        for fn in listed:
+            # Named as add_constraint() names it: constraint_<i>, i its position
+            result.add_constraint(fn)
+        return result
 
     # ====
     # Introspection

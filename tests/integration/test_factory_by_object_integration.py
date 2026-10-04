@@ -34,6 +34,15 @@ from pytest_strategy._repro import quote
 
 pytest_plugins = ["pytester"]
 
+
+@pytest.fixture(autouse=True)
+def _strategy_details(pytester, monkeypatch):
+    """These runs check the per-row section, which --strategy-details turns on
+    (also for the rerun commands run through the shell, which inherit it). After
+    pytester, which clears PYTEST_ADDOPTS."""
+    monkeypatch.setenv("PYTEST_ADDOPTS", "--strategy-details")
+
+
 SEED = 1
 
 CONFTEST = """
@@ -1117,7 +1126,7 @@ class TestPlugins:
             write(pytester.path, {"conftest.py": CONFTEST + conftest})
         if addopts:
             # Also for the rerun command, run through the shell
-            monkeypatch.setenv("PYTEST_ADDOPTS", addopts)
+            monkeypatch.setenv("PYTEST_ADDOPTS", f"--strategy-details {addopts}")
 
         full, section = check_reruns(pytester, NODEID, "tests/b", *args)
 

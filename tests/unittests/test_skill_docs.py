@@ -38,8 +38,13 @@ KINDS = {
     "kwarg": inspect.Parameter.VAR_KEYWORD,
 }
 
-# The namespace a documented default is evaluated in
-DEFAULTS_NAMESPACE: dict[str, Any] = {"__builtins__": {}, "frozenset": frozenset}
+# The namespace a documented default is evaluated in (_KEEP: Parameter.extend()'s
+# "keep the base's setting" default)
+DEFAULTS_NAMESPACE: dict[str, Any] = {
+    "__builtins__": {},
+    "frozenset": frozenset,
+    "_KEEP": pytest_strategy.parameters._KEEP,
+}
 
 
 def _python_blocks(text: str) -> list[tuple[int, str]]:
