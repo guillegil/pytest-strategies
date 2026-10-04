@@ -230,6 +230,31 @@ class TestScopedRegistry:
         assert registry.names_of(first.make(1)) == []
         assert registry.names_of(first.Maker()) == []
 
+    def test_a_copy_that_replaces_a_registration_keeps_its_callers(
+        self, clean_registry, monkeypatch
+    ):
+        # tests/b/strategies.py registers the factory of tests/factories.py again
+        # under its name. tests/factories.py then runs again as another module:
+        # its copy's registration still counts tests/b/strategies.py's call, so
+        # which files made the name does not depend on the order they ran in
+        import os
+
+        def key(path):
+            return os.path.normcase(os.path.realpath(path))
+
+        source = "from pytest_strategy import register\n\n@register('v3_merge')\ndef burst(nsamples):\n    pass\n"
+        first = self.run_module(monkeypatch, "tests.factories", source)
+        alias = compile("register('v3_merge')(burst)", "/virtual/tests/b/strategies.py", "exec")
+        exec(alias, {"register": register, "burst": first.burst})
+        second = self.run_module(monkeypatch, "factories", source)
+
+        (registration,) = registry.registrations("v3_merge")
+        assert registration.factory is second.burst
+        assert registration.callers == {
+            key("/virtual/tests/factories.py"),
+            key("/virtual/tests/b/strategies.py"),
+        }
+
     def test_factories_one_module_builds_from_one_definition_stay_apart(
         self, clean_registry, monkeypatch
     ):

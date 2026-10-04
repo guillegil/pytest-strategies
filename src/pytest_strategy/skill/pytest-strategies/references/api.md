@@ -66,16 +66,19 @@ def export_strategies(*, format: str = "json") -> str: ...
   type.
 - `@strategy("name")` looks the name up from the test's folder upward when the test is
   collected. `@strategy(factory)` uses that factory directly; it does not need to be
-  registered. When the registration is in the test's folder or above (the factory's
-  file is there, and the `register` call is in that file, the test module, or a
-  strategies file or `conftest.py` there; a call in a helper function counts for the
-  file whose import called it, a call in a module these files import does not), the
-  test gets the same values and IDs as with the name. So does a factory of an
-  installed package or a plugin (outside the rootdir or in a `site-packages`
-  folder), registered in its own file or by a plugin module, when the test's folder
-  and those above it do not register the name. Otherwise its values are keyed by the
-  function's qualified name, and are the same in every run: also for a plugin inside
-  the rootdir, and for a `register` call made in a hook such as `pytest_configure`.
+  registered. The test gets the same values and IDs as with a name the factory is
+  registered under when every run that collects the test makes that registration
+  first: the `register` call is in the factory's own file, the test module, a
+  strategies file or `conftest.py` of the test's folder or above, or a module every
+  run loads as a plugin (an entry point, `-p` in `addopts` or `PYTEST_ADDOPTS`,
+  `PYTEST_PLUGINS`, `pytest_plugins` in a `conftest.py` of those folders). A call in
+  a helper function counts for the file whose import called it; a call in a module
+  these files import, in a plugin only `-p` on the command line loads, or in a hook
+  such as `pytest_configure` does not. A folder on the test's path that registers
+  the name for another factory, or a second such registration elsewhere, hides it.
+  Where the factory's file is does not matter: another folder, or a package,
+  installed or checked out (`src/` layout). Otherwise its values are keyed by the
+  function's qualified name, and are the same in every run.
 - `@strategy` only marks the test (a `strategy` marker holding the name or factory).
   The factory runs, and the test is parametrized, in `pytest_generate_tests`, so a
   missing name or a signature mismatch is reported at collection.
@@ -900,8 +903,9 @@ class VectorInfo:
   the constraints turned off in the row's strategies (`STRATEGY:NAME`). A
   character the terminal cannot encode (a Windows CI log in cp1252) is written as
   a backslash escape (`\u03a9`), so the commands run as printed, unless such a
-  character is in a path, in `--vector-name`, in a `STRATEGY:NAME` item or in an
-  `-o` value, which then reaches pytest escaped.
+  character is in a path or a test's class or function name (raw in its node ID),
+  in `--vector-name`, in a `STRATEGY:NAME` item or in an `-o` value, which then
+  reaches pytest escaped.
 - Each failed row also gets a `pytest-strategies` section under its traceback:
 
   ```text

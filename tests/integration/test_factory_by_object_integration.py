@@ -2,15 +2,16 @@
 End-to-end tests for the name of a factory that a test passes by object
 (``@strategy(burst)``), which keys the test's random streams.
 
-The name is one the factory is registered under in the test's folder or above,
-by a file that every run collecting the test loads: the factory's own file, the
-test module, or a strategy file or ``conftest.py`` of those folders. A factory of
-an installed package or a plugin gets the name its own file or a plugin module
-registers. Otherwise it is the factory's qualified name. So the full run, the
-printed rerun command, ``--lf`` and a run of the test's folder alone give a row
-the same values, and a registration in another folder or another test module
-does not change them, nor does a copy of the factory made by importing its file
-under another module name.
+The name is one the factory is registered under by a file that every run
+collecting the test loads first: the factory's own file, the test module, a
+strategy file or ``conftest.py`` of the test's folder or above, or a module that
+every run loads as a plugin. It does not depend on where the factory's file is,
+in the test's folder, another folder or a package, installed or checked out.
+Otherwise it is the factory's qualified name. So the full run, the printed rerun
+command, ``--lf`` and a run of the test's folder alone give a row the same
+values, and a registration in another folder, another test module or a plugin
+that only some runs load does not change them, nor does a copy of the factory
+made by importing its file under another module name.
 
 Each project's conftest.py writes the strategy name and the values of every
 collected row to ``rows.json`` in the rootdir. The printed rerun command is run
@@ -156,14 +157,14 @@ def shell(command, cwd):
     return done.returncode, done.stdout.splitlines()
 
 
-def check_reruns(pytester, nodeid, folder):
+def check_reruns(pytester, nodeid, folder, *args):
     """
-    Run the project, whose row ``nodeid`` fails, then the row's printed rerun
-    command, ``--lf`` and a run of ``folder``, and check that each gives the row
-    the values and the failure of the full run. Return the full run's rows, the
-    row's section and the rows of the run of ``folder``.
+    Run the project with ``args``, its row ``nodeid`` failing, then the row's
+    printed rerun command, ``--lf`` and a run of ``folder``, and check that each
+    gives the row the values and the failure of the full run. Return the full
+    run's rows, the row's section and the rows of the run of ``folder``.
     """
-    result, full = run(pytester, ret=1, cache=True)
+    result, full = run(pytester, *args, ret=1, cache=True)
     (section,) = sections(result.stdout.lines)
     failure = errors(result.stdout.lines)
     (rerun,) = [line[len("rerun") :].strip() for line in section if line.startswith("rerun ")]
@@ -216,9 +217,8 @@ class TestRegisteredElsewhere:
 
         full, section, folder = check_reruns(pytester, self.NODEID, "tests/b")
 
-        # The helper's qualified name: the registration as "dma" is in helpers/,
-        # not in the test's folder or above, and only the runs that load
-        # tests/a/strategies.py make it
+        # The helper's qualified name: only the runs that load
+        # tests/a/strategies.py register it as "dma"
         assert names(full, "test_b") == {"burst"}
         assert names(full, "test_a") == {"dma"}
         assert section[0].startswith("strategy  burst (helpers/factories.py:")
@@ -297,21 +297,28 @@ class TestAliasedBySiblingFolder:
     """A helper factory on the test's path that only a sibling folder registers."""
 
     @pytest.mark.parametrize(
-        ("caller", "ini"),
+        ("caller", "ini", "files"),
         [
             # Loaded with tests/a's tests: only the runs that collect them load it
-            ("tests/a/strategies.py", ""),
+            ("tests/a/strategies.py", "", {}),
             # pytest loads it for tests/a's tests, not for tests/b's
-            ("tests/a/conftest.py", ""),
+            ("tests/a/conftest.py", "", {}),
             # An initial conftest of a run without arguments, loaded before the
-            # plugins are counted, but not by a run of tests/b or of a node ID
-            ("tests/a/conftest.py", "testpaths = tests/a tests/b\n"),
+            # collection, but not by a run of tests/b or of a node ID
+            ("tests/a/conftest.py", "testpaths = tests/a tests/b\n", {}),
+            # A plugin module that such a conftest's pytest_plugins loads
+            (
+                "tests/plugin_mod.py",
+                "testpaths = tests/a tests/b\n",
+                {"tests/a/conftest.py": 'pytest_plugins = ["plugin_mod"]\n'},
+            ),
         ],
-        ids=["strategy_file", "conftest", "conftest_in_testpaths"],
+        ids=["strategy_file", "conftest", "conftest_in_testpaths", "plugin_of_that_conftest"],
     )
-    def test_it_keeps_its_qualified_name(self, pytester, caller, ini):
+    def test_it_keeps_its_qualified_name(self, pytester, caller, ini, files):
         # tests/common.py is in tests/, above tests/b, but registers nothing: the
-        # alias as "dma" is made by a file of tests/a only
+        # alias as "dma" is made by a file that only the runs collecting tests/a
+        # load
         nodeid = "tests/b/test_b.py::test_b[rand-1]"
         project(
             pytester,
@@ -330,6 +337,7 @@ class TestAliasedBySiblingFolder:
                     + "from common import burst\n\n"
                     + module("test_b", "burst", fails="test_b[rand-1]")
                 ),
+                **files,
             },
         )
         pytester.makeini(f"[pytest]\npythonpath = . tests\n{ini}")
@@ -372,9 +380,45 @@ class TestImportedUnderTwoNames:
         assert names(full, "test_d") == {"dma"}
         assert section[0].startswith("strategy  dma (tests/factories.py:")
 
+    def test_a_copy_made_after_an_alias_keeps_the_alias(self, pytester):
+        # tests/b/b_strategies.py registers burst again as "a_base", which its
+        # own file registers, and as "z_alias": both calls are in tests/b, so
+        # "a_base" comes first. test_c.py, collected after the strategy file,
+        # imports tests/factories.py as factories: the copy's register() call
+        # replaces "a_base" in the runs that collect test_c.py, and still counts
+        # tests/b/b_strategies.py's call
+        project(
+            pytester,
+            {
+                "tests/__init__.py": "",
+                "tests/factories.py": IMPORTS + '@register("a_base")\n' + factory("burst"),
+                "tests/b/b_strategies.py": (
+                    IMPORTS
+                    + "from tests.factories import burst\n\n"
+                    + 'register("a_base")(burst)\n'
+                    + 'register("z_alias")(burst)\n\n'
+                    + '@register("b_other")\n'
+                    + factory("other", "y")
+                ),
+                "tests/b/test_c.py": "from factories import burst\n\n\ndef test_c():\n    pass\n",
+                "tests/b/test_d.py": (
+                    IMPORTS + "from tests.factories import burst\n\n" + module("test_d", "burst")
+                ),
+            },
+        )
+
+        full = rows(pytester)
+        alone = rows(pytester, "tests/b/test_d.py")
+
+        assert names(full, "test_d") == {"a_base"}
+        assert same_rows(alone, full)
+
 
 class TestInstalled:
-    """A factory of an installed package, or of a plugin, as @strategy("dma_burst") finds it."""
+    """
+    A factory of a package, installed or checked out, or of a plugin, as
+    @strategy("dma_burst") finds it.
+    """
 
     def package(self, site, caller):
         """The package ps_kit in ``site``, whose ``caller`` registers burst as "dma_burst"."""
@@ -403,17 +447,18 @@ class TestInstalled:
         found: dict[str, list[str]] = json.loads((root / "rows.json").read_text(encoding="utf-8"))
         return found
 
-    @pytest.mark.parametrize("where", ["outside", "venv"])
+    @pytest.mark.parametrize("where", ["outside", "venv", "src"])
     @pytest.mark.parametrize("caller", ["factories.py", "plugin.py"])
     def test_it_gets_the_values_of_its_name(self, pytester, monkeypatch, where, caller):
         # The project is in proj/: lib/ is outside its rootdir, and a virtualenv's
-        # site-packages is inside it. -p loads the plugin module in every run.
+        # site-packages and a src/ layout's folder are inside it. -p loads the
+        # plugin module in every run.
         root = pytester.path / "proj"
-        site = (
-            pytester.path / "lib"
-            if where == "outside"
-            else root / ".venv" / "lib" / "site-packages"
-        )
+        site = {
+            "outside": pytester.path / "lib",
+            "venv": root / ".venv" / "lib" / "site-packages",
+            "src": root / "src",
+        }[where]
         self.package(site, caller)
         (root / "tests").mkdir(parents=True)
         (root / "pytest.ini").write_text(
@@ -435,6 +480,129 @@ class TestInstalled:
         assert names(factory_rows, "test_x") == {"dma_burst"}
         assert factory_rows == name_rows
         assert len(factory_rows) == 4
+
+    @pytest.mark.parametrize("caller", ["factories.py", "plugin.py"])
+    def test_checked_out_and_installed_it_gets_the_same_values(self, pytester, caller):
+        # One project with the package in src/ (a checkout, or an editable
+        # install) and a copy in a virtualenv's site-packages (pip install .): a
+        # CI job that installs the package and a developer's checkout give the
+        # test the same name and values
+        src = pytester.path / "src"
+        site = pytester.path / ".venv" / "lib" / "site-packages"
+        self.package(src, caller)
+        self.package(site, caller)
+        project(
+            pytester,
+            {
+                "tests/test_x.py": (
+                    IMPORTS + "from ps_kit.factories import burst\n\n" + module("test_x", "burst")
+                ),
+            },
+        )
+        found = []
+        for folder in (src, site):
+            pytester.makeini(
+                f"[pytest]\naddopts = -p ps_kit.plugin\npythonpath = . tests {folder.as_posix()}\n"
+            )
+            found.append(rows(pytester))
+
+        assert names(found[0], "test_x") == {"dma_burst"}
+        assert found[0] == found[1]
+        assert len(found[0]) == 4
+
+    def test_a_name_two_factories_have_elsewhere_does_not_name_it(self, pytester):
+        # Every run loads ps_kit's plugin, which registers burst as "dma_burst",
+        # then another package's plugin, which registers its own factory under
+        # that name: @strategy("dma_burst") finds two, so burst keeps its
+        # qualified name
+        site = pytester.path / ".venv" / "lib" / "site-packages"
+        self.package(site, "plugin.py")
+        other = site / "other_kit"
+        other.mkdir()
+        (other / "__init__.py").write_text("", encoding="utf-8")
+        (other / "plugin.py").write_text(
+            IMPORTS + '@register("dma_burst")\n' + factory("other"), encoding="utf-8"
+        )
+        project(
+            pytester,
+            {
+                "tests/b/test_b.py": (
+                    IMPORTS + "from ps_kit.factories import burst\n\n" + module("test_b", "burst")
+                ),
+            },
+        )
+        pytester.makeini(
+            "[pytest]\naddopts = -p ps_kit.plugin -p other_kit.plugin\n"
+            f"pythonpath = . tests {site.as_posix()}\n"
+        )
+
+        full = rows(pytester)
+        folder = rows(pytester, "tests/b")
+
+        assert names(full, "test_b") == {"burst"}
+        assert same_rows(folder, full)
+
+    def test_a_plugin_that_a_sibling_folders_conftest_loads_does_not_name_it(self, pytester):
+        # tests/a/conftest.py is an initial conftest of a run without arguments
+        # (testpaths), whose pytest_plugins loads the plugin that registers burst
+        # as "dma_burst". A run of tests/b, or of a node ID there, does not load it
+        nodeid = "tests/b/test_b.py::test_b[rand-1]"
+        site = pytester.path / ".venv" / "lib" / "site-packages"
+        self.package(site, "plugin.py")
+        project(
+            pytester,
+            {
+                "tests/a/conftest.py": 'pytest_plugins = ["ps_kit.plugin"]\n',
+                "tests/a/test_a.py": IMPORTS + module("test_a", '"dma_burst"'),
+                "tests/b/test_b.py": (
+                    IMPORTS
+                    + "from ps_kit.factories import burst\n\n"
+                    + module("test_b", "burst", fails="test_b[rand-1]")
+                ),
+            },
+        )
+        pytester.makeini(
+            f"[pytest]\npythonpath = . tests {site.as_posix()}\ntestpaths = tests/a tests/b\n"
+        )
+
+        full, section, _ = check_reruns(pytester, nodeid, "tests/b")
+
+        assert names(full, "test_b") == {"burst"}
+        assert names(full, "test_a") == {"dma_burst"}
+        assert section[0].startswith("strategy  burst (")
+
+    @pytest.mark.parametrize("args", [(), ("-p", "ps_kit")], ids=["autoloaded", "given"])
+    def test_a_plugin_of_an_entry_point_names_it(self, pytester, args):
+        # ps_kit.plugin is the pytest11 entry point "ps_kit" of an installed
+        # distribution: pytest loads it in every run, so giving it with -p on the
+        # command line, which the rerun command does not carry, changes nothing
+        nodeid = "tests/b/test_b.py::test_b[rand-1]"
+        site = pytester.path / ".venv" / "lib" / "site-packages"
+        self.package(site, "plugin.py")
+        info = site / "ps_kit-1.0.dist-info"
+        info.mkdir()
+        (info / "METADATA").write_text(
+            "Metadata-Version: 2.1\nName: ps-kit\nVersion: 1.0\n", encoding="utf-8"
+        )
+        (info / "entry_points.txt").write_text(
+            "[pytest11]\nps_kit = ps_kit.plugin\n", encoding="utf-8"
+        )
+        project(
+            pytester,
+            {
+                "tests/b/test_b.py": (
+                    IMPORTS
+                    + "from ps_kit.factories import burst\n\n"
+                    + module("test_b", "burst", fails="test_b[rand-1]")
+                ),
+            },
+        )
+        pytester.makeini(f"[pytest]\npythonpath = . tests {site.as_posix()}\n")
+
+        full, section, _ = check_reruns(pytester, nodeid, "tests/b", *args)
+
+        assert names(full, "test_b") == {"dma_burst"}
+        assert section[0].startswith("strategy  dma_burst (")
 
     def test_a_name_another_factory_has_in_the_test_folder_does_not_name_it(self, pytester):
         # tests/b registers "dma_burst" for another factory: @strategy("dma_burst")
@@ -486,6 +654,131 @@ class TestInstalled:
         assert same_rows(alone, full)
 
 
+class TestPlugins:
+    """Registrations made by a plugin module or a hook, inside the rootdir."""
+
+    def project(self, pytester, folder="tests", files=None, conftest=""):
+        """
+        The factory burst in ``folder``/common.py, registered as "dma" by
+        tests/plugin_mod.py, a test in tests/b that passes it and fails on rand-1,
+        ``files``, and ``conftest`` added to the root conftest.py.
+        """
+        package = "helpers." if folder == "helpers" else ""
+        project(
+            pytester,
+            {
+                f"{folder}/common.py": IMPORTS + factory("burst"),
+                "tests/plugin_mod.py": (
+                    IMPORTS + f"from {package}common import burst\n\n" + 'register("dma")(burst)\n'
+                ),
+                "tests/a/test_a.py": "def test_a():\n    pass\n",
+                "tests/b/test_b.py": (
+                    IMPORTS
+                    + f"from {package}common import burst\n\n"
+                    + module("test_b", "burst", fails="test_b[rand-1]")
+                ),
+                **({"helpers/__init__.py": ""} if package else {}),
+                **(files or {}),
+            },
+        )
+        if conftest:
+            pytester.makeconftest(CONFTEST + conftest)
+
+    CHAIN = {"tests/plugin_chain.py": 'pytest_plugins = ["plugin_mod"]\n'}
+
+    @pytest.mark.parametrize(
+        ("folder", "ini", "files", "conftest", "addopts", "args"),
+        [
+            # On the test's path, and in helpers/, which is not
+            pytest.param("tests", "addopts = -p plugin_mod\n", {}, "", "", (), id="addopts"),
+            pytest.param(
+                "helpers", "addopts = -p plugin_mod\n", {}, "", "", (), id="addopts_off_path"
+            ),
+            # pytest_plugins of a conftest.py in the test's folder, an initial one
+            # in every run that collects the test
+            pytest.param(
+                "tests",
+                "testpaths = tests/a tests/b\n",
+                {"tests/b/conftest.py": 'pytest_plugins = ["plugin_mod"]\n'},
+                "",
+                "",
+                (),
+                id="conftest_on_path",
+            ),
+            # The root conftest's plugin loads it with its own pytest_plugins
+            pytest.param(
+                "tests", "", CHAIN, 'pytest_plugins = ["plugin_chain"]\n', "", (), id="chain"
+            ),
+            # Given on the command line too: addopts or PYTEST_ADDOPTS loads it in
+            # every run, or a plugin that addopts loads
+            pytest.param(
+                "tests", "addopts = -pplugin_mod\n", {}, "", "", ("-p", "plugin_mod"), id="given"
+            ),
+            pytest.param(
+                "tests", "", {}, "", "-p plugin_mod", ("-p", "plugin_mod"), id="given_env"
+            ),
+            pytest.param(
+                "tests",
+                "addopts = -p plugin_chain\n",
+                CHAIN,
+                "",
+                "",
+                ("-p", "plugin_mod"),
+                id="given_chain",
+            ),
+        ],
+    )
+    def test_a_plugin_that_every_run_loads_names_it(
+        self, pytester, monkeypatch, folder, ini, files, conftest, addopts, args
+    ):
+        nodeid = "tests/b/test_b.py::test_b[rand-1]"
+        self.project(pytester, folder, files, conftest)
+        pytester.makeini(f"[pytest]\npythonpath = . tests\n{ini}")
+        if addopts:
+            # Also for the rerun command, run through the shell
+            monkeypatch.setenv("PYTEST_ADDOPTS", addopts)
+
+        full, section, _ = check_reruns(pytester, nodeid, "tests/b", *args)
+
+        assert names(full, "test_b") == {"dma"}
+        assert section[0].startswith(f"strategy  dma ({folder}/common.py:")
+
+    def test_a_plugin_given_on_the_command_line_only_does_not_name_it(self, pytester):
+        # The printed rerun command does not carry -p: the run that gives it gets
+        # the name of the runs that do not, also for the module that the given
+        # plugin's pytest_plugins loads
+        nodeid = "tests/b/test_b.py::test_b[rand-1]"
+        self.project(pytester, files=self.CHAIN)
+
+        full, section, _ = check_reruns(pytester, nodeid, "tests/b", "-p", "plugin_chain")
+
+        assert names(full, "test_b") == {"burst"}
+        assert section[0].startswith("strategy  burst (tests/common.py:")
+
+    def test_a_registration_in_a_hook_does_not_name_it(self, pytester):
+        # The root conftest's pytest_configure registers burst as "dma": the call
+        # is made by no module's import, so it counts for none of the test's files
+        hook = (
+            "\n\ndef pytest_configure(config):\n"
+            "    from common import burst\n"
+            "    from pytest_strategy import register\n\n"
+            '    register("dma")(burst)\n'
+        )
+        self.project(
+            pytester,
+            files={"tests/b/test_name.py": IMPORTS + module("test_name", '"dma"')},
+            conftest=hook,
+        )
+        (pytester.path / "tests" / "plugin_mod.py").unlink()
+
+        full = run(pytester, ret=1)[1]
+        folder = run(pytester, "tests/b", ret=1)[1]
+
+        assert names(full, "test_b") == {"burst"}
+        assert names(full, "test_name") == {"dma"}
+        assert same_rows(folder, full)
+
+
 class TestNames:
     """Which name a factory passed by object gets, the same in a full run and a part."""
 
@@ -525,9 +818,10 @@ class TestNames:
         assert same_rows(folder_b, full)
         assert same_rows(alone, full)
 
-    def test_a_helper_registered_by_two_ancestor_folders_keeps_its_qualified_name(self, pytester):
-        # The skeptic's layout: the registrations are in helpers/, and names_of()
-        # followed the import order, "base" in a full run and "b_alias" in tests/b
+    def test_a_helper_registered_by_two_ancestor_folders_gets_the_nearest_name(self, pytester):
+        # The skeptic's layout: names_of() followed the import order, "base" in a
+        # full run and "b_alias" in tests/b. Both strategy files are loaded before
+        # tests/b's tests in every run: tests/b's is the deeper one
         def registers(name, other):
             return (
                 IMPORTS
@@ -544,7 +838,9 @@ class TestNames:
                 "helpers/factories.py": IMPORTS + factory("burst"),
                 "tests/strategies.py": registers("base", "other_root"),
                 "tests/b/strategies.py": registers("b_alias", "other_b"),
-                "tests/a/test_a.py": "def test_a():\n    pass\n",
+                "tests/a/test_a.py": (
+                    IMPORTS + "from helpers.factories import burst\n\n" + module("test_a", "burst")
+                ),
                 "tests/b/test_b.py": (
                     IMPORTS + "from helpers.factories import burst\n\n" + module("test_b", "burst")
                 ),
@@ -552,10 +848,13 @@ class TestNames:
         )
 
         full = rows(pytester)
-        folder = rows(pytester, "tests/b")
+        folder_a = rows(pytester, "tests/a")
+        folder_b = rows(pytester, "tests/b")
 
-        assert names(full, "test_b") == {"burst"}
-        assert same_rows(folder, full)
+        assert names(full, "test_a") == {"base"}
+        assert names(full, "test_b") == {"b_alias"}
+        assert same_rows(folder_a, full)
+        assert same_rows(folder_b, full)
 
     @pytest.mark.parametrize(
         ("caller", "expected"),
@@ -589,29 +888,39 @@ class TestNames:
         assert names(full, "test_b") == {expected}
         assert same_rows(alone, full)
 
-    def test_a_factory_imported_from_another_folders_strategy_file_keeps_its_qualified_name(
-        self, pytester
-    ):
+    def test_a_factory_imported_from_another_folders_strategy_file_gets_its_name(self, pytester):
         # Every run that collects test_d.py imports c_strategies.py, which
-        # registers the factory as "c_burst". tests/c is not on test_d's path, so
-        # the name is the factory's qualified name, as for a registration that
-        # only some runs make
+        # registers the factory as "c_burst" (the run that collects tests/c
+        # loads it first), and the test module registers it as "d_alias", in
+        # the test's folder: the deeper call wins. In tests/e the name is
+        # "c_burst", the only registration elsewhere, which @strategy("c_burst")
+        # there finds too
         project(
             pytester,
             {
                 "tests/c/c_strategies.py": IMPORTS + '@register("c_burst")\n' + factory("cburst"),
+                "tests/c/test_c.py": IMPORTS + module("test_c", '"c_burst"'),
                 "tests/d/test_d.py": (
-                    IMPORTS + "from c_strategies import cburst\n\n" + module("test_d", "cburst")
+                    IMPORTS
+                    + "from c_strategies import cburst\n\n"
+                    + 'register("d_alias")(cburst)\n\n'
+                    + module("test_d", "cburst")
+                ),
+                "tests/e/test_e.py": (
+                    IMPORTS + "from c_strategies import cburst\n\n" + module("test_e", "cburst")
                 ),
             },
         )
         pytester.makeini("[pytest]\npythonpath = . tests tests/c\n")
 
         full = rows(pytester)
-        folder = rows(pytester, "tests/d")
+        folder_d = rows(pytester, "tests/d")
+        folder_e = rows(pytester, "tests/e")
 
-        assert names(full, "test_d") == {"cburst"}
-        assert same_rows(folder, full)
+        assert names(full, "test_d") == {"d_alias"}
+        assert names(full, "test_e") == {"c_burst"}
+        assert same_rows(folder_d, full)
+        assert same_rows(folder_e, full)
 
     def test_a_name_another_factory_has_in_the_test_folder_does_not_name_it(self, pytester):
         # tests/b registers "dma" for another factory: @strategy("dma") there

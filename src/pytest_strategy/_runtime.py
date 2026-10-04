@@ -118,12 +118,6 @@ class SessionState:
         # consider_namespace_packages, a regular package's module held under its
         # package name (_registry.source_part).
         self.imported_files: set[str] = set()
-        # The files of the modules pytest loaded as plugins (-p, entry points,
-        # pytest_plugins) before the collection began, by normalized real path,
-        # conftest.py files left out: every run makes the registrations of their
-        # register() calls first (plugin._made_with). None until the collection
-        # begins.
-        self.plugin_files: frozenset[str] | None = None
         # Where a lookup stops going up: the rootdir and the search paths
         self.ceilings: set[str] | None = None
         # A name registered twice in the same directory: the messages, reported as

@@ -537,25 +537,34 @@ def test_coordinates(x, y):
    preferring one outside the rootdir; several candidates are an error. A
    factory passed directly is used as it is, under a name that keys the test's
    streams (`_factory_name()`): a name it is registered under that
-   `registry.nearest()` finds for the test's folder, counting only the
-   registrations that every run collecting the test makes first, those of
-   other factories under the same name too (`_made_with()`: a `register` call
-   in the passed factory's own file, in the test module, in a module pytest
-   loaded as a plugin before the collection, or in a `conftest.py` or a
-   strategy file the plugin loads with the test's folders). Of several, the
-   one registered in the deepest folder wins, then the first in alphabetical
-   order. Without one, a name whose only such registration outside the
-   rootdir, or in an installed package below it, is the factory's, as for a
-   name; without that either, the function's qualified name.
-   `Registration.callers` holds the files of the calls: each is the module
-   whose top-level code ran the call (`caller_file()`), so a helper
-   function's call counts for the module whose import called it, and a call
-   in a hook or a fixture for none of these files. A file imported again
-   under another module name (`tests.factories` and `factories`) makes a copy
-   of the factory, whose `register` call replaces the factory's registration
-   without a clash: `Registration.holds()` counts a copy (the same origin,
-   bound to the same name in the other module) as the factory. So the name does
-   not depend on the other strategy files or test modules a run imported.
+   `registry.nearest()` finds for the test's folder or, when no folder on its
+   path registers the name, the only registration elsewhere, as for a name.
+   Only the registrations that every run collecting the test makes first
+   count, those of other factories under the same name too (`_made_with()`: a
+   `register` call in the passed factory's own file, in the test module, in a
+   `conftest.py` or a strategy file the plugin loads with the test's folders,
+   or in a module that every run loads as a plugin before it collects the
+   test, `_plugin_files()`). Those plugins are the modules registered before
+   pytest loads the initial `conftest.py` files (`_every_run_plugins()`, noted
+   in a tryfirst `pytest_load_initial_conftests`), less those that only a `-p`
+   of the command line loads, and those that the `pytest_plugins` of a
+   `conftest.py` on the test's path load. Where the factory's file is does not
+   count, so a package's factory gets the same name installed and checked out.
+   Of several names, the one whose call is in the deepest folder of the
+   test's path wins, then the first in alphabetical order; without one, the
+   function's qualified name. `Registration.callers` holds the files of the
+   calls: each is the module whose top-level code ran the call
+   (`caller_file()`), so a helper function's call counts for the module whose
+   import called it, and a call in a hook or a fixture for none of these
+   files. A file imported again under another module name (`tests.factories`
+   and `factories`) makes a copy of the factory, whose `register` call
+   replaces the factory's registration without a clash:
+   `Registration.holds()` counts a copy (the same origin, bound to the same
+   name in the other module) as the factory, and `Registration.callers` keeps
+   the calls of the registration a copy replaced, checked when it is read, as
+   the module binds a decorated function's name after the call. So the name
+   does not depend on the other strategy files, test modules or plugins a run
+   loaded.
 4. `build_parametrization()` calls the factory once through
    `_factory.call_factory()`, on the factory's own stream (see
    [Reproducibility](#reproducibility)). The rows draw from streams keyed by

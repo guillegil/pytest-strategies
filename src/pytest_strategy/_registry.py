@@ -16,7 +16,7 @@ import inspect
 import os
 import sys
 from collections.abc import Callable, Collection, Iterable, Iterator, MutableMapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePath
 from types import FrameType
 from typing import Any
@@ -416,16 +416,34 @@ class Registration:
     # Normalized real path of the directory of the file that defines the factory,
     # or None when that file is unknown
     directory: str | None
-    # Normalized real paths of the files whose register() calls made it, each the
-    # module whose top-level code ran the call (caller_file): the same function
-    # registered again under the name in its folder, by another file, adds that
-    # file
-    callers: frozenset[str] = frozenset()
+    # The file whose register() call made it, as a normalized real path: the
+    # module whose top-level code ran the call (caller_file); none for code
+    # without a file
+    calls: frozenset[str] = frozenset()
+    # The registration of the same origin it replaced, if any (see callers)
+    replaced: Registration | None = field(default=None, repr=False, compare=False)
 
     @property
     def file(self) -> str | None:
         """Normalized real path of the file that defines the factory, if known."""
         return self.origin[0]
+
+    @property
+    def callers(self) -> frozenset[str]:
+        """
+        Normalized real paths of the files whose register() calls made the
+        registration: its own call's file, and those of the registration it
+        replaced when that one holds the same factory (``holds``). So the same
+        function registered again under the name in its folder, by another file,
+        adds that file, and so does a copy of it, made by its file run again as
+        another module. That is checked here, not when the copy registers: the
+        module binds a decorated function's name after the decorator's call.
+        """
+        callers = self.calls
+        replaced = self.replaced
+        if replaced is not None and replaced.holds(self.factory, self.origin):
+            callers |= replaced.callers
+        return callers
 
     def holds(self, factory: Factory, origin: Origin | None = None) -> bool:
         """
@@ -508,10 +526,10 @@ class StrategyRegistry:
             if existing.directory == directory:
                 replaced = entries.pop(index)
                 break
-        callers = frozenset([caller] if caller else [])
-        if replaced is not None and replaced.holds(factory, origin):
-            callers |= replaced.callers
-        entries.append(Registration(name, factory, origin, directory, callers))
+        calls = frozenset([caller] if caller else [])
+        # A registration of the same origin may be of a copy (Registration.callers)
+        earlier = replaced if replaced is not None and replaced.origin == origin else None
+        entries.append(Registration(name, factory, origin, directory, calls, earlier))
         return replaced
 
     def registrations(self, name: str) -> list[Registration]:
