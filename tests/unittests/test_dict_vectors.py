@@ -353,6 +353,31 @@ class TestPytestParamVectors:
 
         assert param.get_directed_vector("s").values == ("ab",)
 
+    @pytest.mark.parametrize(
+        "value", [(-2,), [-2], namedtuple("N", "n")(n=-2)], ids=["tuple", "list", "namedtuple"]
+    )
+    def test_a_tuple_list_or_namedtuple_inside_is_one_value(self, value):
+        """
+        The docs say a pytest.param takes the values spread or one dict: a tuple,
+        list or namedtuple inside it is the one argument's value, not the row.
+        """
+        param = _param("n", directed_vectors={"v": pytest.param(value, marks=XFAIL)})
+
+        stored = param.get_directed_vector("v")
+
+        assert stored.values == (value,)
+        assert stored.values.n is value
+        assert _param("n", directed_vectors={"v": pytest.param(-2)}).get_directed_vector(
+            "v"
+        ).values == (-2,)
+
+    def test_a_namedtuple_inside_is_not_placed_by_its_field_names(self):
+        assert _addr_len(directed_vectors={"nt": BusTxn(len=8, addr=7)}).get_directed_vector(
+            "nt"
+        ) == (7, 8)
+        with pytest.raises(RNGValueError, match="^Directed vector 'nt' has 1 values, expected 2$"):
+            _addr_len(directed_vectors={"nt": pytest.param(BusTxn(len=8, addr=7), marks=XFAIL)})
+
 
 class TestVectorNames:
     @pytest.mark.parametrize("name", [0, "", None, ("a",)])

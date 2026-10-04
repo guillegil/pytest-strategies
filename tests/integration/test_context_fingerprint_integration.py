@@ -135,6 +135,45 @@ class TestContextLine:
         result.assert_outcomes(passed=2)
         assert context_lines(result) == []
 
+    @pytest.mark.parametrize("args", [[], ["-n", "2"]], ids=["one_process", "xdist"])
+    def test_absent_for_a_context_only_strategies_ctx_computes(self, pytester, args):
+        """
+        strategies_ctx is a fixture, so it computes the context after the collection:
+        the context is in the -v Contexts block, never on the line.
+        """
+        if args:
+            pytest.importorskip("xdist")
+        conftest = (
+            "import pytest\n\n"
+            "@pytest.fixture\n"
+            "def tb(strategies_ctx):\n"
+            "    return strategies_ctx\n"
+        )
+        test = module("plain", "tb['name'] == 'root'").replace("(y)", "(y, tb)")
+        write(pytester, {"tests/conftest.py": conftest, "tests/test_x.py": test})
+
+        result = pytester.runpytest_subprocess("-p", "no:cacheprovider", "-v", *args)
+
+        result.assert_outcomes(passed=2)
+        assert context_lines(result) == []
+        result.stdout.fnmatch_lines(
+            ["Contexts: 1", f"  conftest.py: {fp(ROOT, pytester)}, 0 test(s)"]
+        )
+
+    def test_present_for_a_get_context_call_during_the_collection(self, pytester):
+        """No factory declares ctx, but a pytest_generate_tests hook asks for it."""
+        conftest = (
+            "from pytest_strategy import get_context\n\n"
+            "def pytest_generate_tests(metafunc):\n"
+            "    get_context(metafunc.config, metafunc.definition.path)\n"
+        )
+        write(pytester, {"tests/conftest.py": conftest, "tests/test_x.py": module("plain")})
+
+        result = pytester.runpytest("-p", "no:cacheprovider", "-q")
+
+        result.assert_outcomes(passed=2)
+        assert context_lines(result) == [f"pytest-strategies: context {fp(ROOT, pytester)}"]
+
     def test_absent_when_the_hook_returns_none(self, pytester):
         factory = STRATEGIES + """
 @register("optional")

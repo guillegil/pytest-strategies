@@ -26,7 +26,9 @@ every option, the error messages and what changed from 3.x, read
   and directed vectors were tuples only; 2.x also lacks the plain
   `register`/`strategy` functions. The reference's section 19 says what differs.
 - List what already exists: `pytest --list-strategies` prints every registered
-  name and exits. Reuse or extend a strategy before writing a new one.
+  name and exits. It collects the tests first, so a factory that fails shows as a
+  collection error (exit code 2). Reuse or extend a strategy before writing a new
+  one.
 - Look for strategies files next to the tests and in parent folders, and for a
   `pytest_strategies_context` hook in the `conftest.py` files (each folder can
   have its own).
@@ -188,7 +190,9 @@ def ranges():
   dict vectors can be mixed. For a one-argument strategy write `{"n": -2}`; a bare
   `-2` or `"a"` fails with a hint. A dict value for that one argument is written
   `{"cfg": {"a": 1}}`.
-- `pytest.param({"n": -2}, marks=pytest.mark.xfail)` marks one row (no `id=`).
+- `pytest.param({"n": -2}, marks=pytest.mark.xfail)` or `pytest.param(-2,
+  marks=...)` marks one row (no `id=`). Inside it, give one dict or the values
+  spread: a tuple there is one value (`pytest.param((-2,))` passes `(-2,)`).
 - Vectors are used as written: predicates, constraints and validators do not
   check them, so keep them valid yourself.
 - A predicate on an RNG type filters one argument
@@ -315,9 +319,11 @@ def esm_rw(ctx):
   (`{**ctx, "extra": 1}`), never change the one it receives.
 - After the collection the plugin prints `pytest-strategies: context 976bcfdf`
   (`contexts conftest.py ..., tests/board_a/conftest.py ...` with several), a hash
-  of each context taken when the hook returned it (sets sorted, rootdir paths
-  relative, pydantic `Field(exclude=True)` left out), so two runs can tell whether
-  they built the same one. Keep volatile values (temp paths, times) out of it.
+  of each context the collection computed, taken when the hook returned it (sets
+  sorted, rootdir paths relative, pydantic `Field(exclude=True)` left out), so two
+  runs can tell whether they built the same one. A context that only
+  `strategies_ctx` computes is listed in the `-v` Contexts block alone. Keep
+  volatile values (temp paths, times) out of it.
 - Under pytest-xdist every worker calls the hook, so it must return the same data
   in each: a run whose workers built different contexts, or whose factories drew
   different values (global `random`, `list()` of a set), fails with exit code 4

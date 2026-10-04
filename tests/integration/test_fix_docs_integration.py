@@ -360,3 +360,119 @@ class TestExampleCommands:
             assert outcomes.get("passed") == 1 and "deselected" not in outcomes
         else:
             assert outcomes.get("passed", 0) > 0
+
+
+# The context of the CHANGELOG's fixed-table recipe: a register map from the testbench
+REGISTERS_CONFTEST = """
+from types import SimpleNamespace
+
+import pytest
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_strategies_context(config):
+    return SimpleNamespace(registers=[("CTRL", 0x0), ("STAT", 0x4), ("DATA", 0x8)])
+"""
+
+# The same table as a Parameter of placeholder values, with the rows as directed vectors
+REGISTERS_PARAMETER = """
+from pytest_strategy import Parameter, TestArg, register, strategy
+
+@register("regs")
+def regs(ctx):
+    return Parameter(
+        TestArg("name", value=""),
+        TestArg("offset", value=0),
+        directed_vectors={{name: (name, offset) for name, offset in ctx.registers}},
+        {nsamples}
+    )
+
+@strategy("regs")
+def test_reg(name, offset):
+    pass
+"""
+
+
+RAND = [f"rand-{i}" for i in range(10)]
+
+
+def _changelog_context_table_recipe() -> str:
+    """The 4.0 half of the CHANGELOG's recipe for a fixed table built from the context."""
+    text = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    (block,) = [
+        textwrap.dedent(match.group(1))
+        for match in re.finditer(r"```python\n(.*?)```", text, re.S)
+        if "pytest_generate_tests" in match.group(1)
+    ]
+    return block.split("# 4.0, in the test module\n", 1)[1]
+
+
+def _collected_ids(result) -> list:
+    """The parametrization IDs of the collected items, from --collect-only -q."""
+    return [line.split("[", 1)[1].rstrip("]") for line in result.stdout.lines if "::" in line]
+
+
+class TestTupleFactoryMigration:
+    """
+    Migration item 4 of the CHANGELOG: a fixed table built from the context keeps
+    exactly its rows through pytest_generate_tests, while a Parameter whose
+    arguments are all value= gets nsamples rows of placeholder values.
+    """
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            [],
+            ["--nsamples=5"],
+            ["--nsamples=auto"],
+            ["--vector-mode=random_only"],
+            ["--vector-mode=test"],
+            ["-n", "2"],
+        ],
+        ids=" ".join,
+    )
+    def test_the_recipe_runs_exactly_the_table(self, pytester, args):
+        run = pytester.runpytest
+        if "-n" in args:
+            pytest.importorskip("xdist")
+            run = pytester.runpytest_subprocess
+        pytester.makeconftest(REGISTERS_CONFTEST)
+        pytester.makepyfile(test_regs=_changelog_context_table_recipe())
+
+        result = run("-p", "no:cacheprovider", *args)
+
+        result.assert_outcomes(passed=3)
+        if "-n" not in args:
+            collected = pytester.runpytest("-p", "no:cacheprovider", "--collect-only", "-q", *args)
+            assert _collected_ids(collected) == ["CTRL-0", "STAT-4", "DATA-8"]
+
+    @pytest.mark.parametrize(
+        ("nsamples", "args", "ids"),
+        [
+            ("", [], ["directed-CTRL", "directed-STAT", "directed-DATA", *RAND[:10]]),
+            ("nsamples=0,", [], ["directed-CTRL", "directed-STAT", "directed-DATA"]),
+            (
+                "nsamples=0,",
+                ["--nsamples=5"],
+                ["directed-CTRL", "directed-STAT", "directed-DATA", *RAND[:5]],
+            ),
+            ("nsamples=0,", ["--vector-mode=random_only"], []),
+            ("nsamples=0,", ["--vector-mode=test"], []),
+        ],
+        ids=["default", "nsamples_0", "nsamples_0 --nsamples=5", "random_only", "test"],
+    )
+    def test_a_parameter_of_values_gets_placeholder_rows(self, pytester, nsamples, args, ids):
+        """The caveats the CHANGELOG and the README give for this form."""
+        pytester.makeconftest(REGISTERS_CONFTEST)
+        pytester.makepyfile(test_regs=REGISTERS_PARAMETER.format(nsamples=nsamples))
+
+        result = pytester.runpytest("-p", "no:cacheprovider", "--rng-seed=1", "-rs", *args)
+
+        if ids:
+            collected = pytester.runpytest(
+                "-p", "no:cacheprovider", "--rng-seed=1", "--collect-only", "-q", *args
+            )
+            assert _collected_ids(collected) == ids
+            result.assert_outcomes(passed=len(ids))
+        else:
+            # No rows: pytest skips the test ("got empty parameter set")
+            result.assert_outcomes(skipped=1)

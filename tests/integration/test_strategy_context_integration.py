@@ -215,6 +215,49 @@ def pytest_strategies_context(config):
     result.stdout.fnmatch_lines(["*no testbench configured*"])
 
 
+TEST_MIXED = """
+from pytest_strategy import Strategy
+
+@Strategy.strategy("esm_rw")
+def test_write_read(channel, wdata):
+    pass
+
+@Strategy.strategy("plain")
+def test_plain_here(x):
+    pass
+
+def test_without_strategy():
+    pass
+"""
+
+
+@pytest.mark.parametrize(
+    "hook, outcomes",
+    [
+        ("    raise RuntimeError('no bench')\n", {"passed": 10, "errors": 1}),
+        (
+            "    import pytest\n    pytest.skip('no bench', allow_module_level=True)\n",
+            {"passed": 10, "skipped": 1},
+        ),
+    ],
+    ids=["raise", "skip"],
+)
+def test_a_hook_error_or_skip_takes_the_whole_module(pytester, hook, outcomes):
+    """
+    The module's tests that do not use ctx do not run either: the error or the skip
+    is the module's, as the docs say.
+    """
+    pytester.makeconftest(f"def pytest_strategies_context(config):\n{hook}")
+    pytester.makepyfile(esm_strategies=STRATEGIES, test_mixed=TEST_MIXED, test_plain=TEST_PLAIN)
+
+    args = ("-p", "no:cacheprovider", "--rng-seed=1", "--continue-on-collection-errors")
+    result = pytester.runpytest(*args, "-v")
+
+    result.assert_outcomes(**outcomes)
+    result.stdout.no_fnmatch_line("*test_mixed.py::*")
+    assert "test_plain.py::test_plain[rand-0] PASSED" in result.stdout.str()
+
+
 def test_random_draws_in_the_hook_do_not_change_the_vectors(project, values_dump):
     project.makeconftest("""
 from pytest_strategy import RNG

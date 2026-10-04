@@ -255,9 +255,12 @@ class Parameter:
   the one argument is written `{"cfg": {"a": 1}}` (in a `pytest.param`, only
   `pytest.param({"cfg": {"a": 1}}, marks=...)`). Dataclass and pydantic model
   instances are not supported as vectors yet; use a dict. `pytest.param(...,
-  marks=...)` wraps any of these forms (an `id=` fails: the vector's name is its
-  test ID; build other IDs with `ids=`). Vectors are not checked by predicates,
-  constraints or validators.
+  marks=...)` takes the values spread (`pytest.param(-2, marks=...)`,
+  `pytest.param(0, 1, marks=...)`) or one dict (`pytest.param({"n": -2},
+  marks=...)`). A tuple, list or namedtuple inside it is one value:
+  `pytest.param((-2,), marks=...)` gives a one-argument strategy the value `(-2,)`.
+  An `id=` fails: the vector's name is its test ID; build other IDs with `ids=`.
+  Vectors are not checked by predicates, constraints or validators.
 - The `Parameter` stores each vector as a `Vector` (a `pytest.param` keeps its
   marks, with a `Vector` as its values). `directed_vectors` and `test_vectors`
   are read-only mappings; change them with the `add_*` and `remove_*` methods.
@@ -531,7 +534,7 @@ usage error listing each strategy's directed vectors.
 | `--vector-name=NAME` | only the directed vector named NAME |
 | `--vector-index=I` | only the directed vector at index I |
 | `--strategy-constraint-off=[S:]NAME[,...]` | turn the constraint NAME off for this run, in every strategy or only in strategy S (its resolved name, as in the `-v` summary); repeatable. An item that matches no constraint of a resolved strategy is a usage error in a whole-suite run (with "did you mean" and the constraints by strategy), and a red line in a run narrowed by paths, node IDs, `--lf`, `--sw`, `--ignore` or a start below the rootdir, or with a module that was skipped or failed to collect |
-| `--list-strategies` | load every strategies file, list the registered names (without calling any factory) and exit |
+| `--list-strategies` | collect the tests as usual (which calls their factories, and the context hook for those with `ctx`), load every strategies file, list the registered names and exit; exit code 2 when the collection had errors |
 
 | ini option | Meaning |
 | --- | --- |
@@ -550,7 +553,7 @@ Output:
   dma_burst:no_4k_cross` (the items as given) when constraints are turned off, and
   the reused-seed line of `--lf` (section 16).
 - After the collection (also with `-q`): `pytest-strategies: context 976bcfdf` when
-  a context was computed (section 13).
+  the collection computed a context (section 13).
 - A run with failures prints the reproduce line and the failed rows (section 16).
 - `-v` adds a "Strategy Summary" with, per strategy, the number of tests, the
   counts of directed and random rows (and of test, exhaustive and skipped rows when
@@ -702,11 +705,12 @@ def pytest_strategies_context(config):
   object. A wrapper runs once per answering implementation and set of wrappers.
 - When no implementation returns a value, `ctx` keeps its default (or a value bound
   with `functools.partial`), else `None`.
-- If an implementation raises, each test that uses a factory with `ctx` in a
-  folder that asks it fails collection with
+- If an implementation raises, each test module that uses a factory with `ctx` in
+  a folder that asks it fails collection with
   `Strategy factory '<name>' has a 'ctx' parameter, but the pytest_strategies_context
-  hook raised <error>`. `pytest.fail()` is reported as is, and
-  `pytest.skip(..., allow_module_level=True)` skips those tests.
+  hook raised <error>`, so none of the module's tests run, those without `ctx`
+  included. `pytest.fail()` is reported as is, and
+  `pytest.skip(..., allow_module_level=True)` skips those modules (all their tests).
 - When a factory fails with `ctx` None while a `conftest.py` in another folder
   implements the hook, the error says where: `ctx is None for tests/b: no
   pytest_strategies_context implementation in this folder or above answered
@@ -720,12 +724,15 @@ def pytest_strategies_context(config):
   `{"unavailable": "tests/b/conftest.py was not loaded in this session"}`.
 
 **The fingerprint.** After the collection (also with `-q` and `--collect-only`) the
-plugin prints a fingerprint of each context it computed, the first 8 hex characters
-of a SHA-256 taken when the hook returned the object: `pytest-strategies: context
-976bcfdf`, or with several, `pytest-strategies: contexts conftest.py 976bcfdf,
-tests/tb_a/conftest.py b1e1b237`. Nothing is printed when no context was computed or
-every one is `None`; under pytest-xdist the controller prints the workers' line at
-the end of the run.
+plugin prints a fingerprint of each context computed by then, the first 8 hex
+characters of a SHA-256 taken when the hook returned the object: `pytest-strategies:
+context 976bcfdf`, or with several, `pytest-strategies: contexts conftest.py
+976bcfdf, tests/tb_a/conftest.py b1e1b237`. It lists the contexts of factories with
+`ctx` and of `get_context()` calls made during the collection; a context that
+`strategies_ctx` or a fixture computes first appears only in the `-v` Contexts
+block. Nothing is printed when no context was computed by then or every one is
+`None`; under pytest-xdist the controller prints the workers' line at the end of
+the run.
 
 - The encoding does not depend on `PYTHONHASHSEED` (sets are sorted), the checkout
   folder (rootdir paths are relative) or `--import-mode` (types by qualified name).
@@ -946,7 +953,9 @@ class VectorInfo:
   A test gets the same rows (and node IDs) whether you run the whole suite, one file
   or one test, in any order and with any `--import-mode`. Two tests sharing a
   strategy get different random rows. A row keeps its values with more rows, when
-  its node ID runs alone and when another argument is added or changed; a
+  its node ID runs alone and when another argument is added or changed, as long as
+  the constraints accept or reject its draws as before (a row whose acceptance
+  changes stops at another draw, with new values for every argument); a
   constraint redraws only the rows it rejects, so turning one off keeps the rows it
   never rejected. The derivation is versioned (`VectorInfo.streams`, now 1) and
   changes only in a major release.
@@ -1030,7 +1039,7 @@ Deprecated in 3.0 and removed in 4.0, with what a 4.0 run shows:
 
 | Removed | What you see | Use instead |
 | --- | --- | --- |
-| factories returning `(argnames, samples)` | collection fails: `Strategy 'name' returned an (argnames, samples) tuple ... no longer supported in 4.0` | return a `Parameter`, with one `TestArg` per argument and the fixed rows as `directed_vectors` (a fixed table without random arguments fits `@pytest.mark.parametrize`) |
+| factories returning `(argnames, samples)` | collection fails: `Strategy 'name' returned an (argnames, samples) tuple ... no longer supported in 4.0` | return a `Parameter`, with one `TestArg` per argument and the fixed rows as `directed_vectors` (a fixed table without random arguments fits `@pytest.mark.parametrize`; one built from the context fits `metafunc.parametrize()` in a `pytest_generate_tests` hook that reads `get_context(metafunc.config, metafunc.definition.path)`). A `Parameter` whose arguments are all `value=` still gets `nsamples` placeholder rows |
 | `TestArg(directed_values=..., test_values=..., always_include_directed=...)` | `TypeError: ... got an unexpected keyword argument 'directed_values'`; `TestArg("x")` with neither `value` nor `rng_type` raises `ValueError` | `Parameter(directed_vectors=..., test_vectors=..., always_include_directed=...)` |
 | the `TestArg` properties `directed_values`, `test_values`, `has_directed_values` | `AttributeError` | `param.directed_vectors`, `param.test_vectors` |
 | `RNG.set_max_retries(n)` | `AttributeError` | `Parameter(max_retries=n)`; predicate retries stay at 100 |

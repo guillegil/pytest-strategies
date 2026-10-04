@@ -411,6 +411,38 @@ class TestConstraints:
         param.remove_constraint("even")
         assert random_rows(param, 30) == base
 
+    def test_changing_another_argument_keeps_a_row_only_while_its_acceptance_holds(self):
+        """
+        Widening hi leaves lo as it was in the rows whose first draw a constraint on
+        both accepts either way. A row whose first draw it accepts with one range and
+        rejects with the other stops at another draw, so lo changes there too, as the
+        docs say.
+        """
+
+        def rows(hi_max, constraints=None):
+            param = Parameter(
+                TestArg("lo", rng_type=RNGInteger(0, 100)),
+                TestArg("hi", rng_type=RNGInteger(0, hi_max)),
+                vector_constraints=constraints,
+            )
+            return random_rows(param, 30)
+
+        ordered = {"ordered": lambda v: v.lo < v.hi}
+        first_draws = zip(rows(100), rows(200), strict=True)
+        kept = flipped = 0
+        for (draw, wide_draw), narrow, wide in zip(
+            first_draws, rows(100, ordered), rows(200, ordered), strict=True
+        ):
+            # The first draws share lo: hi's range does not move lo's stream
+            assert draw.lo == wide_draw.lo
+            accepted = (draw.lo < draw.hi, wide_draw.lo < wide_draw.hi)
+            if accepted == (True, True):
+                assert narrow.lo == wide.lo == draw.lo
+                kept += 1
+            elif accepted[0] != accepted[1] and narrow.lo != wide.lo:
+                flipped += 1
+        assert kept and flipped
+
     def test_on_series_rows(self):
         param = Parameter(TestArg("ch", rng_type=Series([0, 1, 2])), *three_args())
         base = by_identity(param._generate_rows(12, key=KEY))

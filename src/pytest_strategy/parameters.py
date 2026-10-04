@@ -593,10 +593,11 @@ class _RowStreams:
     argument that draws, reseeded at the start of each row from the key
     ``T/"row"/pos/j/argname``, where T is the call's key.
 
-    A drawn argument's values therefore depend only on T, the row's identity (pos
+    A drawn argument's draws therefore depend only on T, the row's identity (pos
     and j) and the argument's name: not on the other rows, on the other arguments,
     or on what was drawn before. The generators continue across the attempts of
-    one row, so a constraint that rejects a row changes only that row.
+    one row, so a constraint that rejects a row changes only that row, and the row
+    gets the draws of the first attempt the constraints accept.
     """
 
     __slots__ = ("_rows", "_names", "_generators", "_pos")

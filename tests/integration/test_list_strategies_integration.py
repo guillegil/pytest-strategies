@@ -84,7 +84,10 @@ def _write(pytester, files):
 
 
 class TestTheListing:
-    """--list-strategies keeps 3.0's text and calls no factory (D19)."""
+    """
+    --list-strategies keeps 3.0's text, and the listing calls no factory (D19): only
+    the usual collection before it calls the factories of the collected tests.
+    """
 
     @pytest.fixture(autouse=True)
     def utf8_output(self, monkeypatch):
@@ -133,6 +136,45 @@ class TestTheListing:
         assert result.ret == pytest.ExitCode.OK
         result.stdout.fnmatch_lines(["  ✓ lst_writes"])
         assert not (pytester.path / "tests/b/called.txt").exists()
+
+    def test_the_collection_before_it_calls_the_collected_tests_factories(self, pytester):
+        """
+        The tests are collected as usual first, as the docs say: that calls the
+        factories of the collected tests, and the context hook for a factory with
+        ctx, but not lst_broken, which no collected test uses.
+        """
+        pytester.makeini("[pytest]\n")
+        _write(
+            pytester,
+            {
+                **LISTED_STRATEGIES,
+                "conftest.py": (
+                    "from pathlib import Path\n\n"
+                    "def pytest_strategies_context(config):\n"
+                    '    Path(config.rootpath, "hook.txt").write_text("called")\n'
+                    '    return {"board": "b1"}\n'
+                ),
+                "tests/a/test_ctx.py": (
+                    "from pathlib import Path\n\n"
+                    "from pytest_strategy import Parameter, TestArg, register, strategy\n\n"
+                    '@register("lst_ctx")\n'
+                    "def with_ctx(ctx):\n"
+                    '    Path(__file__).with_name("factory.txt").write_text(ctx["board"])\n'
+                    '    return Parameter(TestArg("x", value=1))\n\n'
+                    '@strategy("lst_ctx")\n'
+                    "def test_ctx(x):\n"
+                    "    pass\n"
+                ),
+            },
+        )
+
+        result = pytester.runpytest_subprocess("-p", "no:cacheprovider", "--list-strategies")
+
+        assert result.ret == pytest.ExitCode.OK
+        result.stdout.fnmatch_lines(["  ✓ lst_ctx"])
+        assert (pytester.path / "hook.txt").read_text() == "called"
+        assert (pytester.path / "tests/a/factory.txt").read_text() == "b1"
+        result.stdout.no_fnmatch_line("*boom*")
 
     def test_a_path_after_the_option_is_a_path(self, pytester):
         """

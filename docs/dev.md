@@ -1622,10 +1622,13 @@ position, its `(name, token)` pairs sorted by name and flattened (the tokens of
 `_position_keys`), `j` is the row's index within that position, and `name` is
 the argument's name. The order of an `RNGSequence` under `--nsamples=auto` comes
 from `T/"order"/name`. A row's values therefore depend only on the seed, the
-strategy, the test, the row and the argument: more rows keep the first ones, a
-node ID run alone gets the values of the full run, adding, reordering or
-changing another argument leaves an argument's values alone, and a constraint
-redraws only the rows it rejects, continuing the same streams. Static `value=`
+strategy, the test, the row, the argument and the draw the constraints accept:
+more rows keep the first ones, a node ID run alone gets the values of the full
+run, adding, reordering or changing another argument leaves an argument's
+values alone in every row the constraints accept or reject as before (a row
+whose draws a constraint now accepts or rejects differently stops at another
+draw), and a constraint redraws only the rows it rejects, continuing the same
+streams. Static `value=`
 arguments draw nothing. Direct calls (`generate_vectors()`, `generate_vector()`,
 `generate_exhaustive()` outside the plugin) use the key
 `root(RNG.get_seed(), "direct", n)`, where `n` is 128 bits drawn from
