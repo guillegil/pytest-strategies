@@ -66,7 +66,11 @@ def export_strategies(*, format: str = "json") -> str: ...
   type.
 - `@strategy("name")` looks the name up from the test's folder upward when the test is
   collected. `@strategy(factory)` uses that factory directly; it does not need to be
-  registered, and the node IDs are the same as with the name.
+  registered. When the registration is in the test's folder or above (the factory's
+  file is there, and so is the `register` call: in that file, the test module, or a
+  strategies file or `conftest.py` there), the test gets the same values and IDs as
+  with the name. Otherwise its values are keyed by the function's qualified name, and
+  are the same in every run.
 - `@strategy` only marks the test (a `strategy` marker holding the name or factory).
   The factory runs, and the test is parametrized, in `pytest_generate_tests`, so a
   missing name or a signature mismatch is reported at collection.

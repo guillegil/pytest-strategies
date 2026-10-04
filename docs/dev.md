@@ -535,7 +535,16 @@ def test_coordinates(x, y):
    (`registry.nearest`). When no folder on that path registers it, the plugin
    loads every strategy file and uses the only registration elsewhere,
    preferring one outside the rootdir; several candidates are an error. A
-   factory passed directly is used as it is.
+   factory passed directly is used as it is, under a name that keys the test's
+   streams (`_factory_name()`): a name it is registered under that
+   `registry.nearest()` finds for the test's folder, counting only the
+   registrations that every run collecting the test makes first
+   (`_made_with()`: a `register` call in the factory's own file, in the test
+   module, or in a `conftest.py` or a strategy file the plugin loads with the
+   test's folders; `Registration.callers` holds the files of the calls). Of
+   several, the one registered in the deepest folder wins, then the first in
+   alphabetical order. Without one, the function's qualified name. So the
+   name does not depend on the other strategy files a run imported.
 4. `build_parametrization()` calls the factory once through
    `_factory.call_factory()`, on the factory's own stream (see
    [Reproducibility](#reproducibility)). The rows draw from streams keyed by

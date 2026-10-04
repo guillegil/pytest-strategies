@@ -18,6 +18,7 @@ import sys
 from collections.abc import Callable, Collection, Iterable, Iterator, MutableMapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePath
+from types import FrameType
 from typing import Any
 
 from ._streams import INSTALLED_FOLDERS, path_part
@@ -48,6 +49,20 @@ def _unwrap(fn: Callable[..., Any]) -> Callable[..., Any]:
 def _normalize(filename: str | None) -> str | None:
     """Return the real, normalized form of a path, or None."""
     return os.path.normcase(os.path.realpath(filename)) if filename else None
+
+
+def caller_file(frame: FrameType | None) -> str | None:
+    """
+    Return the normalized real path of the file whose code runs in ``frame`` (the
+    module a ``register()`` call is in), or None for code without a file
+    (``exec``'d text).
+    """
+    if frame is None:
+        return None
+    filename = frame.f_globals.get("__file__") or frame.f_code.co_filename
+    if not isinstance(filename, str) or filename.startswith("<"):
+        return None
+    return _normalize(filename)
 
 
 def factory_source(fn: Callable[..., Any]) -> Origin:
@@ -395,6 +410,10 @@ class Registration:
     # Normalized real path of the directory of the file that defines the factory,
     # or None when that file is unknown
     directory: str | None
+    # Normalized real paths of the files whose register() calls made it: the
+    # same function registered again under the name in its folder, by another
+    # file, adds that file
+    callers: frozenset[str] = frozenset()
 
     @property
     def file(self) -> str | None:
@@ -414,23 +433,30 @@ class StrategyRegistry:
     def __init__(self) -> None:
         self._entries: dict[str, list[Registration]] = {}
 
-    def add(self, name: str, factory: Factory) -> Registration | None:
+    def add(self, name: str, factory: Factory, caller: str | None = None) -> Registration | None:
         """
         Register ``factory`` under ``name`` in the directory of its file.
+
+        Args:
+            name: Strategy name
+            factory: The factory
+            caller: Normalized real path of the file that makes the call, if known
 
         Returns:
             The registration it replaced (same name, same directory), or None
         """
         origin = _factory_origin(factory)
         directory = os.path.dirname(origin[0]) if origin[0] else None
-        registration = Registration(name, factory, origin, directory)
         entries = self._entries.setdefault(name, [])
         replaced = None
         for index, existing in enumerate(entries):
             if existing.directory == directory:
                 replaced = entries.pop(index)
                 break
-        entries.append(registration)
+        callers = frozenset([caller] if caller else [])
+        if replaced is not None and replaced.factory is factory:
+            callers |= replaced.callers
+        entries.append(Registration(name, factory, origin, directory, callers))
         return replaced
 
     def registrations(self, name: str) -> list[Registration]:
@@ -447,7 +473,12 @@ class StrategyRegistry:
     def __len__(self) -> int:
         return len(self._entries)
 
-    def nearest(self, name: str, directory: str | None) -> Registration | None:
+    def nearest(
+        self,
+        name: str,
+        directory: str | None,
+        accept: Callable[[Registration], bool] | None = None,
+    ) -> Registration | None:
         """
         Return the registration of ``name`` in ``directory`` or the nearest directory
         above it, or None if there is none on that path.
@@ -455,12 +486,15 @@ class StrategyRegistry:
         Args:
             name: Strategy name
             directory: Normalized real path of the test's directory
+            accept: If given, only the registrations it accepts count
         """
         if directory is None:
             return None
         best: Registration | None = None
         for registration in self._entries.get(name, ()):
             if registration.directory is None or not _contains(registration.directory, directory):
+                continue
+            if accept is not None and not accept(registration):
                 continue
             if best is None or len(registration.directory) > len(best.directory or ""):
                 best = registration
@@ -510,7 +544,7 @@ class RegistryView(MutableMapping[str, Factory]):
         return registrations[-1].factory
 
     def __setitem__(self, name: str, factory: Factory) -> None:
-        self._registry.add(name, factory)
+        self._registry.add(name, factory, caller_file(sys._getframe(1)))
 
     def __delitem__(self, name: str) -> None:
         if name not in self._registry:

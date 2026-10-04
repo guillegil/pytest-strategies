@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import warnings
 from collections.abc import Callable
 from typing import Any, TypeVar
@@ -19,7 +20,7 @@ import pytest
 
 from ._export import document
 from ._introspection import PYTEST_FIXTURES as _PYTEST_FIXTURES
-from ._registry import Factory, RegistryView, _describe_factory, registry
+from ._registry import Factory, RegistryView, _describe_factory, caller_file, registry
 from ._runtime import runtime
 from ._warnings import PytestStrategiesWarning
 
@@ -49,7 +50,9 @@ def register(name: str) -> Callable[[_F], _F]:
         raise TypeError(f"register() takes a strategy name, got {name!r}")
 
     def decorate(fn: _F) -> _F:
-        replaced = registry.add(name, fn)
+        # The file of the call, for the name of a factory passed by object
+        # (plugin._factory_name)
+        replaced = registry.add(name, fn, caller_file(sys._getframe(1)))
         if replaced is not None and replaced.origin != registry.registrations(name)[-1].origin:
             message = (
                 f"Strategy '{name}' is registered twice in the same folder: "
@@ -79,6 +82,13 @@ def strategy(name: str | Factory, *, validate_signature: bool = True) -> Callabl
     or, when neither the test nor a fixture it uses asks for one of them, one
     parameter annotated with a dataclass whose fields are those arguments; any
     other parameter is a fixture.
+
+    A test that passes a registered factory gets the same values and IDs as with
+    its name when the registration is in the test's folder or above: the
+    factory's file is there, and the ``register`` call is in that file, the test
+    module, or a strategy file or ``conftest.py`` there. Otherwise the test's
+    values are keyed by the function's qualified name, and are the same in every
+    run.
 
     Usage::
 

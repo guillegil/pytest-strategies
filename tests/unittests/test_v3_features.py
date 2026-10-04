@@ -117,6 +117,54 @@ class TestScopedRegistry:
         del Strategy._registry["v3_view"]
         assert "v3_view" not in registry
 
+    def test_a_registration_keeps_the_files_whose_calls_made_it(self, clean_registry):
+        import os
+
+        def key(path):
+            return os.path.normcase(os.path.realpath(path))
+
+        namespace = {}
+        exec(compile("def f(nsamples): pass", "/virtual/tests/strategies.py", "exec"), namespace)
+        call = "register('v3_callers')(f)"
+        for file in ("/virtual/tests/strategies.py", "/virtual/tests/b/strategies.py", "<string>"):
+            exec(compile(call, file, "exec"), {"register": register, "f": namespace["f"]})
+
+        (registration,) = registry.registrations("v3_callers")
+        # The same function registered again by another file adds that file; code
+        # without a file adds none
+        assert registration.callers == {
+            key("/virtual/tests/strategies.py"),
+            key("/virtual/tests/b/strategies.py"),
+        }
+
+    def test_the_registry_view_records_its_caller(self, clean_registry):
+        import os
+
+        def factory(nsamples):
+            return Parameter(TestArg("x", value=1), nsamples=1)
+
+        Strategy._registry["v3_view_caller"] = factory
+
+        (registration,) = registry.registrations("v3_view_caller")
+        assert registration.callers == {os.path.normcase(os.path.realpath(__file__))}
+
+    def test_nearest_counts_only_the_registrations_it_accepts(self, clean_registry):
+        import os
+
+        top = compile("def f(nsamples): pass", "/virtual/tests/strategies.py", "exec")
+        sub = compile("def f(nsamples): pass", "/virtual/tests/esm/strategies.py", "exec")
+        top_ns, sub_ns = {}, {}
+        exec(top, top_ns)
+        exec(sub, sub_ns)
+        registry.add("v3_accept", top_ns["f"])
+        registry.add("v3_accept", sub_ns["f"])
+        directory = os.path.normcase(os.path.realpath("/virtual/tests/esm"))
+
+        found = registry.nearest("v3_accept", directory, lambda r: r.factory is not sub_ns["f"])
+
+        assert found is not None and found.factory is top_ns["f"]
+        assert registry.nearest("v3_accept", directory, lambda r: False) is None
+
 
 class TestErrorMessages:
     def test_rng_value_error_is_a_value_error(self):

@@ -27,6 +27,7 @@ import sys
 import traceback
 from collections.abc import (
     Callable,
+    Collection,
     Generator,
     Iterable,
     Iterator,
@@ -824,13 +825,7 @@ class PytestStrategyPlugin:
                 directories that are not above the test register it
         """
         if not isinstance(ref, str):
-            # A factory: its registered name keeps the test's values the same as
-            # when the test names it. Otherwise the function's (or the class's)
-            # qualified name: never a repr with a memory address, which would
-            # change the test's random stream from run to run.
-            names = registry.names_of(ref)
-            name = names[0] if names else factory_source(ref)[1] or type(ref).__qualname__
-            return name, ref
+            return self._factory_name(ref, test_path, config), ref
 
         directory = _file_key(test_path.parent)
         if config is not None:
@@ -856,6 +851,62 @@ class PytestStrategyPlugin:
         if candidates:
             raise ValueError(_ambiguous_message(ref, test_path, candidates))
         raise ValueError(strategy_not_found_message(ref, directory, rootpath))
+
+    def _factory_name(
+        self, factory: Callable[..., Any], test_path: Path, config: Config | None
+    ) -> str:
+        """
+        Name a factory that a test passes by object, for messages and the test's
+        random stream.
+
+        The name is one that ``@strategy("name")`` in the test's folder finds the
+        factory under (the nearest registration on the test's path, as for a
+        name), counting only the registrations that every run collecting the test
+        makes before the test's strategy is resolved (``_made_with``): the test
+        then gets the values and IDs of that name in every run, its rerun and
+        ``--lf`` included. Otherwise it is the function's (or the class's)
+        qualified name: never a repr with a memory address, which would change the
+        test's random stream from run to run. So a registration in another
+        folder, or one made because a test module imported another folder's
+        strategy file, does not name it.
+        """
+        directory = _file_key(test_path.parent)
+        chain: set[str] = set()
+        if config is not None:
+            # As for a name: the strategy files of the test's folder and above
+            self._load_directories(config, test_path.parent)
+            chain = {
+                os.path.normcase(folder)
+                for folder in self._directories_up(config, os.path.realpath(test_path.parent))
+            }
+        state = runtime.current
+        loaded = state.loaded_files if state is not None else set()
+        module = _file_key(test_path)
+
+        def depth(registration: Registration) -> int:
+            # The deepest folder whose file's register() call made the registration
+            # in every run, -1 for none. These folders are on the test's path, so
+            # the longest path is the deepest.
+            return max(
+                (
+                    len(os.path.dirname(caller))
+                    for caller in registration.callers
+                    if _made_with(caller, registration, module, directory, chain, loaded)
+                ),
+                default=-1,
+            )
+
+        candidates = []
+        for name in registry.names_of(factory):
+            found = registry.nearest(name, directory, lambda r: depth(r) >= 0)
+            if found is not None and found.factory is factory:
+                candidates.append((-depth(found), name))
+        if candidates:
+            # A factory's registrations are all in the folder of its file. Of its
+            # names, the one registered by a file in the deepest folder wins, then
+            # the first in alphabetical order, whatever order the files ran in.
+            return min(candidates)[1]
+        return factory_source(factory)[1] or type(factory).__qualname__
 
     def _load_directories(self, config: Config, folder: Path) -> None:
         """
@@ -1700,6 +1751,33 @@ def _user_traceback(error: BaseException) -> str:
 def _on_path(registration: Registration, directory: str) -> bool:
     """Return True if a registration is in ``directory`` or a directory above it."""
     return registration.directory is not None and _contains(registration.directory, directory)
+
+
+def _made_with(
+    caller: str,
+    registration: Registration,
+    module: str,
+    directory: str,
+    chain: Collection[str],
+    loaded: Collection[str],
+) -> bool:
+    """
+    Whether every run that collects the test module ``module`` makes the
+    registration with the ``register()`` call of the file ``caller`` before the
+    test's strategy is resolved: a call in the file that defines the factory (the
+    test holds the factory, so that file ran), in the test module, in a
+    ``conftest.py`` in the test's folder ``directory`` or above (pytest loads them
+    first), or in a strategy file that the plugin loads with the test's folders
+    (in ``chain`` and in ``loaded``). A call in another file (another folder's
+    strategy file, another test module, a helper module) runs only in the runs
+    that import that file. All paths are ``_file_key``s.
+    """
+    if caller in (registration.file, module):
+        return True
+    folder = os.path.dirname(caller)
+    if os.path.basename(caller) == "conftest.py":
+        return _contains(folder, directory)
+    return folder in chain and caller in loaded
 
 
 def _inside(registration: Registration, rootpath: str | None) -> bool:
