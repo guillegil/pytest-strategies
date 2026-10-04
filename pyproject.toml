@@ -1,6 +1,6 @@
 [project]
 name = "pytest-strategies"
-version = "3.0.0"
+version = "4.0.0"
 description = "A pytest plugin for constrained-randomized test parametrization with directed testing support"
 authors = [{ name = "Guillermo Gil", email = "guillegirod@gmail.com" }]
 license = "MIT"

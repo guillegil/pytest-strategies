@@ -5,7 +5,7 @@ description: Write, fix and debug pytest tests that use the pytest-strategies pl
 
 # pytest-strategies
 
-Documents pytest-strategies 3.0.0.
+Documents pytest-strategies 4.0.0.
 
 pytest-strategies (import name `pytest_strategy`) parametrizes pytest tests from
 *strategies*: factory functions that return a `Parameter` describing each test
