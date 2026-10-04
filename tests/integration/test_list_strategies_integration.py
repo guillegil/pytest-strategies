@@ -176,6 +176,41 @@ class TestTheListing:
         assert (pytester.path / "tests/a/factory.txt").read_text() == "b1"
         result.stdout.no_fnmatch_line("*boom*")
 
+    @pytest.mark.parametrize("xdist", [False, True], ids=["one_process", "xdist"])
+    def test_a_collected_test_s_factory_that_raises_exits_with_code_2(self, pytester, xdist):
+        """
+        The listing is printed, and the factory's error is a collection error of
+        the test that uses it, as the docs say.
+        """
+        if xdist:
+            pytest.importorskip("xdist")
+        pytester.makeini("[pytest]\n")
+        _write(
+            pytester,
+            {
+                **LISTED_STRATEGIES,
+                "tests/a/test_broken.py": (
+                    "from pytest_strategy import strategy\n\n"
+                    '@strategy("lst_broken")\n'
+                    "def test_broken(x):\n"
+                    "    pass\n"
+                ),
+            },
+        )
+
+        result = pytester.runpytest_subprocess(
+            "-p", "no:cacheprovider", "--list-strategies", *(["-n", "2"] if xdist else [])
+        )
+
+        assert result.ret == pytest.ExitCode.INTERRUPTED
+        result.stdout.fnmatch_lines(["  ✓ lst_broken"])
+        result.stdout.fnmatch_lines(
+            [
+                "In test_broken: Error calling strategy factory 'lst_broken'*RuntimeError: boom",
+                "ERROR tests/a/test_broken.py*",
+            ]
+        )
+
     def test_a_path_after_the_option_is_a_path(self, pytester):
         """
         --list-strategies takes no value: in pytest --list-strategies tests/, tests/

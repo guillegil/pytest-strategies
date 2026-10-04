@@ -95,20 +95,25 @@ def pytest_strategies_context(config: pytest.Config) -> Any:
 
     When an implementation returns an object, the plugin takes its fingerprint,
     a hash of what the object holds (sets sorted, paths inside the rootdir
-    relative to it, a pydantic model's ``Field(exclude=True)`` fields left out),
-    and prints it after the collection (``pytest-strategies: context 976bcfdf``;
-    under pytest-xdist, at the end of the run), at the end of the reproduce line
-    of a failed run, and in ``VectorInfo.context``, so two runs can tell whether
-    they received the same context. Keep volatile values (temporary paths,
-    process IDs, times) out of the object, or exclude them, so that it stays the
-    same from run to run.
+    relative to it, a pydantic model's ``Field(exclude=True)`` fields left out).
+    It prints it after the collection when the collection computed the context
+    (``pytest-strategies: context 976bcfdf``; under pytest-xdist, at the end of
+    the run); a context first computed later, by ``strategies_ctx`` or a
+    fixture's ``get_context()`` call, appears only in the ``-v`` Contexts block.
+    The fingerprint also ends the reproduce line of a failed run whose failed
+    tests' factories received the context, and is in ``VectorInfo.context``, so
+    two runs can tell whether they received the same context. Keep volatile
+    values (temporary paths, process IDs, times) out of the object, or exclude
+    them, so that it stays the same from run to run.
 
     An exception raised by an implementation fails the collection of each module
     whose folder asks it before any other implementation answers, and that uses
-    a factory with ``ctx``, with a message naming the strategy; ``pytest.fail()``
-    is reported as it is, and ``pytest.skip(..., allow_module_level=True)``
-    skips those modules. ``strategies_ctx`` and ``get_context()`` raise it again
-    as it is, so a skip there skips the tests that use them.
+    a factory with ``ctx``, with a message naming the strategy, so the module's
+    other tests do not run either. For a method of a test class, the class fails
+    collection instead, and the module's other tests run. ``pytest.fail()`` is
+    reported as it is, and ``pytest.skip(..., allow_module_level=True)`` skips
+    those modules or classes. ``strategies_ctx`` and ``get_context()`` raise it
+    again as it is, so a skip there skips the tests that use them.
 
     Args:
         config: The pytest config object.

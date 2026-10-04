@@ -62,7 +62,7 @@ from ._registry import (
     test_file_patterns,
 )
 from ._runtime import CtxFixture, runtime
-from ._streams import StreamKey, file_part, seed_part
+from ._streams import StreamKey, file_part, installed_part, seed_part
 from ._vector import VECTOR_KEY, VECTORS_KEY, VectorInfo
 from .rng import RNG, _Stream
 
@@ -300,8 +300,16 @@ class PytestStrategyPlugin:
         So the plugin, not a test module's own ``import``, runs each strategy file
         first, with its own random stream: values a strategy file draws when it is
         imported do not depend on which test modules were collected before.
+
+        The first collector (the session) notes the modules pytest loaded as
+        plugins so far (``SessionState.plugin_files``): a test module's
+        ``pytest_plugins`` loads more during the collection, in the runs that
+        collect it.
         """
-        if isinstance(collector, pytest.Module) and runtime.current is not None:
+        state = runtime.current
+        if state is not None and state.plugin_files is None:
+            state.plugin_files = _plugin_files(collector.config)
+        if isinstance(collector, pytest.Module) and state is not None:
             self._load_directories(collector.config, collector.path.parent)
 
     @pytest.hookimpl(wrapper=True)
@@ -868,18 +876,21 @@ class PytestStrategyPlugin:
         random stream.
 
         The name is one that ``@strategy("name")`` in the test's folder finds the
-        factory under (the nearest registration on the test's path, as for a
-        name), counting only the registrations that every run collecting the test
-        makes before the test's strategy is resolved (``_made_with``): the test
-        then gets the values and IDs of that name in every run, its rerun and
-        ``--lf`` included. Otherwise it is the function's (or the class's)
-        qualified name: never a repr with a memory address, which would change the
-        test's random stream from run to run. So a registration in another
-        folder, or one made because a test module imported another folder's
-        strategy file, does not name it.
+        factory under, as for a name: the nearest registration on the test's
+        path, or else the only one outside the rootdir or in an installed package
+        (a plugin's). Only the registrations that every run collecting the test
+        makes before the test's strategy is resolved count (``_made_with``),
+        those of other factories under the same name too: the test then gets the
+        values and IDs of that name in every run, its rerun and ``--lf``
+        included. Otherwise it is the function's (or the class's) qualified name:
+        never a repr with a memory address, which would change the test's random
+        stream from run to run. So a registration in another folder of the
+        rootdir, or one made because another test module or another folder's
+        strategy file was imported, neither names it nor hides one of its names.
         """
         directory = _file_key(test_path.parent)
         chain: set[str] = set()
+        rootpath = None
         if config is not None:
             # As for a name: the strategy files of the test's folder and above
             self._load_directories(config, test_path.parent)
@@ -887,33 +898,56 @@ class PytestStrategyPlugin:
                 os.path.normcase(folder)
                 for folder in self._directories_up(config, os.path.realpath(test_path.parent))
             }
+            rootpath = _file_key(config.rootpath)
         state = runtime.current
         loaded = state.loaded_files if state is not None else set()
+        plugins = (state.plugin_files if state is not None else None) or frozenset()
         module = _file_key(test_path)
+        # The test holds the factory, so the file that defines it ran
+        source = factory_source(factory)[0]
+        own = _file_key(source) if source else None
 
         def depth(registration: Registration) -> int:
-            # The deepest folder whose file's register() call made the registration
-            # in every run, -1 for none. These folders are on the test's path, so
-            # the longest path is the deepest.
+            # The deepest folder on the test's path whose file's register() call made
+            # the registration in every run (the longest path is the deepest), 0 for
+            # a call elsewhere (a plugin's), -1 for none
             return max(
                 (
-                    len(os.path.dirname(caller))
+                    len(folder) if _contains(folder, directory) else 0
                     for caller in registration.callers
-                    if _made_with(caller, registration, module, directory, chain, loaded)
+                    if _made_with(caller, own, module, directory, chain, loaded, plugins)
+                    for folder in [os.path.dirname(caller)]
                 ),
                 default=-1,
             )
 
         candidates = []
+        outside = []
         for name in registry.names_of(factory):
             found = registry.nearest(name, directory, lambda r: depth(r) >= 0)
-            if found is not None and found.factory is factory:
-                candidates.append((-depth(found), name))
+            if found is not None:
+                if found.factory is factory:
+                    candidates.append((-depth(found), name))
+                continue
+            # No folder on the test's path registers the name: as for a name, the
+            # only registration outside the rootdir, or in an installed package
+            # below it (a virtualenv's site-packages)
+            elsewhere = [
+                r
+                for r in registry.registrations(name)
+                if not _on_path(r, directory)
+                and (not _inside(r, rootpath) or _installed(r))
+                and depth(r) >= 0
+            ]
+            if len(elsewhere) == 1 and elsewhere[0].factory is factory:
+                outside.append(name)
         if candidates:
             # A factory's registrations are all in the folder of its file. Of its
             # names, the one registered by a file in the deepest folder wins, then
             # the first in alphabetical order, whatever order the files ran in.
             return min(candidates)[1]
+        if outside:
+            return min(outside)
         return factory_source(factory)[1] or type(factory).__qualname__
 
     def _load_directories(self, config: Config, folder: Path) -> None:
@@ -1792,29 +1826,55 @@ def _on_path(registration: Registration, directory: str) -> bool:
 
 def _made_with(
     caller: str,
-    registration: Registration,
+    own: str | None,
     module: str,
     directory: str,
     chain: Collection[str],
     loaded: Collection[str],
+    plugins: Collection[str],
 ) -> bool:
     """
-    Whether every run that collects the test module ``module`` makes the
-    registration with the ``register()`` call of the file ``caller`` before the
-    test's strategy is resolved: a call in the file that defines the factory (the
-    test holds the factory, so that file ran), in the test module, in a
+    Whether every run that collects the test module ``module`` makes a
+    registration with the ``register()`` call of the file ``caller`` (the module
+    whose import ran it, ``caller_file``) before the test's strategy is resolved:
+    a call in the file ``own`` that defines the factory the test passes (the test
+    holds the factory, so that file ran), in the test module, in a module pytest
+    loaded as a plugin before the collection (in ``plugins``), in a
     ``conftest.py`` in the test's folder ``directory`` or above (pytest loads them
     first), or in a strategy file that the plugin loads with the test's folders
-    (in ``chain`` and in ``loaded``). A call in another file (another folder's
-    strategy file, another test module, a helper module) runs only in the runs
-    that import that file. All paths are ``_file_key``s.
+    (in ``chain`` and in ``loaded``). A call in another file (another factory's
+    file, another folder's strategy file, another test module, a helper module)
+    runs only in the runs that import that file. All paths are ``_file_key``s.
     """
-    if caller in (registration.file, module):
+    if caller in (own, module) or caller in plugins:
         return True
     folder = os.path.dirname(caller)
     if os.path.basename(caller) == "conftest.py":
         return _contains(folder, directory)
     return folder in chain and caller in loaded
+
+
+def _plugin_files(config: Config) -> frozenset[str]:
+    """
+    Return the ``_file_key``s of the modules registered as plugins with pytest's
+    plugin manager (``-p``, entry points, ``pytest_plugins``), ``conftest.py``
+    files left out.
+    """
+    files = set()
+    for plugin in config.pluginmanager.get_plugins():
+        file = getattr(plugin, "__file__", None)
+        if (
+            isinstance(plugin, ModuleType)
+            and isinstance(file, str)
+            and os.path.basename(file) != "conftest.py"
+        ):
+            files.add(_file_key(file))
+    return frozenset(files)
+
+
+def _installed(registration: Registration) -> bool:
+    """Return True if a registration's file is in a site-packages or dist-packages folder."""
+    return registration.file is not None and installed_part(registration.file) is not None
 
 
 def _inside(registration: Registration, rootpath: str | None) -> bool:

@@ -29,7 +29,10 @@ class StrategyOptions:
     with defaults without changing what an existing factory sees.
 
     Attributes:
-        strategy: The strategy's resolved (registered) name
+        strategy: The name the strategy was resolved under, as in the ``-v``
+            summary: a registered name, or the qualified name of a factory
+            passed by object that no registration names for the test (see
+            ``strategy()``)
         nsamples: The ``--nsamples`` value, ``"auto"``, or 10 without the option
         nsamples_source: Where ``nsamples`` came from: ``"--nsamples"`` or ``"default"``
         mode: The ``--vector-mode`` value

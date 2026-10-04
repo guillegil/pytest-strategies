@@ -53,10 +53,16 @@ def _normalize(filename: str | None) -> str | None:
 
 def caller_file(frame: FrameType | None) -> str | None:
     """
-    Return the normalized real path of the file whose code runs in ``frame`` (the
-    module a ``register()`` call is in), or None for code without a file
-    (``exec``'d text).
+    Return the normalized real path of the module whose top-level code runs the
+    call in ``frame`` (a ``register()`` call): the file of the first frame from
+    ``frame`` up that runs a module's code. A call in a helper function counts for
+    the module whose import called the helper, not for the helper's file. None for
+    code without a file (``exec``'d text). A call that no module's import made (in
+    a hook or a fixture) counts for the module that started the process, such as
+    pytest's ``__main__``.
     """
+    while frame is not None and frame.f_code.co_name != "<module>":
+        frame = frame.f_back
     if frame is None:
         return None
     filename = frame.f_globals.get("__file__") or frame.f_code.co_filename
@@ -410,9 +416,10 @@ class Registration:
     # Normalized real path of the directory of the file that defines the factory,
     # or None when that file is unknown
     directory: str | None
-    # Normalized real paths of the files whose register() calls made it: the
-    # same function registered again under the name in its folder, by another
-    # file, adds that file
+    # Normalized real paths of the files whose register() calls made it, each the
+    # module whose top-level code ran the call (caller_file): the same function
+    # registered again under the name in its folder, by another file, adds that
+    # file
     callers: frozenset[str] = frozenset()
 
     @property

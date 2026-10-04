@@ -48,7 +48,7 @@ from typing import Any
 import pytest
 
 from ._options import constraint_off_item, parse_constraint_off
-from ._repro import path_from, quote, start_args
+from ._repro import EMPTY_PARAMETER_SET_MARK, path_from, quote, start_args
 
 # The cache key of the map
 KEY = "pytest-strategies/failed-seeds"
@@ -214,7 +214,8 @@ def updated(
     """
     Return the map after a run: without the entries whose rows passed under their
     seed and options, and with the rows that failed, as the newest, in the order
-    they failed.
+    they failed. A ``-o empty_parameter_set_mark`` override, which decides no
+    row's values, is not compared (``_deciding``).
 
     Args:
         entries: The map, newest last
@@ -233,8 +234,8 @@ def updated(
         entry = result.get(nodeid)
         if entry is None or entry.seed != seed:
             continue
-        recorded = _units(entry.options)
-        if sorted(recorded) == sorted(_matched(recorded, _units(options), own)):
+        recorded = _deciding(_units(entry.options))
+        if sorted(recorded) == sorted(_matched(recorded, _deciding(_units(options)), own)):
             del result[nodeid]
     for nodeid, row in failed.items():
         new = from_row(row)
@@ -459,6 +460,24 @@ def _units(options: Sequence[str]) -> list[tuple[str, ...]]:
     return units
 
 
+def _deciding(units: Iterable[tuple[str, ...]]) -> list[tuple[str, ...]]:
+    """
+    Return the units that can decide a row's values: all but ``-o
+    empty_parameter_set_mark=...``, which a rerun command carries for the
+    collection of the row's module, and which only decides what a test without
+    rows gives.
+    """
+    return [
+        unit
+        for unit in units
+        if not (
+            len(unit) == 2
+            and unit[0] == "-o"
+            and unit[1].partition("=")[0].strip() == EMPTY_PARAMETER_SET_MARK
+        )
+    ]
+
+
 def _split(options: Sequence[str]) -> tuple[list[tuple[str, ...]], list[tuple[str | None, str]]]:
     """
     Split a command's options into its units without ``--strategy-constraint-off``
@@ -522,6 +541,8 @@ def differences(
     A constraint the rows had turned off counts as off in the run when the run turns
     it off in their strategy or everywhere. The run's own items are not compared:
     which strategies a bare name reaches is known only once the tests are collected.
+    Nor is a ``-o empty_parameter_set_mark`` override, which decides no row's
+    values (``_deciding``).
 
     Args:
         rows: The reused rows' entries, newest last
@@ -533,9 +554,9 @@ def differences(
         where: Write a path relative to the rootdir as the folder pytest was
             started in gives it, for the ``-c`` and ``--rootdir`` named
     """
-    recorded, _ = _split(rows[-1].options)
+    recorded = _deciding(_split(rows[-1].options)[0])
     off = dict.fromkeys(item for row in rows for item in _split(row.options)[1])
-    units = _matched(recorded, _split(current)[0], own)
+    units = _matched(recorded, _deciding(_split(current)[0]), own)
     missing = [
         (strategy, name)
         for strategy, name in off

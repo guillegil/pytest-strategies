@@ -50,8 +50,8 @@ def register(name: str) -> Callable[[_F], _F]:
         raise TypeError(f"register() takes a strategy name, got {name!r}")
 
     def decorate(fn: _F) -> _F:
-        # The file of the call, for the name of a factory passed by object
-        # (plugin._factory_name)
+        # The module whose import made the call, for the name of a factory passed
+        # by object (plugin._factory_name)
         replaced = registry.add(name, fn, caller_file(sys._getframe(1)))
         if replaced is not None and replaced.origin != registry.registrations(name)[-1].origin:
             message = (
@@ -85,10 +85,12 @@ def strategy(name: str | Factory, *, validate_signature: bool = True) -> Callabl
 
     A test that passes a registered factory gets the same values and IDs as with
     its name when the registration is in the test's folder or above: the
-    factory's file is there, and the ``register`` call is in that file, the test
-    module, or a strategy file or ``conftest.py`` there. Otherwise the test's
-    values are keyed by the function's qualified name, and are the same in every
-    run.
+    factory's file is there, and the ``register`` call runs when that file, the
+    test module, or a strategy file or ``conftest.py`` there is imported. So does
+    a factory of an installed package or a plugin registered by its own file or a
+    plugin module, when no folder on the test's path registers the name.
+    Otherwise the test's values are keyed by the function's qualified name, and
+    are the same in every run.
 
     Usage::
 

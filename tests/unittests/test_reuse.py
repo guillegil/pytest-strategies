@@ -227,6 +227,21 @@ class TestUpdated:
 
         assert updated(before, seed, {NODE_A: options}, {}) == before
 
+    @pytest.mark.parametrize(
+        ("recorded", "options"),
+        [
+            (("-o", "empty_parameter_set_mark=xfail"), []),
+            ((), ["-o", "empty_parameter_set_mark=skip"]),
+            (("-o", "empty_parameter_set_mark=xfail"), ["-o", "empty_parameter_set_mark=skip"]),
+        ],
+        ids=["recorded_only", "given_by_the_run_only", "another_mark"],
+    )
+    def test_the_empty_parameter_set_mark_does_not_count(self, recorded, options):
+        # It decides what a test without rows gives, not a row's values
+        before = {NODE_A: Entry(1, ("--nsamples=13", *recorded))}
+
+        assert updated(before, 1, {NODE_A: ["--nsamples=13", *options]}, {}) == {}
+
     def test_a_row_recorded_with_the_ini_file_and_rootdir_the_run_found_is_removed(self):
         # Recorded with -c ci/pytest.ini --rootdir=ci, passed in a run from ci,
         # where pytest finds both
@@ -644,6 +659,19 @@ class TestDifferences:
 
     def test_the_recorded_options_the_run_lacks(self):
         assert differences(self.rows(["--nsamples=13"]), [], ()) == "with --nsamples=13"
+
+    @pytest.mark.parametrize(
+        ("recorded", "current"),
+        [
+            (["-o", "empty_parameter_set_mark=xfail"], []),
+            ([], ["-o", "empty_parameter_set_mark=skip"]),
+        ],
+        ids=["recorded_only", "given_by_the_run_only"],
+    )
+    def test_the_empty_parameter_set_mark_is_not_named(self, recorded, current):
+        rows = self.rows(["--nsamples=13", *recorded])
+
+        assert differences(rows, ["--nsamples=13", *current], ()) is None
 
     def test_the_run_s_options_that_were_not_recorded(self):
         assert differences(self.rows([]), ["--vector-mode=test"], ()) == (

@@ -976,8 +976,10 @@ class Parameter:
                 A vector gives one value per argument: a tuple or list in declaration
                 order, a dict of argument names to values in any order, or a
                 namedtuple whose fields are the argument names. A
-                pytest.param(*values, marks=...) of one of these keeps its marks on its
-                row; it cannot have an id=, because the vector's name is its test ID.
+                pytest.param(..., marks=...) keeps its marks on its row; it takes the
+                values spread, in declaration order (pytest.param(0, 1, marks=...)),
+                or one dict, and a tuple, list or namedtuple inside it is one value.
+                It cannot have an id=, because the vector's name is its test ID.
                 Each is stored as a Vector; a dict value for a one-argument strategy is
                 written ({"a": 1},) or {"cfg": {"a": 1}}, and in a pytest.param only
                 pytest.param({"cfg": {"a": 1}}, marks=...).
@@ -1337,7 +1339,8 @@ class Parameter:
             values: The vector, in any form directed_vectors takes: one value per
                 argument as a tuple or list, a dict of argument names to values, a
                 namedtuple with the argument names as fields, or a
-                pytest.param(...) of one of these
+                pytest.param(..., marks=...) with the values spread or one dict (a
+                tuple, list or namedtuple inside it is one value)
 
         Raises:
             RNGValueError: If the name is not a non-empty str, or the vector does
@@ -1652,8 +1655,9 @@ class Parameter:
 
         Each random row draws each argument from a stream of its own, keyed by the
         row and the argument's name: the first n rows are the same for any larger n,
-        and an argument's values do not change when another argument or a
-        constraint that accepts the row is added.
+        and an argument's values do not change when another argument is added, in
+        the rows the constraints accept or reject as before, or when a constraint
+        that accepts the row is added.
 
         The arguments after n are keyword-only. The plugin does not call this
         method: it generates a test's rows with the same code, so a subclass that

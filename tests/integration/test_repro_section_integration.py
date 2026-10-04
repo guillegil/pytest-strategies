@@ -785,9 +785,18 @@ def strat_b():
         )
         nodeid = r"test_dma.py::test_phase[directed-\u03b8\u2192max]"
         command = f"pytest {quote(nodeid)} --rng-seed={SEED}"
+        section = [
+            "strategy  \u7b56\u7565 (strategies.py:4)",
+            "vector    directed-\u03b8\u2192max (directed vector '\u03b8\u2192max', #0)",
+            "values    r='1k\u03a9'",
+            "          deg=360",
+            f"seed      {SEED}",
+            f"rerun     {command}",
+        ]
 
         done = subprocess.run(
             [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", f"--rng-seed={SEED}"]
+            + ["--junitxml=report.xml"]
             + (["-n", "2"] if xdist else []),
             cwd=pytester.path,
             capture_output=True,
@@ -808,21 +817,12 @@ def strat_b():
             ]
         ], "\n".join(lines)
         assert failed_rows(lines) == [command + r"  # \u7b56\u7565 directed \u03b8\u2192max"]
+        # The JUnit XML report, written in UTF-8, keeps the characters: the plugin
+        # escapes the report after the other plugins read it
+        junit = pytester.path / "report.xml"
+        assert error_section(junit, nodeid.partition("::")[2]) == [section]
         # Run as printed, on a terminal that writes every character
-        assert_reruns(
-            command,
-            pytester.path,
-            pytester.path,
-            nodeid,
-            [
-                "strategy  \u7b56\u7565 (strategies.py:4)",
-                "vector    directed-\u03b8\u2192max (directed vector '\u03b8\u2192max', #0)",
-                "values    r='1k\u03a9'",
-                "          deg=360",
-                f"seed      {SEED}",
-                f"rerun     {command}",
-            ],
-        )
+        assert_reruns(command, pytester.path, pytester.path, nodeid, section)
 
 
 # A strategy whose name, directed vector name and value hold characters cp1252 has

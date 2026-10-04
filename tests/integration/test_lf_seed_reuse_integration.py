@@ -811,6 +811,31 @@ class TestTheMap:
         result.assert_outcomes(passed=2, deselected=2)
         assert list(failed_seeds(pytester)) == nodeids("tests/a")
 
+    @pytest.mark.parametrize(
+        ("recorded", "given"),
+        [
+            (["-o", "empty_parameter_set_mark=xfail"], []),
+            ([], ["-o", "empty_parameter_set_mark=skip"]),
+        ],
+        ids=["recorded_only", "given_by_the_run_only"],
+    )
+    def test_the_empty_parameter_set_mark_does_not_keep_a_row(self, pytester, recorded, given):
+        # It decides what a test without rows gives, not a row's values: the fixed
+        # rows leave the map as they leave pytest's last-failed set, and the
+        # command of the rows set aside keeps it
+        project(pytester, folders=("tests/a", "tests/b"))
+        run(pytester, f"--rng-seed={S1}", "tests/a", *recorded)
+        run(pytester, f"--rng-seed={S2}", "tests/b", *recorded)
+        (pytester.path / "tests" / "b" / "test_lfr_b.py").write_text(module(()), encoding="utf-8")
+
+        result = run(pytester, "--lf", *given)
+
+        assert header(result) == [f"pytest-strategies: RNG seed = {S2}", REUSED.format("--lf")]
+        result.assert_outcomes(passed=2, deselected=2)
+        assert list(failed_seeds(pytester)) == nodeids("tests/a")
+        assert lastfailed(pytester) == set(nodeids("tests/a"))
+        assert printed(result) == [["--lf", f"--rng-seed={S1}", *recorded, "tests/a/test_lfr_a.py"]]
+
     def test_under_xdist_the_controller_removes_it(self, pytester):
         pytest.importorskip("xdist")
         project(pytester)

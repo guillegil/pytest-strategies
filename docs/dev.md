@@ -538,13 +538,20 @@ def test_coordinates(x, y):
    factory passed directly is used as it is, under a name that keys the test's
    streams (`_factory_name()`): a name it is registered under that
    `registry.nearest()` finds for the test's folder, counting only the
-   registrations that every run collecting the test makes first
-   (`_made_with()`: a `register` call in the factory's own file, in the test
-   module, or in a `conftest.py` or a strategy file the plugin loads with the
-   test's folders; `Registration.callers` holds the files of the calls). Of
-   several, the one registered in the deepest folder wins, then the first in
-   alphabetical order. Without one, the function's qualified name. So the
-   name does not depend on the other strategy files a run imported.
+   registrations that every run collecting the test makes first, those of
+   other factories under the same name too (`_made_with()`: a `register` call
+   in the passed factory's own file, in the test module, in a module pytest
+   loaded as a plugin before the collection, or in a `conftest.py` or a
+   strategy file the plugin loads with the test's folders). Of several, the
+   one registered in the deepest folder wins, then the first in alphabetical
+   order. Without one, a name whose only such registration outside the
+   rootdir, or in an installed package below it, is the factory's, as for a
+   name; without that either, the function's qualified name.
+   `Registration.callers` holds the files of the calls: each is the module
+   whose top-level code ran the call (`caller_file()`), so a helper
+   function's call counts for the module whose import called it, and a call
+   in a hook or a fixture for none of these files. So the name does not
+   depend on the other strategy files or test modules a run imported.
 4. `build_parametrization()` calls the factory once through
    `_factory.call_factory()`, on the factory's own stream (see
    [Reproducibility](#reproducibility)). The rows draw from streams keyed by
@@ -1346,7 +1353,9 @@ agrees with the run (`_matched()`, also in the removal check of `updated()`; a
 `-c` the run gives and the rows were recorded without still differs, as the ini
 file the recording run found is not known, while a `--rootdir` the run gives
 agrees with rows recorded without it, as they were recorded under the rootdir
-whose cache holds them). The makereport wrapper takes a passing row's options
+whose cache holds them). Both leave a `-o empty_parameter_set_mark` unit out of
+the comparison (`_deciding()`): it decides no row's values, and the commands
+keep it. The makereport wrapper takes a passing row's options
 (`generation_options(..., start=rootpath)`) from a passing call report, only for
 the items in `SessionState.recorded`, the node IDs of the map's entries under the
 run's seed, and keeps them in the item's stash until the teardown report: they

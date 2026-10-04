@@ -90,8 +90,9 @@ _KEYWORD_NAME = re.compile(r"[\w:+\-.\[\]\\/]+")
 _KEYWORD_OPERATORS = frozenset({"and", "or", "not"})
 
 # pytest's ini option that decides what an empty parameter set gives, such as the one
-# --vector-name gives a strategy without that vector
-_EMPTY_PARAMETER_SET_MARK = "empty_parameter_set_mark"
+# --vector-name gives a strategy without that vector: a rerun command carries its
+# override, which decides no row's values (_reuse compares the others)
+EMPTY_PARAMETER_SET_MARK = "empty_parameter_set_mark"
 
 # The arguments cmd.exe and PowerShell leave as they are (no ",", which PowerShell
 # reads as an array, no "%", "@", "&", quotes or brackets)
@@ -244,7 +245,7 @@ def generation_options(
     overrides: dict[str, str] = {}
     for override in getattr(config.option, "override_ini", None) or ():
         name = override.partition("=")[0].strip()
-        if name.startswith("strategies_") or name == _EMPTY_PARAMETER_SET_MARK:
+        if name.startswith("strategies_") or name == EMPTY_PARAMETER_SET_MARK:
             overrides.pop(name, None)
             overrides[name] = override
     for override in overrides.values():

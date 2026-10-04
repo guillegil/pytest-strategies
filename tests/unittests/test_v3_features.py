@@ -143,10 +143,32 @@ class TestScopedRegistry:
         def factory(nsamples):
             return Parameter(TestArg("x", value=1), nsamples=1)
 
-        Strategy._registry["v3_view_caller"] = factory
+        call = compile("view['v3_view_caller'] = f", "/virtual/tests/conftest.py", "exec")
+        exec(call, {"view": Strategy._registry, "f": factory})
 
         (registration,) = registry.registrations("v3_view_caller")
-        assert registration.callers == {os.path.normcase(os.path.realpath(__file__))}
+        assert registration.callers == {
+            os.path.normcase(os.path.realpath("/virtual/tests/conftest.py"))
+        }
+
+    def test_a_call_in_a_helper_counts_for_the_module_whose_import_ran_it(self, clean_registry):
+        import os
+
+        def key(path):
+            return os.path.normcase(os.path.realpath(path))
+
+        helper = {"register": register}
+        source = "def f(nsamples): pass\n\ndef register_as(name):\n    return register(name)(f)\n"
+        exec(compile(source, "/virtual/tests/common.py", "exec"), helper)
+        exec(compile("register_as('v3_helper')", "/virtual/tests/a/test_a.py", "exec"), helper)
+        # Called from this test function, not by a module's import: the module that
+        # started the process, never the helper's file or this file
+        helper["register_as"]("v3_helper_late")
+
+        (registration,) = registry.registrations("v3_helper")
+        assert registration.callers == {key("/virtual/tests/a/test_a.py")}
+        (late,) = registry.registrations("v3_helper_late")
+        assert not late.callers & {key("/virtual/tests/common.py"), key(__file__)}
 
     def test_nearest_counts_only_the_registrations_it_accepts(self, clean_registry):
         import os

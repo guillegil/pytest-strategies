@@ -258,6 +258,55 @@ def test_a_hook_error_or_skip_takes_the_whole_module(pytester, hook, outcomes):
     assert "test_plain.py::test_plain[rand-0] PASSED" in result.stdout.str()
 
 
+TEST_CLASS = """
+from pytest_strategy import Strategy
+
+class TestBench:
+    @Strategy.strategy("esm_rw")
+    def test_write_read(self, channel, wdata):
+        pass
+
+    def test_in_the_class(self):
+        pass
+
+@Strategy.strategy("plain")
+def test_plain_here(x):
+    pass
+
+def test_without_strategy():
+    pass
+"""
+
+
+@pytest.mark.parametrize(
+    "hook, outcomes",
+    [
+        ("    raise RuntimeError('no bench')\n", {"passed": 21, "errors": 1}),
+        (
+            "    import pytest\n    pytest.skip('no bench', allow_module_level=True)\n",
+            {"passed": 21, "skipped": 1},
+        ),
+    ],
+    ids=["raise", "skip"],
+)
+def test_in_a_test_class_a_hook_error_or_skip_takes_the_class(pytester, hook, outcomes):
+    """
+    pytest generates a method's tests when it collects the class: the error or the
+    skip is the class's, and the module's other tests run, as the docs say.
+    """
+    pytester.makeconftest(f"def pytest_strategies_context(config):\n{hook}")
+    pytester.makepyfile(esm_strategies=STRATEGIES, test_mixed=TEST_CLASS, test_plain=TEST_PLAIN)
+
+    args = ("-p", "no:cacheprovider", "--rng-seed=1", "--continue-on-collection-errors")
+    result = pytester.runpytest(*args, "-v")
+
+    result.assert_outcomes(**outcomes)
+    result.stdout.no_fnmatch_line("*test_mixed.py::TestBench::*")
+    output = result.stdout.str()
+    assert "test_mixed.py::test_plain_here[rand-0] PASSED" in output
+    assert "test_mixed.py::test_without_strategy PASSED" in output
+
+
 def test_random_draws_in_the_hook_do_not_change_the_vectors(project, values_dump):
     project.makeconftest("""
 from pytest_strategy import RNG
