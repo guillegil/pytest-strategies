@@ -403,10 +403,16 @@ class TestPackagingMetadata:
             assert f"\n## [{version}] - " in _read("CHANGELOG.md")
 
     def test_readme_installs_the_final_version(self, pyproject):
-        """The README's install command pins the release tag, a fourth copy of the version."""
+        """
+        The README installs from PyPI (since 4.1.1); an install command pinned to a
+        release tag is a fourth copy of the version, so it must match.
+        """
         version = pyproject["project"]["version"]
-        pins = re.findall(r"pytest-strategies\.git@v([^\s\"'`]+)", _read("README.md"))
-        assert pins, "README.md has no install command pinned to a release tag"
+        readme = _read("README.md")
+        assert re.search(
+            r"^pip install pytest-strategies$", readme, re.M
+        ), "README.md has no `pip install pytest-strategies` command"
+        pins = re.findall(r"pytest-strategies\.git@v([^\s\"'`]+)", readme)
         if re.fullmatch(r"\d+\.\d+\.\d+", version):
             assert pins == [version] * len(pins)
 
@@ -459,7 +465,11 @@ class TestPackagingMetadata:
         # setuptools rejects a license classifier next to an SPDX license expression
         assert not [c for c in project["classifiers"] if c.startswith("License ::")]
         assert _read("LICENSE").startswith("MIT License\n")
-        assert "MIT License. See [LICENSE](LICENSE)" in _read("README.md")
+        # An absolute link, so it works on the PyPI page too
+        assert (
+            "MIT License. See [LICENSE](https://github.com/guillegil/pytest-strategies/blob/main/LICENSE)"
+            in _read("README.md")
+        )
         assert "MIT License. See [LICENSE](../LICENSE)" in _read("docs/dev.md")
 
 

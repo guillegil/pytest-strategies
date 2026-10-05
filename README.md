@@ -32,10 +32,10 @@
 
 ## 📦 Installation
 
-`pytest-strategies` needs Python 3.11 or later and pytest 8.4.2 or later. It is not published on PyPI yet. Install a release from GitHub:
+`pytest-strategies` needs Python 3.11 or later and pytest 8.4.2 or later. Install it from PyPI:
 
 ```bash
-pip install "pytest-strategies @ git+https://github.com/guillegil/pytest-strategies.git@v4.1.0"
+pip install pytest-strategies
 ```
 
 or from a local clone with `pip install -e .`.
@@ -644,7 +644,7 @@ For a `tests/dma/strategies.py` that registers `burst` with two arguments, a dir
 {
   "schema": 1,
   "kind": "strategies",
-  "generator": {"name": "pytest-strategies", "version": "4.1.0"},
+  "generator": {"name": "pytest-strategies", "version": "4.1.1"},
   "seed": 1,
   "nsamples": 10,
   "strategies": [
@@ -1011,7 +1011,7 @@ no temporary paths, process IDs, times, unseeded random values or lists built fr
 
 ## 🧭 Upgrading to 4.0
 
-4.0.0 changes test IDs once and random values once more, and removes what 3.0 deprecated. The [CHANGELOG](CHANGELOG.md)'s 4.0.0 section starts with "Migrating from 3.x", a checklist with what you see for each change and what to do. In short:
+4.0.0 changes test IDs once and random values once more, and removes what 3.0 deprecated. The [CHANGELOG](https://github.com/guillegil/pytest-strategies/blob/main/CHANGELOG.md)'s 4.0.0 section starts with "Migrating from 3.x", a checklist with what you see for each change and what to do. In short:
 
 - **Test IDs** name the rows (`test_write[rand-3]`) instead of showing their values. Update `-k` expressions, `--deselect` lists and anything else that names value IDs, or keep the 3.0 IDs for a while with `strategies_ids = values`.
 - **Random values.** For the same seed, 4.0.0 gives random rows, and the values that factories, strategy files and the context hook draw themselves, other values than 3.x, so a seed recorded with 3.x does not reproduce that run's random rows. Directed and test vectors and `Series` values are the same, unless a factory draws them.
@@ -1025,4 +1025,4 @@ no temporary paths, process IDs, times, unseeded random values or lists built fr
 
 ## 📝 License
 
-MIT License. See [LICENSE](LICENSE) for details.
+MIT License. See [LICENSE](https://github.com/guillegil/pytest-strategies/blob/main/LICENSE) for details.

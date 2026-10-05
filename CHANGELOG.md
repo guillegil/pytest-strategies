@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.1.1] - 2026-10-05
+
+4.1.1 is the first release on PyPI: `pip install pytest-strategies`. The code is the same as 4.1.0.
+
+### Changed
+
+- The release workflow publishes each release to PyPI as well as to GitHub Releases, through PyPI trusted publishing.
+- The README installs from PyPI, and its links to the CHANGELOG and the license point at GitHub, so they work on the PyPI page.
+
 ## [4.1.0] - 2026-10-04
 
 4.1.0 adds `Parameter.extend()`, to build a strategy on another, and makes failure reports short by default. It removes nothing, and a seed recorded with 4.0.0 gives the same rows.
@@ -496,7 +505,8 @@ These emit a `DeprecationWarning` that points at your code, keep working in 3.x,
 - Fixed `AttributeError: 'Parameter' object has no attribute 'generate_samples'` by renaming method to `generate_vectors`.
 - Improved error handling in `Strategy` decorator.
 
-[Unreleased]: https://github.com/guillegil/pytest-strategies/compare/v4.1.0...HEAD
+[Unreleased]: https://github.com/guillegil/pytest-strategies/compare/v4.1.1...HEAD
+[4.1.1]: https://github.com/guillegil/pytest-strategies/compare/v4.1.0...v4.1.1
 [4.1.0]: https://github.com/guillegil/pytest-strategies/compare/v4.0.0...v4.1.0
 [4.0.0]: https://github.com/guillegil/pytest-strategies/compare/v3.0.0...v4.0.0
 [3.0.0]: https://github.com/guillegil/pytest-strategies/compare/v2.0.0...v3.0.0
