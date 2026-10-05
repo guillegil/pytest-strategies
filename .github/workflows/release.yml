@@ -1,7 +1,9 @@
 name: Release
 
 # Publishes a GitHub Release with the sdist and wheel when a version tag is pushed
-# (git tag -a v2.0.0 -m "pytest-strategies 2.0.0" && git push origin v2.0.0).
+# (git tag -a v2.0.0 -m "pytest-strategies 2.0.0" && git push origin v2.0.0),
+# then uploads the same files to PyPI through trusted publishing (no API token:
+# PyPI trusts this workflow file in the `pypi` environment of this repository).
 # A manual run creates the tag on the selected branch first.
 on:
   push:
@@ -58,6 +60,13 @@ jobs:
           python -m build
           python -m twine check --strict dist/*
 
+      - name: Keep the files for the PyPI job
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
       - name: Test the wheel
         run: |
           python -m venv /tmp/wheel
@@ -88,3 +97,21 @@ jobs:
           --verify-tag
           --title "pytest-strategies $VERSION"
           --notes-file notes.md
+
+  pypi:
+    name: PyPI
+    needs: release
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/pytest-strategies/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
