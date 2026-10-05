@@ -5,7 +5,7 @@ description: Write, fix and debug pytest tests that use the pytest-strategies pl
 
 # pytest-strategies
 
-Documents pytest-strategies 4.1.1.
+Documents pytest-strategies 4.1.2.
 
 pytest-strategies (import name `pytest_strategy`) parametrizes pytest tests from
 *strategies*: factories that return a `Parameter` describing each test argument (a
@@ -153,6 +153,42 @@ or empty choices raise `RNGValueError` when the type is built):
   row (`[skipped]`) instead of a collection error.
 - Above 100,000 exhaustive rows collection fails before generating; raise it with
   `Parameter(max_exhaustive=...)` or the `strategies_max_exhaustive` ini option.
+
+## Designing a strategy
+
+Write a strategy from the specification of the code under test, not from its
+implementation, in this order:
+
+1. **The test's check.** Random rows need a check that holds for every row: a
+   reference model, a round trip, an invariant (`read(write(x)) == x`, a count that
+   is preserved). A check that only holds for known values makes random rows useless.
+2. **Domains.** Each `TestArg`'s range is exactly its legal domain (bounds are
+   inclusive). A rule on one argument is a `predicate=`; only a rule linking
+   arguments is a constraint. Illegal inputs go in their own strategy whose test
+   expects the error.
+3. **Directed vectors** for what random draws rarely hit: each argument's minimum and
+   maximum; both sides of every internal boundary (a page, a FIFO depth, a power of
+   two); zero, one and empty; the largest legal combination. Add one per fixed bug,
+   named `bug_<id>`, with the bug's exact values.
+4. **The random distribution.** A uniform `RNGInteger(0, 0xFFFF)` hits a given value
+   once in 65,536 draws. Weight the edges: `RNGWeightedInteger({(0, 3): 0.2,
+   (4, 0xFFFB): 0.6, (0xFFFC, 0xFFFF): 0.2})` (inclusive ranges; weights are
+   relative). `RNGEnum(weights=)` should give every member a weight above zero;
+   `RNGChoice` is uniform (repeat a value in its list to favour it).
+5. **Series, RNGSequence or random.** Use `Series` for a small set where every value
+   must run (widths, modes); `RNGSequence` for the same set in random order;
+   random types for large domains. Under `--nsamples=auto` the row count is the
+   product of the sequence lengths; keep it small.
+6. **Rejections.** Constraints should drop few rows. If the `-v` Strategy Summary
+   shows one rejecting most draws, narrow the ranges or split the strategy (`dma_aligned`,
+   `dma_unaligned`) rather than raising `max_retries`.
+7. **Size.** Keep `nsamples` small (10 to 25) so every commit runs quickly, and run
+   more where time allows (`--nsamples=500` nightly). An integer `--nsamples`
+   overrides each strategy's own.
+8. **Scope and names.** One strategy per behavior, with variants made by `extend()`.
+   Names appear in IDs, the failure summary and `--strategy-constraint-off`, so name
+   the strategy for what it drives (`dma_burst`), each vector for its case
+   (`page_end`) and each constraint for its rule (`no_4k_cross`).
 
 ## Reusing a strategy
 
