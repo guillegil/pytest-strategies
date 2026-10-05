@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.1.2] - 2026-10-05
+
+4.1.2 changes only the agent skill; the code is the same as 4.1.1.
+
+### Added
+
+- The skill's new "Designing a strategy" section: the check every row must pass, domains as ranges, which directed vectors to write, weighting random draws toward the edges, choosing `Series`, `RNGSequence` or random types, keeping rejections low, sample counts per commit and nightly, and naming. Run `pytest-strategies skill install` to update an installed copy.
+
 ## [4.1.1] - 2026-10-05
 
 4.1.1 is the first release on PyPI: `pip install pytest-strategies`. The code is the same as 4.1.0.
@@ -505,7 +513,8 @@ These emit a `DeprecationWarning` that points at your code, keep working in 3.x,
 - Fixed `AttributeError: 'Parameter' object has no attribute 'generate_samples'` by renaming method to `generate_vectors`.
 - Improved error handling in `Strategy` decorator.
 
-[Unreleased]: https://github.com/guillegil/pytest-strategies/compare/v4.1.1...HEAD
+[Unreleased]: https://github.com/guillegil/pytest-strategies/compare/v4.1.2...HEAD
+[4.1.2]: https://github.com/guillegil/pytest-strategies/compare/v4.1.1...v4.1.2
 [4.1.1]: https://github.com/guillegil/pytest-strategies/compare/v4.1.0...v4.1.1
 [4.1.0]: https://github.com/guillegil/pytest-strategies/compare/v4.0.0...v4.1.0
 [4.0.0]: https://github.com/guillegil/pytest-strategies/compare/v3.0.0...v4.0.0

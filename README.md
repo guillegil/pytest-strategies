@@ -644,7 +644,7 @@ For a `tests/dma/strategies.py` that registers `burst` with two arguments, a dir
 {
   "schema": 1,
   "kind": "strategies",
-  "generator": {"name": "pytest-strategies", "version": "4.1.1"},
+  "generator": {"name": "pytest-strategies", "version": "4.1.2"},
   "seed": 1,
   "nsamples": 10,
   "strategies": [
