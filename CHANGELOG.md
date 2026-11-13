@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.0] - 2026-11-13
+
+4.2.0 lets a test pass arguments to its strategy's factory. It removes nothing, and a seed recorded with 4.1 gives the same rows.
+
+### Added
+
+- `@strategy(name, **arguments)` passes every keyword other than `validate_signature` to the factory by keyword, after the inputs it declares: `@strategy("rw", device="esm")` calls `rw(..., device="esm")`, so one factory serves several tests instead of one registered strategy per variant. The names are checked against the factory's signature at collection, with a message that names the factory and suggests the closest parameter; the plugin's inputs and reserved names cannot be passed. A factory parameter without a default no longer fails collection when the test passes it, and the error for one that the test does not pass suggests `@strategy(..., name=...)`. The arguments do not change the random streams. `pytest.mark.strategy("rw", device="esm")` and a factory passed by object take them too. See "Arguments from the test" in the README.
+
 ## [4.1.2] - 2026-10-05
 
 4.1.2 changes only the agent skill; the code is the same as 4.1.1.
@@ -513,7 +521,8 @@ These emit a `DeprecationWarning` that points at your code, keep working in 3.x,
 - Fixed `AttributeError: 'Parameter' object has no attribute 'generate_samples'` by renaming method to `generate_vectors`.
 - Improved error handling in `Strategy` decorator.
 
-[Unreleased]: https://github.com/guillegil/pytest-strategies/compare/v4.1.2...HEAD
+[Unreleased]: https://github.com/guillegil/pytest-strategies/compare/v4.2.0...HEAD
+[4.2.0]: https://github.com/guillegil/pytest-strategies/compare/v4.1.2...v4.2.0
 [4.1.2]: https://github.com/guillegil/pytest-strategies/compare/v4.1.1...v4.1.2
 [4.1.1]: https://github.com/guillegil/pytest-strategies/compare/v4.1.0...v4.1.1
 [4.1.0]: https://github.com/guillegil/pytest-strategies/compare/v4.0.0...v4.1.0

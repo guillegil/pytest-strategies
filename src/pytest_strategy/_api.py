@@ -66,7 +66,9 @@ def register(name: str) -> Callable[[_F], _F]:
     return decorate
 
 
-def strategy(name: str | Factory, *, validate_signature: bool = True) -> Callable[[_F], _F]:
+def strategy(
+    name: str | Factory, *, validate_signature: bool = True, **arguments: Any
+) -> Callable[[_F], _F]:
     """
     Parametrize a test with a strategy.
 
@@ -76,6 +78,13 @@ def strategy(name: str | Factory, *, validate_signature: bool = True) -> Callabl
         validate_signature: Check that the test, or a fixture it uses, takes the
             strategy's arguments (keyword-only). It does not change whether the test
             receives the row as a dataclass.
+        **arguments: Passed to the factory by keyword, after the inputs the
+            plugin passes (``ctx``, ``rng``, ...), so one factory serves several
+            tests: ``@strategy("rw", device="esm")`` calls ``rw(..., device="esm")``.
+            Each name must be a parameter of the factory that takes a keyword (or
+            the factory takes ``**kwargs``), and not one of the plugin's inputs or
+            reserved names. The random streams do not depend on them: the rows
+            are keyed by the seed, the test and the strategy name, as without them.
 
     The strategy is resolved when pytest collects the test, and its factory must
     return a :class:`Parameter`. The test takes the strategy's arguments by name,
@@ -107,11 +116,15 @@ def strategy(name: str | Factory, *, validate_signature: bool = True) -> Callabl
         @strategy(my_strategy)
         def test_y(x):
             ...
+
+        @strategy("channels", device="esm")
+        def test_z(channel):
+            ...
     """
     if not isinstance(name, str) and not callable(name):
         raise TypeError(f"strategy() takes a strategy name or a factory, got {name!r}")
     # with_args: a callable given as the only argument must be stored, not decorated
-    mark = pytest.mark.strategy.with_args(name, validate_signature=validate_signature)
+    mark = pytest.mark.strategy.with_args(name, validate_signature=validate_signature, **arguments)
 
     def decorate(test_fn: _F) -> _F:
         marked: _F = mark(test_fn)

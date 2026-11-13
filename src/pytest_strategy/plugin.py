@@ -356,7 +356,7 @@ class PytestStrategyPlugin:
                 continue
             error: str | None = None
             try:
-                ref, validate = _marker_arguments(mark)
+                ref, validate, arguments = _marker_arguments(mark)
                 name, factory = self.resolve(ref, metafunc.definition.path, metafunc.config)
                 parametrization = build_parametrization(
                     name,
@@ -365,6 +365,7 @@ class PytestStrategyPlugin:
                     config=metafunc.config,
                     pytest_fixtures=Strategy.PYTEST_FIXTURES,
                     validate=validate,
+                    arguments=arguments,
                     fixturenames=metafunc.fixturenames,
                     test_key=metafunc.definition.nodeid,
                     context=runtime.test_context(metafunc.definition),
@@ -1721,8 +1722,11 @@ class PytestStrategyPlugin:
             return f"pytest_strategies_discovered.{file_path.stem}_{unique}"
 
 
-def _marker_arguments(mark: pytest.Mark) -> tuple[Any, bool]:
-    """Return the strategy reference and the validate_signature flag of a ``strategy`` marker."""
+def _marker_arguments(mark: pytest.Mark) -> tuple[Any, bool, dict[str, Any]]:
+    """
+    Return the strategy reference, the validate_signature flag and the factory's
+    arguments (the other keywords) of a ``strategy`` marker.
+    """
     args = list(mark.args)
     kwargs = dict(mark.kwargs)
     if args:
@@ -1734,12 +1738,12 @@ def _marker_arguments(mark: pytest.Mark) -> tuple[Any, bool]:
             "the strategy marker needs a strategy name or factory, e.g. @strategy('name')"
         )
     validate = kwargs.pop("validate_signature", True)
-    if args or kwargs or not (isinstance(ref, str) or callable(ref)):
+    if args or not (isinstance(ref, str) or callable(ref)):
         raise ValueError(
             f"invalid strategy marker {mark.args!r} {mark.kwargs!r}; use "
-            "@strategy(name_or_factory, *, validate_signature=True)"
+            "@strategy(name_or_factory, *, validate_signature=True, **arguments)"
         )
-    return ref, bool(validate)
+    return ref, bool(validate), kwargs
 
 
 def _user_traceback(error: BaseException) -> str:

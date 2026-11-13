@@ -56,7 +56,7 @@ PytestStrategiesWarning` keeps working for old code). Use
 ```python
 def register(name: str) -> Callable[[F], F]: ...
 def strategy(
-    name: str | Callable[..., Parameter], *, validate_signature: bool = True
+    name: str | Callable[..., Parameter], *, validate_signature: bool = True, **arguments: Any
 ) -> Callable[[F], F]: ...
 def export_strategies(*, format: str = "json") -> str: ...
 ```
@@ -85,6 +85,21 @@ def export_strategies(*, format: str = "json") -> str: ...
   missing name or a signature mismatch is reported at collection.
 - `validate_signature=False` skips the check that the test takes every argument name.
   It is keyword-only: `@strategy("name", False)` raises `TypeError`.
+- Any other keyword is passed to the factory by keyword, with the inputs (4.2):
+  `@strategy("rw", device="esm")` calls `rw(..., device="esm")`, so one factory serves
+  several tests. A factory parameter without a default can then be given by every
+  test that uses it (`def rw(ctx, device)`); one with a default keeps it when a test
+  does not pass it. Each name must be a factory parameter that takes a keyword (or the
+  factory has `**kwargs`); otherwise collection fails with `@strategy('rw', ...)
+  cannot pass 'devce' to strategies.py:12:rw: it has no such parameter (it takes:
+  device). Did you mean 'device'?`. The inputs (`nsamples`, `ctx`, `rng`, `options`)
+  and the reserved names (`base`, `config`, `request`) fail the same way, and `name`
+  and `validate_signature` are the decorator's own. The values are passed as they
+  are, also to a factory passed by object. They do not change the random streams:
+  a row is keyed by the seed, the test and the strategy name, as without them.
+  `pytest.mark.strategy("rw", device="esm")` works the same. `export_strategies()`
+  calls each factory without them, so a factory whose parameter has no default is
+  listed with an `error`.
 - `Strategy.register is register` and `Strategy.strategy is strategy`: the old
   spellings are aliases, with no warning. `Strategy.export_strategies` is
   `export_strategies`.
@@ -141,8 +156,9 @@ class StrategyOptions:
     def filtered(self) -> bool: ...              # --vector-name or --vector-index given
 ```
 
-- Any other parameter must have a default, which it keeps, and `*args`/`**kwargs`
-  receive nothing. `def factory(n)` or `def factory(n, /)` fails collection with
+- Any other parameter must have a default, which it keeps, or be passed by every test
+  that uses the factory (`@strategy("name", device="esm")`, section 2), and
+  `*args`/`**kwargs` receive nothing else. `def factory(n)` or `def factory(n, /)` fails collection with
   `has a parameter 'n', which the plugin does not provide ... Did you mean 'nsamples'?`.
   `base`, `config` and `request` are reserved, even with a default. Later 4.x
   releases add inputs only as `StrategyOptions` fields or under the reserved names.

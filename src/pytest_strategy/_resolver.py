@@ -22,7 +22,7 @@ from typing import Any, NamedTuple, cast
 import pytest
 
 from ._context import Answer, FolderContext
-from ._factory import FactoryInputs, call_factory
+from ._factory import FactoryInputs, bind_arguments, call_factory
 from ._ids import (
     ID_FORMATS,
     generate_dataclass_ids,
@@ -458,6 +458,7 @@ def build_parametrization(
     config: pytest.Config | None,
     pytest_fixtures: set[str],
     validate: bool = True,
+    arguments: Mapping[str, Any] | None = None,
     fixturenames: Collection[str] | None = None,
     test_key: str | None = None,
     context: FolderContext | None = None,
@@ -473,6 +474,9 @@ def build_parametrization(
         config: The session's config (CLI options), or None
         pytest_fixtures: Fixture names the signature check ignores
         validate: Check that the test takes the strategy's arguments
+        arguments: The keywords of ``@strategy(name, **arguments)``, passed to
+            the factory by keyword (see ``bind_arguments``); they do not change
+            the random streams
         fixturenames: The names the test and its fixtures ask for
             (``metafunc.fixturenames``), or None to read only the test's parameters
         test_key: The test's part of its random stream key: its node ID without
@@ -516,7 +520,8 @@ def build_parametrization(
 
     with _Stream(stream_key.child("factory")) as rng:
         inputs = FactoryInputs(options=options, rng=rng, ctx=ctx, why_no_ctx=folder.why_none)
-        result = call_factory(name, factory, inputs, rootpath=_rootpath(config))
+        bound = bind_arguments(name, factory, arguments, rootpath=_rootpath(config))
+        result = call_factory(name, bound, inputs, rootpath=_rootpath(config))
     param = check_factory_result(name, factory, result)
     # The fingerprint of the context the factory received (D9): only a factory that
     # declares ctx asks for it, and only an answer that is not None has one

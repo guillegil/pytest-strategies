@@ -5,7 +5,7 @@ description: Write, fix and debug pytest tests that use the pytest-strategies pl
 
 # pytest-strategies
 
-Documents pytest-strategies 4.1.2.
+Documents pytest-strategies 4.2.0.
 
 pytest-strategies (import name `pytest_strategy`) parametrizes pytest tests from
 *strategies*: factories that return a `Parameter` describing each test argument (a
@@ -78,9 +78,13 @@ by a name its own file registers it under, else by its qualified name
   under `--nsamples=auto`), `ctx` (the test folder's context, see below), `rng`
   (the plugin's `random.Random`) and `options` (a frozen `StrategyOptions`). Most
   factories declare none.
-- Any other parameter needs a default (`def f(n)` fails: rename it `nsamples`).
-  `*args`/`**kwargs` receive nothing; `base`, `config` and `request` are reserved.
-  Fixtures are never factory inputs.
+- Any other parameter needs a default (`def f(n)` fails: rename it `nsamples`), or
+  each test passes it: `@strategy("rw", device="esm")` calls `rw(..., device="esm")`
+  (4.2). One factory then serves several tests instead of one registered name per
+  variant; the names are checked against the factory's signature at collection, and
+  the arguments do not change the random streams. `*args`/`**kwargs` receive nothing
+  else; `base`, `config` and `request` are reserved. Fixtures are never factory
+  inputs.
 - The test takes every `TestArg` name as a parameter (checked at collection; turn
   off with `@strategy(..., validate_signature=False)`), or the whole row as one
   dataclass (record mode, see Traps). Its other parameters are fixtures, and a
@@ -224,7 +228,8 @@ def dma_prio():
 - Vectors and constraints given as dicts are added (new name), replaced in place
   (known name) or removed (`None`; an unknown name raises). A list of constraints
   is appended. Unlisted settings (`nsamples`, `max_retries`, `ids`, ...) are kept.
-- A base factory with inputs gets them passed on: `def b(ctx): return a(ctx).extend(...)`.
+- A base factory with inputs gets them passed on: `def b(ctx): return a(ctx).extend(...)`,
+  and so do test arguments: `def b(ctx, device): return a(ctx, device).extend(...)`.
 - The new strategy has its own name, so its random rows differ from the base's.
   Stacking `@strategy("a")` and `@strategy("b")` on one test instead crosses their
   rows (`test_x[directed-zeros-rand-1]`).

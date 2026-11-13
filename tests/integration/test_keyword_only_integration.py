@@ -43,7 +43,7 @@ class TestMarker:
         result.stdout.fnmatch_lines(
             [
                 "In test_raw: invalid strategy marker ('ko_raw', False) {}; "
-                "use @strategy(name_or_factory, [*], validate_signature=True)",
+                "use @strategy(name_or_factory, [*], validate_signature=True, [*][*]arguments)",
             ]
         )
 
