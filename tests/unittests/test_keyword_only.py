@@ -31,6 +31,7 @@ from pytest_strategy import (
 
 POSITIONAL = inspect.Parameter.POSITIONAL_OR_KEYWORD
 KEYWORD = inspect.Parameter.KEYWORD_ONLY
+VAR_KEYWORD = inspect.Parameter.VAR_KEYWORD
 
 RNG_TYPE_ERROR = r"TestArg 'x' rng_type must be an RNGType or have a generate\(\) method, got "
 
@@ -99,7 +100,8 @@ class TestSignatures:
     def test_only_the_leading_parameters_are_positional(self, fn, positional, keyword_only):
         params = inspect.signature(fn).parameters.values()
 
-        assert [(p.name, p.kind) for p in params if p.kind is not KEYWORD] == [
+        # **arguments (strategy, 4.2) takes keywords only, like the keyword-only options
+        assert [(p.name, p.kind) for p in params if p.kind not in (KEYWORD, VAR_KEYWORD)] == [
             (name, POSITIONAL) for name in positional
         ]
         assert keyword_only <= {p.name for p in params if p.kind is KEYWORD}

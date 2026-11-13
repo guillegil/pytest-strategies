@@ -161,7 +161,50 @@ def alu(rng: random.Random, options: StrategyOptions) -> Parameter:
     )
 ```
 
-Any other parameter needs a default, which it keeps; `*args` and `**kwargs` receive nothing. A parameter without a default that is not one of these names fails collection with a message naming it, and suggests the closest input (`def factory(n)` no longer receives `nsamples` by position). `base`, `config` and `request` are reserved names, an error even with a default. A factory decorated without `functools.wraps` is called with no arguments, and `mock.patch` mocks must be the first parameters. Later 4.x releases add inputs only as new `StrategyOptions` fields or under the reserved names, so a factory written for 4.0 keeps receiving exactly what it receives now.
+Any other parameter needs a default, which it keeps, or a value from each test that uses the factory (see [Arguments from the test](#arguments-from-the-test) below); `*args` and `**kwargs` receive nothing else. A parameter without a default that is not one of these names, and that the test does not pass, fails collection with a message naming it, and suggests the closest input (`def factory(n)` no longer receives `nsamples` by position). `base`, `config` and `request` are reserved names, an error even with a default. A factory decorated without `functools.wraps` is called with no arguments, and `mock.patch` mocks must be the first parameters. Later 4.x releases add inputs only as new `StrategyOptions` fields or under the reserved names, so a factory written for 4.0 keeps receiving exactly what it receives now.
+
+#### Arguments from the test
+
+When several tests need the same strategy with one setting changed (a device, a bus width), pass that setting from the test instead of registering one strategy per variant. Every keyword of `@strategy` other than `validate_signature` goes to the factory by keyword, after the inputs above:
+
+```python
+# strategies.py
+from pytest_strategy import Parameter, RNGInteger, Series, TestArg, register
+
+
+@register("rw")
+def rw(ctx, device="esm", width=8):
+    channels = [ch for ch, kind in ctx["peripherals"].items() if kind == device]
+    return Parameter(
+        TestArg("channel", rng_type=Series(channels, skip_if_empty=f"no {device} channel")),
+        TestArg("data", rng_type=RNGInteger(0, 2**width - 1)),
+        per_sequence_samples=True,
+    )
+```
+
+```python
+# test_rw.py
+from pytest_strategy import strategy
+
+
+@strategy("rw", device="esm")
+def test_rw_esm(channel, data): ...
+
+
+@strategy("rw", device="bpam", width=16)
+def test_rw_bpam(channel, data): ...
+
+
+@strategy("rw")  # the factory's defaults: device="esm", width=8
+def test_rw_default(channel, data): ...
+```
+
+- The names are checked against the factory's signature when the test is collected: a name that is not a parameter taking a keyword (unless the factory has `**kwargs`) fails with `@strategy('rw', ...) cannot pass 'devce' to strategies.py:5:rw: it has no such parameter (it takes: device, width). Did you mean 'device'?`. The inputs (`nsamples`, `ctx`, `rng`, `options`) and the reserved names cannot be passed this way, and `name` and `validate_signature` belong to the decorator.
+- A parameter without a default must then be passed by every test that uses the factory: `def rw(ctx, device)` with a test that omits `device` fails collection with a message that suggests `@strategy(..., device=...)`.
+- The values are passed as they are, and they work the same with a factory passed by object (`@strategy(rw, device="esm")`) and with the marker (`@pytest.mark.strategy("rw", device="esm")`).
+- They do not change the random streams: a row's values depend on the seed, the test and the strategy name (see [Random streams](#random-streams)), so two tests with other arguments still get rows of their own, and a test whose arguments change keeps the values of the rows it still has.
+- `export_strategies()` calls each factory without them, so it lists a factory whose parameter has no default with an `error`. Give the parameter a default to keep it exportable.
+- To build a strategy on such a factory, pass the arguments on: `def rw_burst(ctx, device="esm"): return rw(ctx, device).extend(...)` (see [Reusing and Extending Strategies](#12-reusing-and-extending-strategies)).
 
 A factory must return a `Parameter`. Anything else fails the collection of the tests that use the strategy, with a message that names the strategy and what it returned.
 
@@ -644,7 +687,7 @@ For a `tests/dma/strategies.py` that registers `burst` with two arguments, a dir
 {
   "schema": 1,
   "kind": "strategies",
-  "generator": {"name": "pytest-strategies", "version": "4.1.2"},
+  "generator": {"name": "pytest-strategies", "version": "4.2.0"},
   "seed": 1,
   "nsamples": 10,
   "strategies": [
@@ -722,7 +765,7 @@ def dma_prio():
 - **Arguments.** A `TestArg` with a name the base has replaces that argument in its place, and the vectors keep their values. A new name is added after the others; every kept vector then needs a value for it, from `defaults` or the `TestArg`'s fixed `value=`, or the call fails and names the vector.
 - **Vectors and constraints** are given as dicts by name: a new name is added, a known name is replaced in its place, and `None` removes it (a name the base does not have fails). A list of constraints is added after the others. Vectors are written for the new argument list, in any form the constructor takes, and a `pytest.param(...)` vector keeps its marks.
 - **Settings** (`nsamples`, `max_retries`, `per_sequence_samples`, `max_exhaustive`, `ids`, `always_include_directed`) are the base's unless given.
-- A factory that takes inputs passes them on: `def esm_burst(ctx): return esm_rw(ctx).extend(...)`. The new strategy has a name of its own, so its random rows differ from the base's for the same seed.
+- A factory that takes inputs passes them on: `def esm_burst(ctx): return esm_rw(ctx).extend(...)`, and so does one that takes arguments from the test: `def burst(ctx, device="esm"): return rw(ctx, device).extend(...)`. The new strategy has a name of its own, so its random rows differ from the base's for the same seed.
 
 ## 🔌 Fixture Integration
 

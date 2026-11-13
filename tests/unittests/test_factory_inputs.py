@@ -285,7 +285,7 @@ class TestUnknownNames:
             _call(lambda nsamples, option: None)
         message = str(excinfo.value)
         assert "has a parameter 'option'" in message
-        assert "Did you mean 'options'? Rename it, or give it a default" in message
+        assert "Did you mean 'options'? Rename it, give it a default" in message
         assert "Since 4.0" not in message
 
     def test_a_second_unknown_name_after_nsamples(self):
@@ -737,7 +737,8 @@ class TestMockPatch:
         message = str(excinfo.value)
         assert "has a parameter 'other'" in message
         assert message.endswith(
-            "Rename it, or give it a default if the plugin should leave it alone. The factory "
+            "Rename it, give it a default if the plugin should leave it alone, or pass it from "
+            "the test: @strategy(..., other=...). The factory "
             "is decorated with mock.patch, which passes its mocks to its first parameters "
             "('getcwd')."
         )

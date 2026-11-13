@@ -20,7 +20,7 @@ import os
 import random
 import sys
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -257,7 +257,10 @@ def _unknown(
     else:
         close = difflib.get_close_matches(name, INPUTS, n=1)
         hint = f" Did you mean '{close[0]}'?" if close else ""
-        message += hint + " Rename it, or give it a default if the plugin should leave it alone."
+        message += hint + (
+            " Rename it, give it a default if the plugin should leave it alone, or pass it "
+            f"from the test: @strategy(..., {name}=...)."
+        )
     if mocked:
         names = ", ".join(f"'{m}'" for m in mocked)
         message += (
@@ -388,6 +391,70 @@ def analyse(factory: Callable[..., Any]) -> CallPlan:
         ),
         keyword=tuple(Slot(p.name, p.default) for p in keyword if p.name in INPUTS),
     )
+
+
+def bind_arguments(
+    name: str,
+    factory: Callable[..., Any],
+    arguments: Mapping[str, Any] | None,
+    *,
+    rootpath: str | os.PathLike[str] | None = None,
+) -> Callable[..., Any]:
+    """
+    Return the factory to call for ``@strategy(name, **arguments)``: the factory
+    itself without arguments, else a ``functools.partial`` that passes them by
+    keyword, after the checks below.
+
+    The names are checked against the factory's signature (``inspect.signature``,
+    which follows ``functools.wraps`` wrappers, partials, bound methods and
+    classes). The values are passed as they are.
+
+    Raises:
+        ValueError: If a name is one of the plugin's inputs or reserved names, the
+            factory's signature cannot be read, or a name is not a parameter that
+            takes a keyword and the factory has no ``**kwargs``
+    """
+    if not arguments:
+        return factory
+
+    def fail(what: str, problem: str) -> ValueError:
+        where = _describe_factory(factory, rootpath=rootpath)
+        return ValueError(f"@strategy('{name}', ...) cannot pass {what} to {where}: {problem}")
+
+    for key in arguments:
+        if key in INPUTS:
+            raise fail(
+                repr(key),
+                "it is an input the plugin passes itself. Remove it from @strategy(...), or "
+                "give the factory's parameter another name.",
+            )
+        if key in RESERVED:
+            raise fail(repr(key), f"the plugin reserves that name; {RESERVED[key]}.")
+    try:
+        params = inspect.signature(factory).parameters
+    except (TypeError, ValueError):
+        raise fail(
+            ", ".join(map(repr, arguments)),
+            "its signature cannot be read. Decorate a wrapper with @functools.wraps(factory).",
+        ) from None
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return functools.partial(factory, **arguments)
+    by_keyword = [
+        p.name
+        for p in params.values()
+        if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        and p.name not in INPUTS
+    ]
+    for key in arguments:
+        if key in by_keyword:
+            continue
+        if key in params:
+            raise fail(repr(key), "that parameter is positional-only. Make it take a keyword.")
+        close = difflib.get_close_matches(key, by_keyword, n=1)
+        hint = f" Did you mean '{close[0]}'?" if close else ""
+        accepted = ", ".join(by_keyword) or "none"
+        raise fail(repr(key), f"it has no such parameter (it takes: {accepted}).{hint}")
+    return functools.partial(factory, **arguments)
 
 
 class FactoryError(ValueError):
