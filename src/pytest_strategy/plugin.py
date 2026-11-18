@@ -2273,7 +2273,7 @@ def _reuse_line(config: Config, reuse: _reuse.Reuse) -> str:
         _repro.generation_options(config, (), start=config.rootpath),
         runtime.session_options(config).constraints_off,
         _reuse.own_units(config),
-        config.cwd_relative_nodeid,
+        functools.partial(_repro.cwd_relative_nodeid, config),
     )
     return text if differences is None else f"{text}; recorded {differences}"
 
@@ -2310,7 +2310,11 @@ def _uncollected_lines(state: Any, config: Config) -> list[str]:
         them = "them"
     lines = [f"pytest-strategies: {first}; unless deleted or renamed, run {them} with:"]
     for command, n in _reuse.commands(
-        reuse.flag, rows, reuse.failed, config.cwd_relative_nodeid, reuse.outside
+        reuse.flag,
+        rows,
+        reuse.failed,
+        functools.partial(_repro.cwd_relative_nodeid, config),
+        reuse.outside,
     ):
         lines.append(f"  {command}  # {n} row{'' if n == 1 else 's'}")
     return lines
@@ -2338,7 +2342,11 @@ def _deselected_lines(state: Any, config: Config) -> list[str]:
     them = "it" if len(rows) == 1 else "them"
     lines = [f"pytest-strategies: deselected {rows_text} recorded under {seeds}; run {them} with:"]
     for command, n in _reuse.commands(
-        reuse.flag, rows, reuse.failed, config.cwd_relative_nodeid, reuse.outside
+        reuse.flag,
+        rows,
+        reuse.failed,
+        functools.partial(_repro.cwd_relative_nodeid, config),
+        reuse.outside,
     ):
         lines.append(f"  {command}  # {n} row{'' if n == 1 else 's'}")
     return lines

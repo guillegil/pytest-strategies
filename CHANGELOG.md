@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Parameter.to_dict()`, and so `export_strategies()`, has the key `pin_nsamples` (a key added within schema 1).
 - The agent skill documents both. Run `pytest-strategies skill install` to update an installed copy.
 
+### Fixed
+
+- Rerun commands and `--lf` lines work with pytest 9.2, whose `Config.cwd_relative_nodeid` takes a structured node ID: the plugin makes node IDs relative to the invocation folder itself.
+
 ## [4.2.0] - 2026-11-13
 
 4.2.0 lets a test pass arguments to its strategy's factory. It removes nothing, and a seed recorded with 4.1 gives the same rows.
