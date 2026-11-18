@@ -282,15 +282,28 @@ def outside_rootdir(item: pytest.Item) -> bool:
     return False
 
 
+def cwd_relative_nodeid(config: pytest.Config, nodeid: str) -> str:
+    """
+    Return a node ID (relative to the rootdir) relative to the folder pytest was
+    started in, as pytest's ``Config.cwd_relative_nodeid`` did for a string before
+    pytest 9.2, which takes a structured ``NodeId`` instead.
+    """
+    if config.invocation_params.dir == config.rootpath:
+        return nodeid
+    path, sep, rest = nodeid.partition("::")
+    relative = bestrelpath(config.invocation_params.dir, config.rootpath / path)
+    return f"{relative}{sep}{rest}"
+
+
 def rerun_nodeid(item: pytest.Item) -> str:
     """
     Return an item's node ID relative to the folder pytest was started in
-    (``config.cwd_relative_nodeid``). For a file outside the rootdir, whose node ID
+    (``cwd_relative_nodeid``). For a file outside the rootdir, whose node ID
     is not relative to the rootdir, the file's own path is used instead.
     """
     config = item.config
     if not outside_rootdir(item):
-        return config.cwd_relative_nodeid(item.nodeid)
+        return cwd_relative_nodeid(config, item.nodeid)
     names = item.nodeid.partition("::")[2]
     return f"{bestrelpath(config.invocation_params.dir, item.path)}::{names}"
 

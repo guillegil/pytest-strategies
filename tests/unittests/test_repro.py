@@ -589,7 +589,6 @@ class TestRerunNodeid:
         config = Namespace(
             rootpath=rootdir,
             invocation_params=Namespace(dir=invocation),
-            cwd_relative_nodeid=lambda n: f"cwd:{n}",
         )
         return Namespace(path=path, nodeid=nodeid, config=config)
 
@@ -603,7 +602,18 @@ class TestRerunNodeid:
         )
 
         assert not outside_rootdir(item)
-        assert rerun_nodeid(item) == "cwd:t/test_x.py::test_a[rand-1]"
+        assert rerun_nodeid(item) == "t/test_x.py::test_a[rand-1]"
+
+    def test_inside_the_rootdir_from_a_subfolder(self, tmp_path):
+        item = self.item(
+            tmp_path,
+            tmp_path / "t" / "test_x.py",
+            "t/test_x.py::test_a[rand-1]",
+            tmp_path / "t",
+            tmp_path,
+        )
+
+        assert rerun_nodeid(item) == "test_x.py::test_a[rand-1]"
 
     def test_outside_the_rootdir_the_file_relative_to_the_invocation_folder(self, tmp_path):
         # pytest named it relative to the path given on the command line: "" here

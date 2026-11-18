@@ -351,6 +351,7 @@ class TestParameterToDict:
             "per_sequence_samples",
             "max_exhaustive",
             "skip_reason",
+            "pin_nsamples",
         ]
         assert data["schema"] == 1
         assert [arg["name"] for arg in data["arguments"]] == ["addr", "op"]

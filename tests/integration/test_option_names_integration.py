@@ -194,7 +194,12 @@ class TestStrategiesIds:
         result = on_project.runpytest("-p", "no:cacheprovider")
 
         assert result.ret == pytest.ExitCode.USAGE_ERROR
-        result.stderr.fnmatch_lines(
-            [f"ERROR: strategies_ids must be 'names' or 'values'; *pytest.toml*got {kind}*"]
-        )
+        if pytest.version_tuple >= (9, 2):
+            # pytest 9.2 rejects it itself, before the plugin reads it
+            expected = f"ERROR: *pytest.toml*strategies_ids*expects a string, got {kind}*"
+        else:
+            expected = (
+                f"ERROR: strategies_ids must be 'names' or 'values'; *pytest.toml*got {kind}*"
+            )
+        result.stderr.fnmatch_lines([expected])
         assert "INTERNALERROR" not in result.stdout.str() + result.stderr.str()

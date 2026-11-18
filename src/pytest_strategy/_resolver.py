@@ -86,6 +86,8 @@ class Parametrization(NamedTuple):
     ids: list[str]
     unfilled: tuple[tuple[str, str], ...] = ()
     infos: tuple[VectorInfo, ...] = ()
+    # What the run export lists for this test and strategy, when the run writes it
+    export: dict[str, Any] | None = None
 
     def params(self) -> list[Any]:
         """
@@ -555,12 +557,17 @@ def build_parametrization(
     skip_reason: str | None = None
 
     # Resolve the effective nsamples with full precedence (FR-3):
-    #   1. CLI "auto" → exhaustive (already handled below)
-    #   2. CLI explicit int → use it
+    #   1. Parameter(nsamples=..., pin_nsamples=True) → use it, whatever --nsamples says
+    #   2. CLI "auto" or an explicit int → use it
     #   3. param.nsamples set → use it
     #   4. fallback → 10
-    if options.nsamples_source == "--nsamples":
-        effective_nsamples: int | str = options.nsamples
+    effective_nsamples: int | str
+    pinned = bool(getattr(param, "pin_nsamples", False)) and param.nsamples is not None
+    if pinned:
+        effective_nsamples = cast("int | str", param.nsamples)
+        source = "Parameter(nsamples=, pinned)"
+    elif options.nsamples_source == "--nsamples":
+        effective_nsamples = options.nsamples
         source = "--nsamples"
     elif param.nsamples is not None:
         effective_nsamples = param.nsamples
@@ -577,7 +584,8 @@ def build_parametrization(
         isinstance(arg.rng_type, SequenceLike) for arg in param.test_args
     ):
         if isinstance(param.nsamples, int):
-            effective_nsamples, source = param.nsamples, "Parameter(nsamples=)"
+            effective_nsamples = param.nsamples
+            source = "Parameter(nsamples=, pinned)" if pinned else "Parameter(nsamples=)"
         else:
             effective_nsamples, source = 10, "default"
         source += ", no Series/RNGSequence for auto"
@@ -674,6 +682,24 @@ def build_parametrization(
 
     runtime.record_resolution(resolution)
 
+    # The run export's definition of this strategy for this test (--strategy-export)
+    export: dict[str, Any] | None = None
+    state = runtime.current
+    if state is not None and state.run_export is not None:
+        from ._export import origin as export_origin
+        from ._run_export import definition
+
+        export = definition(
+            name=name,
+            origin=export_origin(factory, _rootpath(config)),
+            arguments=arguments,
+            context=fingerprint,
+            nsamples=effective_nsamples,
+            source=source,
+            parameter=param,
+            constraints_off=constraints_off,
+        )
+
     def row_infos(ids: list[str]) -> tuple[VectorInfo, ...]:
         """The rows' VectorInfos, given their IDs."""
         return _vector_infos(
@@ -730,7 +756,9 @@ def build_parametrization(
                     f"Error converting samples to dataclass for strategy '{name}': {e}"
                 ) from e
             ids, infos = final_ids(["skipped"])
-            return Parametrization(dc_param, [_skipped_param(skip_reason, 1)], ids, infos=infos)
+            return Parametrization(
+                dc_param, [_skipped_param(skip_reason, 1)], ids, infos=infos, export=export
+            )
         try:
             dataclass_samples = convert_to_dataclass(
                 [row.values for row in rows], argnames, dc_type
@@ -754,7 +782,7 @@ def build_parametrization(
 
         # Parametrize the dataclass parameter chosen by detection
         ids, infos = final_ids(ids)
-        return Parametrization(dc_param, params, ids, infos=infos)
+        return Parametrization(dc_param, params, ids, infos=infos, export=export)
 
     else:
         # NAMED PARAMETERS MODE: Standard behavior
@@ -815,7 +843,7 @@ def build_parametrization(
                 samples = [row.sample for row in rows]
 
         ids, infos = final_ids(ids)
-        return Parametrization(argstr, samples, ids, unfilled, infos)
+        return Parametrization(argstr, samples, ids, unfilled, infos, export)
 
 
 def _unfilled_message(name: str, record: RecordParam, hints: list[str]) -> str:

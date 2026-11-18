@@ -1951,11 +1951,25 @@ message, and `--help` skips the check, as pytest does for its own ini options.
 `strategies_max_exhaustive` keeps its 3.0 check, made only when a run enumerates.
 pytest turns argparse's abbreviations off, so no name can clash with a prefix of
 another. Reserved for later releases: `--strategy-coverage` (4.2),
-`--strategy-export` and `--strategy-import` (vector export and import),
+`--strategy-import` (vector import),
 `--strategy-lf` (a regression bank), `--strategy-profile` with the ini option
 `strategies_profiles` (run profiles), and the ini option `strategies_subtests`.
 `tests/integration/test_option_names_integration.py` checks the names against
 `pytest --help` with and without the plugin.
+
+**The run export (4.3).** `--strategy-export`, the `pytest_strategies_export_dir`
+hook and the `strategies_export_dir` ini option (`_run_export.target`, read in a
+`tryfirst` `pytest_sessionstart`, before pytest-xdist starts its workers) give the
+folder. `build_parametrization` describes each test's strategy
+(`_run_export.definition`, in `Parametrization.export`) only when the session
+records, and `pytest_generate_tests` hands it to `RunExport.add_use` with the rows'
+`VectorInfo`s, matched later to the items by identity. `pytest_collection_finish`
+groups the selected items' rows by test and strategy; `pytest_runtest_logreport`
+records each item's outcome. A worker records when the controller says so
+(`workerinput`) and sends its collected part as JSON text (`workeroutput`); the
+controller takes the first worker's, adds the outcomes and writes both files in
+`pytest_sessionfinish`. Both documents are schema 1 with the evolution rules
+below.
 
 **Schema 1.** `export_strategies()` and the `to_dict()` methods write schema 1 (`_export.py`,
 whose values go through `_encode.encode()`, as `VectorInfo.to_dict()`'s do).

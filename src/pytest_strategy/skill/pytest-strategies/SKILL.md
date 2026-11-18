@@ -5,7 +5,7 @@ description: Write, fix and debug pytest tests that use the pytest-strategies pl
 
 # pytest-strategies
 
-Documents pytest-strategies 4.2.0.
+Documents pytest-strategies 4.3.0.
 
 pytest-strategies (import name `pytest_strategy`) parametrizes pytest tests from
 *strategies*: factories that return a `Parameter` describing each test argument (a
@@ -107,6 +107,7 @@ def ranges():
         test_vectors={"bug_1234": (0, 100, "fast")},    # only with --vector-mode=test
         vector_constraints=[lo_below_hi],               # a list: named after each function
         nsamples=25,                                    # an integer --nsamples overrides it
+                                                        # (unless pin_nsamples=True)
         max_retries=100,                                # draws per row before failing
     )
 ```
@@ -188,7 +189,9 @@ implementation, in this order:
    `dma_unaligned`) rather than raising `max_retries`.
 7. **Size.** Keep `nsamples` small (10 to 25) so every commit runs quickly, and run
    more where time allows (`--nsamples=500` nightly). An integer `--nsamples`
-   overrides each strategy's own.
+   overrides each strategy's own, except a pinned one: use
+   `nsamples="auto", pin_nsamples=True` for a strategy that must run every `Series`
+   combination exactly once whatever the run asks (all channels, all devices).
 8. **Scope and names.** One strategy per behavior, with variants made by `extend()`.
    Names appear in IDs, the failure summary and `--strategy-constraint-off`, so name
    the strategy for what it drives (`dma_burst`), each vector for its case
@@ -314,6 +317,7 @@ def esm_rw(ctx):
 | `--strategy-constraint-off=[STRATEGY:]NAME` | turn a named constraint off for this run |
 | `--strategy-details` | show each failed row's values, seed and rerun command under its traceback (4.1) |
 | `--list-strategies` | list the registered names and exit |
+| `--strategy-export=DIR` | write `strategies.json` (definitions) and `strategies.vectors.json` (rows and outcomes) when the session ends (4.3; also the `strategies_export_dir` ini option or the `pytest_strategies_export_dir` hook) |
 | `-v` | per-strategy row counts, `nsamples` source, rejections per constraint |
 
 **Test IDs** name rows, the same for every seed: `[directed-zeros]`, `[test-max]`

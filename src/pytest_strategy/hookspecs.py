@@ -123,3 +123,35 @@ def pytest_strategies_context(config: pytest.Config) -> Any:
     Returns:
         Any object, or ``None`` to let the next implementation answer.
     """
+
+
+@pytest.hookspec(firstresult=True)
+def pytest_strategies_export_dir(config: pytest.Config) -> Any:
+    """
+    Return the folder to write the run export into, or None to leave the choice
+    to the ``strategies_export_dir`` ini option.
+
+    When the session ends, the plugin writes two files there:
+    ``strategies.json``, each selected test with the strategies it uses as it
+    resolved them (no drawn values), and ``strategies.vectors.json``, the same with
+    the rows each test ran (directed, test, random and exhaustive) and their
+    outcomes. The folder is created when it does not exist::
+
+        # conftest.py (the rootdir's, or a plugin)
+        @pytest.hookimpl(optionalhook=True)
+        def pytest_strategies_export_dir(config):
+            return Path("reports") / config.getoption("--tb-config").stem
+
+    ``--strategy-export=DIR`` wins over this hook, and this hook over the ini
+    option. A relative path is relative to the rootdir. The hook is called once,
+    when the session starts (before pytest-xdist starts its workers), so implement
+    it in a plugin or in a ``conftest.py`` that pytest loads before then: the
+    rootdir's, or one in a folder named on the command line. ``optionalhook=True``
+    keeps the ``conftest.py`` usable without pytest-strategies.
+
+    Args:
+        config: The pytest config object.
+
+    Returns:
+        A path (``str`` or ``os.PathLike``), or None.
+    """

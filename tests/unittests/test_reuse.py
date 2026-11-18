@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from pytest_strategy._repro import quote
+from pytest_strategy._repro import cwd_relative_nodeid, quote
 from pytest_strategy._reuse import (
     KEY,
     LASTFAILED,
@@ -875,7 +875,7 @@ class TestCommands:
         # The map holds them relative to the rootdir, /project; pytest runs in tests
         root = Path("/project")
         stand_in = Namespace(rootpath=root, invocation_params=Namespace(dir=root / "tests"))
-        where = partial(pytest.Config.cwd_relative_nodeid, stand_in)
+        where = partial(cwd_relative_nodeid, stand_in)
         rows = [(NODE_A, Entry(1, ("-c", "pytest.ini", "--rootdir=.")))]
 
         (found,) = commands("--lf", rows, {NODE_A}, where)
@@ -892,7 +892,7 @@ class TestCommands:
         root = Path("/project").absolute()
         ini = str(Path("/dev/null").absolute())
         stand_in = Namespace(rootpath=root, invocation_params=Namespace(dir=root / "tests"))
-        where = partial(pytest.Config.cwd_relative_nodeid, stand_in)
+        where = partial(cwd_relative_nodeid, stand_in)
         rows = [(NODE_A, Entry(1, ("-c", ini, "--rootdir=.")))]
 
         (found,) = commands("--lf", rows, {NODE_A}, where)
@@ -977,7 +977,7 @@ class TestUncollectedLines:
         stand_in = Namespace(
             rootpath=root, invocation_params=Namespace(dir=root), option=Namespace(dist=dist)
         )
-        stand_in.cwd_relative_nodeid = partial(pytest.Config.cwd_relative_nodeid, stand_in)
+        stand_in.cwd_relative_nodeid = partial(cwd_relative_nodeid, stand_in)
         return stand_in
 
     def test_the_command_of_each_reused_row_not_collected(self):
@@ -1032,7 +1032,7 @@ class TestDeselectedLines:
     def config(self, invocation="."):
         root = Path("/project")
         stand_in = Namespace(rootpath=root, invocation_params=Namespace(dir=root / invocation))
-        stand_in.cwd_relative_nodeid = partial(pytest.Config.cwd_relative_nodeid, stand_in)
+        stand_in.cwd_relative_nodeid = partial(cwd_relative_nodeid, stand_in)
         return stand_in
 
     def test_a_command_per_seed_of_the_rows_set_aside(self):
