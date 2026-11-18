@@ -23,10 +23,10 @@
 - **Testbench Context**: build vectors from configuration that is only known when the session runs, with a context per folder, the same object in your fixtures, and a fingerprint that tells two runs' configurations apart.
 - **Fixture Integration**: works out-of-the-box with standard pytest fixtures (custom, parametrized, or built-in), and a test can take the whole row as one dataclass.
 - **CLI Control**: filter vectors, change generation modes, or increase sample sizes directly from the command line.
-- **Per-Strategy Sample Count**: let a strategy declare its own vector count as a soft default that an integer `--nsamples` can still override.
+- **Per-Strategy Sample Count**: let a strategy declare its own vector count as a soft default that an integer `--nsamples` can still override, or pin it (`nsamples="auto", pin_nsamples=True`) so it never changes.
 - **Reusable Strategies**: build a strategy on another with `Parameter.extend()`: replace or add arguments, and add, replace or remove vectors and constraints by name.
 - **Folder-Scoped Names**: strategy names are looked up like fixtures, nearest folder first, and strategy files are imported only for the folders being tested.
-- **Metadata**: `item.stash[VECTOR_KEY]` describes the row of each test, and `export_strategies()` writes every strategy as versioned JSON.
+- **Metadata**: `item.stash[VECTOR_KEY]` describes the row of each test, `export_strategies()` writes every strategy as versioned JSON, and `--strategy-export=DIR` writes, for each run, what each test's strategies were and which vectors ran with which outcome.
 - **Typed**: the package ships type hints (`py.typed`), and the decorators keep the decorated function's type.
 - **Agent Skill**: `pytest-strategies skill install` gives Claude Code, Codex and other coding agents a guide to writing strategies.
 
@@ -493,6 +493,28 @@ This is a **soft default**: an explicit integer `--nsamples` on the command line
 | `--nsamples=5`     | `25`                      | 5 (CLI overrides)        |
 | `--nsamples=auto`  | any                       | Every `Series`/`RNGSequence` combination. A strategy without such arguments uses its own value (here 25), or 10 when unset |
 | not passed         | `"auto"`                  | Same as `--nsamples=auto` |
+| any                | `25`, `pin_nsamples=True` | 25 (pinned: the strategy wins) |
+| `--nsamples=5`     | `"auto"`, `pin_nsamples=True` | Every `Series`/`RNGSequence` combination |
+
+#### Pinning a strategy's count
+
+Some strategies must keep their count whatever the run asks for: one that walks every channel of the testbench once should not run 50 times under a nightly `--nsamples=50`. Pass `pin_nsamples=True` to make `nsamples` a hard count:
+
+```python
+@register("every_channel")
+def every_channel(ctx):
+    return Parameter(
+        TestArg("channel", rng_type=Series(ctx["channels"])),
+        TestArg("data", rng_type=RNGInteger(0, 255)),
+        nsamples="auto",     # every channel once...
+        pin_nsamples=True,   # ...also under --nsamples=50
+    )
+```
+
+- `pin_nsamples=True` needs an `nsamples` (an int or `"auto"`); without one `Parameter` raises `ValueError`.
+- `--vector-mode`, `--vector-name` and `--vector-index` still apply, so `--vector-mode=directed_only` still runs only the directed vectors.
+- A pinned `"auto"` strategy without `Series` or `RNGSequence` arguments falls back to 10 random rows, as an unpinned one does.
+- The `-v` Strategy Summary shows the source as `Parameter(nsamples=, pinned)`, and `extend()` keeps the setting unless it is given.
 
 Directed vectors are added on top of these, according to `--vector-mode`. With `Parameter(per_sequence_samples=True)`, a finite count applies to each `Series`/`RNGSequence` combination instead of the whole strategy (see [`per_sequence_samples`](#6-sequence-testing--exhaustive-generation)). A row keeps its values when the count grows: `--nsamples=50` gives the rows of `--nsamples=10`, with the same values, and 40 more.
 
@@ -687,7 +709,7 @@ For a `tests/dma/strategies.py` that registers `burst` with two arguments, a dir
 {
   "schema": 1,
   "kind": "strategies",
-  "generator": {"name": "pytest-strategies", "version": "4.2.0"},
+  "generator": {"name": "pytest-strategies", "version": "4.3.0"},
   "seed": 1,
   "nsamples": 10,
   "strategies": [
@@ -729,6 +751,73 @@ In a pytest session every strategy file is imported first. Each factory gets the
 Its random draws come from a stream derived from the seed, the strategy name and the factory's module name, or the folder of its file for a factory in a strategy file, a test module or a `conftest.py`, so every call in a session, and in every environment and checkout, exports the same values. A file counts as a strategy file, a test module or a `conftest.py` when it has such a name and is inside the rootdir, below a `testpaths` entry, or imported by its path in the session (a test module collected from a folder named on the command line) and, when `consider_namespace_packages` is off (pytest's default), not a module of a regular package that Python holds under its package name (`acme.strategies` for `acme/strategies.py` next to `acme/__init__.py`), the name pytest then imports it under in every import mode. A module named like one elsewhere, such as a library's `extacme/strategies.py` on `sys.path`, is keyed by its module's name, so every checkout folder exports the same values.
 
 A factory in a package module named like one inside the rootdir (`src/acme/strategies.py`, `src/acme/test_utils.py`) is therefore keyed by its folder in a checkout or an editable install and by its module's name when installed, so the two export different values; rename the module (`acme/catalog.py`) to avoid that. Outside the rootdir and the `testpaths`, these are keyed by their folder in a run that collects that folder (one that names it on the command line) and by their module's name in a run that does not: (a) a helper named like one, not in a regular package, imported by its module's name; (b) a regular package's module that Python holds only under a longer namespace-package name (`ns.acme.strategies`); (c) with `consider_namespace_packages = true`, also a regular package's module imported by its name. List such a folder in `testpaths` to key them by their folder in every run.
+
+#### Exporting a run
+
+`export_strategies()` describes what is registered. To see what a run actually used, pass `--strategy-export=DIR`: when the session ends, the plugin writes two files into `DIR` (and creates it):
+
+| File | `kind` | Holds |
+| --- | --- | --- |
+| `strategies.json` | `strategy_definitions` | Each test with the strategies it uses, as it resolved them: the factory's `origin`, the `arguments` the test passed with `@strategy`, the `context` fingerprint, the effective `nsamples` with its `source`, and the `parameter` (`Parameter.to_dict()`: each argument's type and RNG settings or fixed value, the directed and test vectors, the constraints and the settings). No drawn values. |
+| `strategies.vectors.json` | `strategy_vectors` | The same, plus each strategy's `rows`: every directed, test, random and exhaustive row the test ran, with its values and the outcome of each test item that ran it. |
+
+```bash
+pytest --strategy-export=reports/strategies --nsamples=3 --rng-seed=1
+```
+
+```json
+{
+  "schema": 1,
+  "kind": "strategy_vectors",
+  "generator": {"name": "pytest-strategies", "version": "4.3.0"},
+  "seed": 1,
+  "nsamples": 3,
+  "tests": [
+    {
+      "nodeid": "tests/test_rw.py::test_rw_bpam",
+      "strategies": [
+        {
+          "name": "rw",
+          "origin": {"folder": "tests", "file": "tests/strategies.py", "qualname": "rw", "line": 4},
+          "arguments": {"device": "bpam", "width": 16},
+          "context": "976bcfdf",
+          "nsamples": {"value": 3, "source": "--nsamples"},
+          "parameter": {"schema": 1, "arguments": ["..."], "directed_vectors": ["..."], "test_vectors": ["..."]},
+          "rows": [
+            {"id": "directed-zeros", "kind": "directed", "name": "zeros", "index": 0, "enumerated": [],
+             "values": {"channel": 0, "data": 0},
+             "items": [{"nodeid": "tests/test_rw.py::test_rw_bpam[directed-zeros]", "outcome": "passed"}]},
+            {"id": "channel=0-rand-0", "kind": "random", "name": null, "index": 0, "enumerated": ["channel"],
+             "values": {"channel": 0, "data": 40213},
+             "items": [{"nodeid": "tests/test_rw.py::test_rw_bpam[channel=0-rand-0]", "outcome": "failed"}]}
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+- Only the tests the run selected are written (after `-k`, `--deselect` and `--lf`), so `pytest --collect-only --strategy-export=DIR` exports the rows without running them. A test function appears once, with its node ID without parameters; the test vectors are in its `parameter` always, and in its `rows` only under `--vector-mode=test`.
+- An outcome is `passed`, `failed`, `skipped`, `xfailed`, `xpassed`, `error` (setup or teardown failed) or `null` for an item that did not run. A row of a test with stacked `@strategy` decorators lists every item that ran it.
+- Values use the encoding of [Metadata Export](#11-metadata-export), and readers follow the same rules for schema 1: ignore unknown keys.
+- Under pytest-xdist the controller writes the files, with the rows the workers collected.
+
+**Choosing the folder.** The command-line option wins, relative to the folder pytest runs in. Without it, the plugin asks the `pytest_strategies_export_dir` hook, then reads the `strategies_export_dir` ini option, both relative to the rootdir. Implement the hook in the rootdir's `conftest.py` (or a plugin) to choose the folder in code, for example one per testbench configuration:
+
+```python
+# conftest.py
+from pathlib import Path
+
+import pytest
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_strategies_export_dir(config):
+    return Path("reports") / "strategies"
+```
+
+The hook is called once, when the session starts, so a `conftest.py` in a subfolder that pytest loads later is not asked. A `pytest_configure` in a `conftest.py` can also set `config.option.strategy_export = "reports/strategies"`.
 
 ### 12. Reusing and Extending Strategies
 
@@ -898,12 +987,14 @@ Control test generation directly from the command line:
 | `--rng-seed`        | Set seed for reproducibility. Without it, `--lf` and `--sw` reuse the seed of the failed run (see [Reproducibility](#-reproducibility)) | `pytest --rng-seed=42`                      |
 | `--strategy-constraint-off` | Turn named constraints off for this run: `NAME` in every strategy, `STRATEGY:NAME` in one; comma-separated, repeatable (see [Rows and Constraints](#4-rows-and-constraints)) | `pytest --strategy-constraint-off=dma_burst:aligned` |
 | `--strategy-details` | Show a `pytest-strategies` section under each failed strategy row's traceback: its values, seed and rerun command (off by default; see [Reproducing a failure](#reproducing-a-failure)) | `pytest --strategy-details` |
+| `--strategy-export` | Write `strategies.json` and `strategies.vectors.json` into a folder when the session ends (see [Exporting a run](#exporting-a-run)) | `pytest --strategy-export=reports/strategies` |
 | `--list-strategies` | List the registered strategy names and exit                             | `pytest --list-strategies`                  |
 
 Ini options go in your pytest configuration, and `-o NAME=VALUE` sets one for a single run:
 
 | Ini option                  | Default  | Description                                                                                         |
 | --------------------------- | -------- | --------------------------------------------------------------------------------------------------- |
+| `strategies_export_dir`     | (none)   | The folder to write the run export into, relative to the rootdir; `--strategy-export` and the `pytest_strategies_export_dir` hook win (see [Exporting a run](#exporting-a-run)) |
 | `strategies_ids`            | `names`  | The format of the test IDs: `names` (`rand-3`) or `values` (`addr=0,len=1`, the 3.0 format); see [Test IDs and Selecting Rows](#-test-ids-and-selecting-rows). Any other value is a usage error |
 | `strategies_max_exhaustive` | `100000` | The most rows `--nsamples=auto` or `per_sequence_samples=True` may generate for one strategy; `Parameter(max_exhaustive=...)` overrides it |
 

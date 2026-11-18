@@ -199,6 +199,7 @@ class Parameter:
         ids: (
             Literal["names", "values"] | Callable[[VectorInfo], str | None] | None
         ) = None,
+        pin_nsamples: bool = False,
     ): ...
 ```
 
@@ -210,7 +211,8 @@ class Parameter:
 | `always_include_directed` | whether `--vector-mode=mixed` includes the directed vectors |
 | `vector_constraints` | functions taking the row as a `Vector` (`v.lo` or `v[0]`), as a dict of names to functions or a list (named by each function's `__name__`, `constraint_<i>` for a lambda, a partial or a callable object); they run in order and a random row that fails one is redrawn |
 | `max_retries` | redraws per row before giving up (int >= 1) |
-| `nsamples` | this strategy's default count: `None`, an int >= 0 or `"auto"`; an integer `--nsamples` overrides it |
+| `nsamples` | this strategy's default count: `None`, an int >= 0 or `"auto"`; `--nsamples` overrides it unless `pin_nsamples=True` |
+| `pin_nsamples` | (4.3) `True` makes `nsamples` a hard count that `--nsamples` does not change (`nsamples="auto", pin_nsamples=True` stays exhaustive under `--nsamples=50`); needs `nsamples`; `--vector-mode`, `--vector-name` and `--vector-index` still apply |
 | `per_sequence_samples` | count rows per combination of the `Series`/`RNGSequence` arguments (section 7) |
 | `max_exhaustive` | this strategy's limit on exhaustive combinations (section 7) |
 | `ids` | this strategy's test IDs (section 11): `None` follows the `strategies_ids` ini option, `"names"` or `"values"` overrides it, and a function receives each row's `VectorInfo` and returns the ID or `None` to keep it |
@@ -253,6 +255,7 @@ class Parameter:
         per_sequence_samples: bool | _Keep = _KEEP,
         max_exhaustive: int | None | _Keep = _KEEP,
         ids: Literal["names", "values"] | Callable[[VectorInfo], str | None] | None | _Keep = _KEEP,
+        pin_nsamples: bool | _Keep = _KEEP,
     ) -> Parameter: ...
 
     # Generation outside the plugin, and the export
@@ -556,6 +559,8 @@ Random rows per strategy and test:
 | not given | unset | 10 |
 | not given | 25 | 25 |
 | `5` | 25 | 5 (the command line wins) |
+| `5` or `auto` | 25, `pin_nsamples=True` | 25 (pinned: the strategy wins) |
+| `5` | `"auto"`, `pin_nsamples=True` | every combination, as `--nsamples=auto` |
 | `auto` | any | every `Series`/`RNGSequence` combination; without sequence arguments, the strategy's own int count or 10 |
 | not given | `"auto"` | as `--nsamples=auto` |
 
@@ -591,12 +596,14 @@ usage error listing each strategy's directed vectors.
 | `--vector-index=I` | only the directed vector at index I |
 | `--strategy-constraint-off=[S:]NAME[,...]` | turn the constraint NAME off for this run, in every strategy or only in strategy S (its resolved name, as in the `-v` summary); repeatable. An item that matches no constraint of a resolved strategy is a usage error in a whole-suite run (with "did you mean" and the constraints by strategy), and a red line in a run narrowed by paths, node IDs, `--lf`, `--sw`, `--ignore` or a start below the rootdir, or with a module that was skipped or failed to collect |
 | `--strategy-details` | (4.1) give each failed strategy row a `pytest-strategies` section under its traceback (section 16); off by default; not part of rerun commands |
+| `--strategy-export=DIR` | (4.3) write `strategies.json` and `strategies.vectors.json` into DIR when the session ends (section 15); relative to the folder pytest runs in |
 | `--list-strategies` | collect the tests as usual (which calls their factories, and the context hook for those with `ctx`), load every strategies file, list the registered names and exit; exit code 2 when the collection had errors |
 
 | ini option | Meaning |
 | --- | --- |
 | `strategies_max_exhaustive` | the project's limit on exhaustive combinations (default 100000) |
 | `strategies_ids` | `names` (default) or `values` (the 3.0 IDs built from the values); anything else is a usage error (section 11) |
+| `strategies_export_dir` | (4.3) as `--strategy-export`, relative to the rootdir; the option and the `pytest_strategies_export_dir` hook win (section 15) |
 
 `-o NAME=VALUE` sets an ini option for one run (`-o strategies_ids=values`). In a
 native TOML configuration (pytest 9's `pytest.toml`, or `[tool.pytest]`), write the
@@ -934,6 +941,31 @@ class VectorInfo:
   mark first and the row's after it, and `item.get_closest_marker("strategy")`
   returns the test's own: read the stash instead.
 - Read it; do not build it. Fields that later releases add come with defaults.
+
+### The run export (4.3)
+
+`--strategy-export=DIR` (relative to the folder pytest runs in), else the first
+`pytest_strategies_export_dir(config)` hook implementation that returns a path, else
+the `strategies_export_dir` ini option (both relative to the rootdir) makes the
+session write two files into DIR when it ends (the folder is created):
+
+- `strategies.json` (`"kind": "strategy_definitions"`): `schema`, `generator`,
+  `seed`, `nsamples` (the session's), and `tests`, one per selected test function
+  that got rows (`nodeid` without parameters), each with `strategies`: `name`,
+  `origin`, `arguments` (the `@strategy` keywords), `context`, `nsamples`
+  (`{"value", "source"}`, as the `-v` summary) and `parameter`
+  (`Parameter.to_dict()`, with the directed and test vectors), or `error`. No drawn
+  values.
+- `strategies.vectors.json` (`"kind": "strategy_vectors"`): the same, plus `rows`
+  per strategy: `id`, `kind`, `name`, `index`, `enumerated`, `values`, and `items`
+  (`[{"nodeid", "outcome"}]`, outcome `passed`, `failed`, `skipped`, `xfailed`,
+  `xpassed`, `error` or `null` when the item did not run).
+
+Only selected items count (after `-k`, `--deselect`), so `--collect-only` exports
+the rows without running them. Under pytest-xdist the controller writes the files.
+The hook is called when the session starts, so implement it in the rootdir's
+`conftest.py` or a plugin, with `@pytest.hookimpl(optionalhook=True)`; a conftest's
+`pytest_configure` can also set `config.option.strategy_export`.
 
 ## 16. Reproducing failures
 

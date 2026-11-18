@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     import pytest
 
     from ._reuse import Reuse
+    from ._run_export import RunExport
 
 
 @dataclass
@@ -125,6 +126,8 @@ class SessionState:
         self.clashes: list[str] = []
         # One entry per test and strategy, for the -v summary
         self.resolutions: list[Resolution] = []
+        # What the run export (--strategy-export) records, when the run writes it
+        self.run_export: RunExport | None = None
         # On the pytest-xdist controller, which collects nothing: the -v summary
         # of the first worker that finished (every worker collects all the tests)
         self.worker_summary: dict[str, Any] | None = None

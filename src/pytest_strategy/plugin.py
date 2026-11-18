@@ -44,7 +44,7 @@ from _pytest._code.code import TerminalRepr
 from _pytest.pathlib import ImportPathMismatchError, import_path
 from pytest import Config, Session
 
-from . import _repro, _reuse
+from . import _repro, _reuse, _run_export
 from ._context import Answer
 from ._fingerprint import UNAVAILABLE, canonical
 from ._options import VectorMode, constraint_off_item, parse_constraint_off
@@ -247,6 +247,26 @@ class PytestStrategyPlugin:
             "a strategy (added by @strategy)",
         )
 
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_sessionstart(self, session: Session) -> None:
+        """
+        Start recording the run export when the run writes one (``--strategy-export``,
+        the ``pytest_strategies_export_dir`` hook or the ``strategies_export_dir`` ini
+        option). tryfirst: before pytest-xdist starts its workers, which record
+        when the controller says so (``pytest_configure_node``) and never write.
+        """
+        state = runtime.current
+        if state is None:
+            return
+        workerinput = getattr(session.config, "workerinput", None)
+        if workerinput is not None:
+            if workerinput.get(_run_export.WORKER_INPUT):
+                state.run_export = _run_export.RunExport(None)
+            return
+        folder = _run_export.target(session.config)
+        if folder is not None:
+            state.run_export = _run_export.RunExport(folder)
+
     @pytest.hookimpl(optionalhook=True)
     def pytest_configure_node(self, node: Any) -> None:
         """
@@ -260,6 +280,7 @@ class PytestStrategyPlugin:
         node.workerinput["pytest_strategies_seed"] = _run_seed()
         state = runtime.current
         if state is not None:
+            node.workerinput[_run_export.WORKER_INPUT] = state.run_export is not None
             node.workerinput[_DESELECT] = sorted(state.deselect)
             node.workerinput[_REUSED] = sorted(state.reused)
             node.workerinput[_RECORDED] = sorted(state.recorded)
@@ -394,6 +415,10 @@ class PytestStrategyPlugin:
                 pytest.mark.parametrize(parametrization.argnames, parametrization.params()).mark
             )
             unfilled.extend(parametrization.unfilled)
+            state = runtime.current
+            export = parametrization.export
+            if state is not None and state.run_export is not None and export is not None:
+                state.run_export.add_use(metafunc.definition.nodeid, export, parametrization.infos)
         own_markers[:] = markers
         if unfilled:
             metafunc.definition.stash[_UNFILLED_RECORDS] = unfilled
@@ -610,6 +635,8 @@ class PytestStrategyPlugin:
         state = runtime.current
         if state is None:
             return
+        if state.run_export is not None:
+            state.run_export.collect(session.items)
         if getattr(session.config, "workerinput", None) is not None:
             state.value_digests = _value_digests(
                 session.items, getattr(session.config, "rootpath", None)
@@ -1061,14 +1088,16 @@ class PytestStrategyPlugin:
         Note a test whose setup or call failed, for the line that reproduces the run,
         and the rerun command of a failed strategy row, for the list of failed rows
         (on the pytest-xdist controller too, which gets the workers' reports).
+        Record each report's outcome for the run export.
         """
-        if report.failed and report.when != "teardown":
-            state = runtime.current
-            if state is not None:
-                state.failed_tests.add(report.nodeid)
-                row = getattr(report, "pytest_strategies", None)
-                if isinstance(row, dict) and report.nodeid not in state.failed_rows:
-                    state.failed_rows[report.nodeid] = row
+        state = runtime.current
+        if state is not None and state.run_export is not None:
+            state.run_export.record(report)
+        if report.failed and report.when != "teardown" and state is not None:
+            state.failed_tests.add(report.nodeid)
+            row = getattr(report, "pytest_strategies", None)
+            if isinstance(row, dict) and report.nodeid not in state.failed_rows:
+                state.failed_rows[report.nodeid] = row
 
     @pytest.hookimpl(trylast=True, specname="pytest_runtest_logreport")
     def pytest_runtest_logreport_encodable(self, report: pytest.TestReport) -> None:
@@ -1147,6 +1176,17 @@ class PytestStrategyPlugin:
                 lines.append("  (--strategy-details shows each row's values below its traceback)")
             for line in lines:
                 write_line(line)
+        export = state.run_export if state is not None else None
+        if export is not None and export.folder is not None:
+            if export.error is not None:
+                write_line(
+                    f"pytest-strategies: could not write the strategy export to "
+                    f"{export.folder}: {export.error}",
+                    red=True,
+                )
+            elif export.written:
+                names = " and ".join(path.name for path in export.written)
+                write_line(f"pytest-strategies: wrote {names} to {export.folder}")
         if state is not None:
             if exitstatus in _FINISHED:
                 for line in _uncollected_lines(state, config):
@@ -1235,10 +1275,16 @@ class PytestStrategyPlugin:
                     "passed": {nodeid: list(o) for nodeid, o in state.passed_rows.items()},
                     "collected": sorted(state.reused_collected),
                 }
+                if state.run_export is not None:
+                    workeroutput[_run_export.WORKER_OUTPUT] = state.run_export.worker_output()
         if state is None:
             return
         if workeroutput is None:
             _record_failed_seeds(session.config, state)
+            if state.run_export is not None:
+                state.run_export.write(
+                    state.seed(), runtime.session_options(session.config).base.nsamples
+                )
         state.worker_differences = _differences(state.worker_checks)
         if state.worker_differences and session.exitstatus in (
             pytest.ExitCode.OK,
@@ -1275,6 +1321,8 @@ class PytestStrategyPlugin:
         reuse = output.get(_REUSE)
         if isinstance(reuse, dict):
             state.worker_reuse[worker] = reuse
+        if state.run_export is not None:
+            state.run_export.take_worker_output(output.get(_run_export.WORKER_OUTPUT))
 
     # ==== HELPER METHODS ====
 
@@ -3009,6 +3057,19 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
     group.addoption(
+        "--strategy-export",
+        action="store",
+        default=None,
+        dest="strategy_export",
+        metavar="DIR",
+        help=(
+            "Write strategies.json (each test's strategies as defined) and "
+            "strategies.vectors.json (with the rows each test ran and their outcome) "
+            "into DIR when the session ends"
+        ),
+    )
+
+    group.addoption(
         "--list-strategies",
         action="store_true",
         default=False,
@@ -3020,6 +3081,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "Most rows --nsamples=auto (or per_sequence_samples=True) may generate for one "
         "strategy (default: 100000); Parameter(max_exhaustive=...) overrides it",
         default="100000",
+    )
+
+    parser.addini(
+        "strategies_export_dir",
+        "Folder, relative to the rootdir, to write strategies.json and "
+        "strategies.vectors.json into when the session ends (as --strategy-export, "
+        "which wins)",
+        type="string",
+        default="",
     )
 
     parser.addini(
@@ -3052,6 +3122,7 @@ def pytest_configure_session(config: Config) -> None:
 
     if not config.option.help:
         check_ids_format(config)
+        _run_export.check_ini(config)
 
     # --list-strategies prints from pytest_collection_finish and exits. Under
     # pytest-xdist only the workers collect, and a worker's exit crashes the

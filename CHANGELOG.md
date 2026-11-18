@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.3.0] - 2026-11-18
+
+4.3.0 adds a per-run export of the strategies each test used and the vectors it ran, and lets a strategy pin its sample count. It removes nothing, and a seed recorded with 4.2 gives the same rows.
+
+### Added
+
+- `--strategy-export=DIR` writes two JSON files when the session ends: `strategies.json`, each selected test with the strategies it uses as it resolved them (origin, `@strategy` arguments, context fingerprint, effective `nsamples` and its source, and `Parameter.to_dict()` with the directed and test vectors), and `strategies.vectors.json`, the same with every row each test ran (directed, test, random and exhaustive) and the outcome of each item. Under pytest-xdist the controller writes them. See "Exporting a run" in the README.
+- The `strategies_export_dir` ini option, and the `pytest_strategies_export_dir(config)` hook, which a `conftest.py` implements to choose the folder in code. `--strategy-export` wins over the hook, and the hook over the ini option.
+- `Parameter(pin_nsamples=True)` makes the strategy's `nsamples` a hard count that `--nsamples` does not override: `nsamples="auto", pin_nsamples=True` runs every `Series`/`RNGSequence` combination once, also under `--nsamples=50`. `extend()` takes and keeps it, and the `-v` summary shows the source as `Parameter(nsamples=, pinned)`.
+- `Parameter.to_dict()`, and so `export_strategies()`, has the key `pin_nsamples` (a key added within schema 1).
+- The agent skill documents both. Run `pytest-strategies skill install` to update an installed copy.
+
 ## [4.2.0] - 2026-11-13
 
 4.2.0 lets a test pass arguments to its strategy's factory. It removes nothing, and a seed recorded with 4.1 gives the same rows.
@@ -521,7 +533,8 @@ These emit a `DeprecationWarning` that points at your code, keep working in 3.x,
 - Fixed `AttributeError: 'Parameter' object has no attribute 'generate_samples'` by renaming method to `generate_vectors`.
 - Improved error handling in `Strategy` decorator.
 
-[Unreleased]: https://github.com/guillegil/pytest-strategies/compare/v4.2.0...HEAD
+[Unreleased]: https://github.com/guillegil/pytest-strategies/compare/v4.3.0...HEAD
+[4.3.0]: https://github.com/guillegil/pytest-strategies/compare/v4.2.0...v4.3.0
 [4.2.0]: https://github.com/guillegil/pytest-strategies/compare/v4.1.2...v4.2.0
 [4.1.2]: https://github.com/guillegil/pytest-strategies/compare/v4.1.1...v4.1.2
 [4.1.1]: https://github.com/guillegil/pytest-strategies/compare/v4.1.0...v4.1.1

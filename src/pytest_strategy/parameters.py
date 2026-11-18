@@ -1006,6 +1006,7 @@ class Parameter:
         per_sequence_samples: bool = False,
         max_exhaustive: int | None = None,
         ids: _Ids = None,
+        pin_nsamples: bool = False,
     ) -> None:
         """
         Initialize a Parameter container.
@@ -1057,11 +1058,16 @@ class Parameter:
                 sequence), whose id is the row's ID in the ini option's format: it
                 returns the ID to use, or None to keep that one. IDs that come out
                 the same are suffixed as pytest suffixes them (odd0, odd1).
+            pin_nsamples: If True, nsamples is a hard count: --nsamples does not
+                change it (nsamples="auto" stays auto under --nsamples=50). It needs
+                an nsamples. --vector-mode, --vector-name and --vector-index still
+                apply.
 
         Raises:
             ValueError: If nsamples, max_retries or max_exhaustive is not a valid count,
-                per_sequence_samples is not a bool, or ids is not None, "names",
-                "values" or a callable
+                per_sequence_samples or pin_nsamples is not a bool, pin_nsamples is
+                True without nsamples, or ids is not None, "names", "values" or a
+                callable
             RNGValueError: If two test args have the same name, or a name is not an
                 identifier, is a keyword or starts with "_"
             RNGValueError: If a directed or test vector's name is not a non-empty str,
@@ -1102,6 +1108,12 @@ class Parameter:
             raise ValueError(f"max_retries must be an int >= 1, got {max_retries!r}")
         if not isinstance(per_sequence_samples, bool):
             raise ValueError(f"per_sequence_samples must be a bool, got {per_sequence_samples!r}")
+        if not isinstance(pin_nsamples, bool):
+            raise ValueError(f"pin_nsamples must be a bool, got {pin_nsamples!r}")
+        if pin_nsamples and nsamples is None:
+            raise ValueError(
+                'pin_nsamples=True needs nsamples: pass the count to pin (an int or "auto")'
+            )
         if max_exhaustive is not None and (
             not isinstance(max_exhaustive, int)
             or isinstance(max_exhaustive, bool)
@@ -1137,6 +1149,7 @@ class Parameter:
         self.per_sequence_samples = per_sequence_samples
         self.max_exhaustive = max_exhaustive
         self.ids: _Ids = ids
+        self.pin_nsamples = pin_nsamples
 
     @property
     def directed_vectors(self) -> Mapping[str, Vector]:
@@ -1649,8 +1662,8 @@ class Parameter:
         encoding (``{"$float": "nan"}``, ``{"$enum": "Color", "member": "RED"}``,
         ``{"$repr": ..., "$type": ...}``), ``constraints`` as ``{"name", "enabled"}``
         in evaluation order, ``always_include_directed``, ``max_retries``,
-        ``nsamples``, ``per_sequence_samples``, ``max_exhaustive`` and
-        ``skip_reason``. Every constraint is enabled here; the export says which
+        ``nsamples``, ``per_sequence_samples``, ``max_exhaustive``, ``skip_reason``
+        and ``pin_nsamples``. Every constraint is enabled here; the export says which
         ones the run turns off.
         """
         # Imported here: the export module imports this one
@@ -2525,6 +2538,7 @@ class Parameter:
         per_sequence_samples: bool | _Keep = _KEEP,
         max_exhaustive: int | None | _Keep = _KEEP,
         ids: _Ids | _Keep = _KEEP,
+        pin_nsamples: bool | _Keep = _KEEP,
     ) -> Parameter:
         """
         Return a new Parameter built on this one; this one is not changed.
@@ -2550,9 +2564,9 @@ class Parameter:
         Vectors are given in the new argument list, in any form the constructor
         takes. A pytest.param(...) vector keeps its marks.
 
-        Every other setting (nsamples, max_retries, per_sequence_samples,
-        max_exhaustive, ids, always_include_directed) is this Parameter's unless
-        given.
+        Every other setting (nsamples, pin_nsamples, max_retries,
+        per_sequence_samples, max_exhaustive, ids, always_include_directed) is this
+        Parameter's unless given.
 
         Args:
             *test_args: Arguments to replace (same name) or add (new name)
@@ -2680,6 +2694,7 @@ class Parameter:
             per_sequence_samples=keep(per_sequence_samples, self.per_sequence_samples),
             max_exhaustive=keep(max_exhaustive, self.max_exhaustive),
             ids=keep(ids, self.ids),
+            pin_nsamples=keep(pin_nsamples, self.pin_nsamples),
         )
         result._unnamed = unnamed & set(result._constraints)
         for fn in listed:

@@ -6,7 +6,7 @@ the fragments ``Parameter.to_dict()``, ``TestArg.to_dict()`` and
 The document::
 
     {"schema": 1, "kind": "strategies",
-     "generator": {"name": "pytest-strategies", "version": "4.2.0"},
+     "generator": {"name": "pytest-strategies", "version": "4.3.0"},
      "seed": 1, "nsamples": 10,
      "strategies": [
        {"name": "burst",
@@ -263,6 +263,7 @@ def parameter_dict(param: Parameter, constraints_off: Iterable[str] = ()) -> dic
         "per_sequence_samples": param.per_sequence_samples,
         "max_exhaustive": param.max_exhaustive,
         "skip_reason": param.skip_reason,
+        "pin_nsamples": bool(getattr(param, "pin_nsamples", False)),
     }
 
 
