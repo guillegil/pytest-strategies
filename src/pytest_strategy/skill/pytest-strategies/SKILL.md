@@ -1,6 +1,6 @@
 ---
 name: pytest-strategies
-description: Write, fix and debug pytest tests that use the pytest-strategies plugin (import name pytest_strategy) for constrained-random and directed test parametrization. Use this skill whenever code imports pytest_strategy or uses register/strategy, Parameter, TestArg, Vector, RNGInteger, RNGChoice, RNGEnum, Series, RNGSequence or another RNG type; when creating or editing strategies.py or *_strategies.py files; when reusing or extending a strategy (Parameter.extend); when adding directed or test vectors, named constraints or config-driven strategies (the pytest_strategies_context hook, ctx, strategies_ctx, get_context, skip_if_empty); when choosing --nsamples, --vector-mode, --strategy-constraint-off, --strategy-details or -k on row IDs such as test_x[rand-3]; and when a failed generated test has to be reproduced from its rerun command, --rng-seed or --lf. Use it even when the user only says randomized tests, test vectors or strategies in a project that depends on pytest-strategies.
+description: Write, fix and debug pytest tests that use the pytest-strategies plugin (import name pytest_strategy) for constrained-random and directed test parametrization. Use it whenever code imports pytest_strategy or uses register/strategy, Parameter, TestArg, Vector, RNGInteger, RNGEnum, Series, RNGSequence or another RNG type; when editing strategies.py or *_strategies.py files; when reusing or extending a strategy (Parameter.extend) or passing it arguments (@strategy(name, device=...)); when adding directed or test vectors, named constraints or config-driven strategies (pytest_strategies_context, ctx, strategies_ctx, get_context, skip_if_empty); when choosing --nsamples, pin_nsamples, --vector-mode, --strategy-constraint-off, --strategy-details, --strategy-export or -k on row IDs like test_x[rand-3]; and when reproducing a failed generated test from its rerun command, --rng-seed or --lf. Use it even if the user only says randomized tests, test vectors or strategies in a project that uses pytest-strategies.
 ---
 
 # pytest-strategies
@@ -21,9 +21,11 @@ the error messages and what changed from 3.x, read
 ## Before writing anything
 
 - Check the installed version: `python -c "import pytest_strategy as p; print(p.__version__)"`.
-  `Parameter.extend()` and `--strategy-details` need 4.1. Before 4.0, test IDs
-  showed values (`test_x[addr=0,len=1]`) and factories received `nsamples` by
-  position; references/api.md, section 19 lists the differences.
+  `Parameter.extend()` and `--strategy-details` need 4.1, `@strategy(...,
+  device=...)` arguments 4.2, `--strategy-export` and `pin_nsamples` 4.3. Before
+  4.0, test IDs showed values (`test_x[addr=0,len=1]`) and factories received
+  `nsamples` by position; references/api.md, section 19 lists the differences.
+  4.x needs Python 3.11+ and pytest 8.4.2+.
 - Run `pytest --list-strategies` to see the registered names. It collects the tests
   first, so a broken factory shows as a collection error (exit code 2).
 - Look for strategies files next to the tests and in parent folders, and for a
@@ -414,11 +416,14 @@ def esm_rw(ctx):
 - IDs name rows instead of showing values, and the same seed gives other random
   values than 3.x: update `-k` and `--deselect` lists and record seeds again.
   Factory parameters other than `nsamples`, `ctx`, `rng` and `options` need a
-  default, and `TestArg` options after `rng_type` are keyword-only.
+  default or a value from the test (`@strategy("rw", device="esm")`, 4.2), and
+  `TestArg` options after `rng_type` are keyword-only.
 - `Strategy.register`/`Strategy.strategy` remain as aliases; write
   `register`/`strategy`.
-- 4.1 only adds: `Parameter.extend()`, and `--strategy-details`, since failed rows
-  no longer print a section each by default (put it in `addopts` for the 4.0 output).
+- 4.1 to 4.3 only add, and keep the rows of a recorded seed: `Parameter.extend()`
+  and `--strategy-details` (4.1: failed rows no longer print a section each by
+  default; put it in `addopts` for the 4.0 output), `@strategy(name, **arguments)`
+  (4.2), `--strategy-export` and `Parameter(pin_nsamples=True)` (4.3).
 
 ## Checking your work
 
