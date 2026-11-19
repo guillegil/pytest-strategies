@@ -5,7 +5,7 @@ description: Write, fix and debug pytest tests that use the pytest-strategies pl
 
 # pytest-strategies
 
-Documents pytest-strategies 4.3.0.
+Documents pytest-strategies 4.4.0.
 
 pytest-strategies (import name `pytest_strategy`) parametrizes pytest tests from
 *strategies*: factories that return a `Parameter` describing each test argument (a
@@ -317,7 +317,7 @@ def esm_rw(ctx):
 | `--strategy-constraint-off=[STRATEGY:]NAME` | turn a named constraint off for this run |
 | `--strategy-details` | show each failed row's values, seed and rerun command under its traceback (4.1) |
 | `--list-strategies` | list the registered names and exit |
-| `--strategy-export=DIR` | write `strategies.json` (definitions) and `strategies.vectors.json` (rows and outcomes) when the session ends (4.3; also the `strategies_export_dir` ini option or the `pytest_strategies_export_dir` hook) |
+| `--strategy-export=DIR` | write `strategies.json` (definitions) and `strategies.vectors.json` (rows, outcomes and, from 4.4, `rerun` argument lists that bring the same values back) when the session ends (4.3; also the `strategies_export_dir` ini option or the `pytest_strategies_export_dir` hook) |
 | `-v` | per-strategy row counts, `nsamples` source, rejections per constraint |
 
 **Test IDs** name rows, the same for every seed: `[directed-zeros]`, `[test-max]`

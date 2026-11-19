@@ -227,6 +227,8 @@ class PytestStrategyPlugin:
         # imported follow the printed seed. The global random state is not touched.
         given = _given_seed(config)
         state = runtime.current
+        # What the run was started with, before a test changes the environment
+        _repro.invocation_args(config)
         reuse = state.reuse if state is not None else None
         if state is not None and reuse is not None and given is not None:
             # A conftest.py's pytest_configure set config.option.rng_seed, which wins
@@ -281,6 +283,10 @@ class PytestStrategyPlugin:
         state = runtime.current
         if state is not None:
             node.workerinput[_run_export.WORKER_INPUT] = state.run_export is not None
+            config = getattr(node, "config", None)
+            if config is not None:
+                # A worker is started with the paths only (_repro.invocation_args)
+                node.workerinput[_repro.INVOCATION] = _repro.invocation_args(config)
             node.workerinput[_DESELECT] = sorted(state.deselect)
             node.workerinput[_REUSED] = sorted(state.reused)
             node.workerinput[_RECORDED] = sorted(state.recorded)
@@ -422,6 +428,21 @@ class PytestStrategyPlugin:
         own_markers[:] = markers
         if unfilled:
             metafunc.definition.stash[_UNFILLED_RECORDS] = unfilled
+
+    @pytest.hookimpl(wrapper=True, tryfirst=True, specname="pytest_generate_tests")
+    def pytest_generate_tests_count(self, metafunc: pytest.Metafunc) -> Generator[None, Any, Any]:
+        """
+        Note for the run export how many items the test function gets, once every
+        parametrization was applied (``Metafunc._calls``, private: without it the
+        export finds out from the rows the run selected): a run that selected them
+        all can be run again by the function's node ID.
+        """
+        result = yield
+        state = runtime.current
+        calls = getattr(metafunc, "_calls", None)
+        if state is not None and state.run_export is not None and isinstance(calls, list):
+            state.run_export.add_calls(metafunc.definition.nodeid, len(calls))
+        return result
 
     @pytest.hookimpl(tryfirst=True)
     def pytest_itemcollected(self, item: pytest.Item) -> None:
@@ -636,7 +657,9 @@ class PytestStrategyPlugin:
         if state is None:
             return
         if state.run_export is not None:
-            state.run_export.collect(session.items)
+            state.run_export.collect(
+                session.items, session.config, state.seed(), state.deselected_items
+            )
         if getattr(session.config, "workerinput", None) is not None:
             state.value_digests = _value_digests(
                 session.items, getattr(session.config, "rootpath", None)
@@ -1282,8 +1305,16 @@ class PytestStrategyPlugin:
         if workeroutput is None:
             _record_failed_seeds(session.config, state)
             if state.run_export is not None:
+                args = _repro.run_args(session.config, state.seed())
+                rerun: dict[str, Any] = {
+                    "cwd": str(session.config.invocation_params.dir),
+                    "args": args,
+                }
+                note = _repro.run_note(args)
+                if note is not None:
+                    rerun["note"] = note
                 state.run_export.write(
-                    state.seed(), runtime.session_options(session.config).base.nsamples
+                    state.seed(), runtime.session_options(session.config).base.nsamples, rerun
                 )
         state.worker_differences = _differences(state.worker_checks)
         if state.worker_differences and session.exitstatus in (
@@ -1885,8 +1916,7 @@ def strategy_not_found_message(name: str, directory: str, rootpath: str | None) 
     """
     available = visible_names(directory, rootpath)
     message = (
-        f"Strategy '{name}' not found. "
-        f"Available strategies: {available if available else 'none'}"
+        f"Strategy '{name}' not found. Available strategies: {available if available else 'none'}"
     )
     close = difflib.get_close_matches(name, available, n=3)
     if close:

@@ -1971,6 +1971,55 @@ controller takes the first worker's, adds the outcomes and writes both files in
 `pytest_sessionfinish`. Both documents are schema 1 with the evolution rules
 below.
 
+**The export's rerun commands (4.4).** Every `rerun.args` is built by `_repro`, by
+the functions that build the terminal's commands, so the two cannot disagree:
+`_repro.row_rerun(item, infos)` returns a `Rerun` (unquoted `args`, `note`, and the
+`-k` expression of a row outside the rootdir), `_repro.failure` prints its
+`command` (`command_line(args)`), and `RunExport.collect` stores the `args` of
+`row_rerun(item, infos, carry=True)` for each item: the same command with the
+run's other options after its own (`rerun_options` = `generation_options` +
+`carried_options`). `tests/integration/test_run_export_integration.py` compares
+`shlex.split` of each printed command, plus those options, with the item's `args`.
+`carried_options` takes the arguments the run was started with
+(`invocation_args`: `PYTEST_ADDOPTS`, then `invocation_params.args`, read once at
+`pytest_configure`), drops the paths and node IDs (`_options_of`: an argument is
+one when pytest's own parser, `config._parser.parse_known_args`, lists it under
+`file_or_dir` and no longer does once it is taken out, so an option's value is
+never mistaken for a path; without the parser, or when it refuses the arguments,
+nothing is carried) and then what the command gives itself or must not repeat
+(`_carried`: `_OWN_OPTIONS`, `-c`, the `-o` overrides of `generation_options`,
+`_LEFT_OUT_FLAGS`). A pytest-xdist worker is started with the paths only, so the
+controller sends its arguments (`workerinput[_repro.INVOCATION]`). The terminal's
+command stays without them: every failed row would repeat the whole command line
+under the run that just printed it, and its tests pin the 4.3 text. A test's command is
+`_repro.rows_rerun`: the function's node ID (`rerun_function_nodeid`) when the run
+selected all of its items, else each item's; outside the rootdir the run's paths
+and the items' `-k` expressions joined with `or`, else the node ID command with
+the note. Whether a function was selected as a whole is decided by counting: a
+`tryfirst` wrapper of `pytest_generate_tests` notes `len(metafunc._calls)` once
+every parametrization was applied (`RunExport.add_calls`), which also covers rows
+chosen by node ID, which pytest never collects; without that private attribute
+the export falls back to "no item of the function was deselected and every row
+has an item". All of this happens in `pytest_collection_finish`, so under
+pytest-xdist the workers make the commands and send them with the collected part
+(`{"tests", "options"}`), and `--collect-only` has them too. The top-level
+`options` are `--rng-seed` and `rerun_options` over every selected row's
+infos (the union of the constraints turned off). The controller adds `cwd`
+(`invocation_params.dir`) and `_repro.run_args`, the arguments the run was started
+with (`invocation_args`) as given plus `--rng-seed=S` unless the last `--rng-seed`
+among them (`given_seed`) is the run's seed, placed before a `--`. Nothing is
+removed from them (`--lf`, `--sw`, `--collect-only`, `--strategy-export`): the
+README says what each does in a rerun, and `_repro.run_note` gives the top-level
+`rerun` a `note` for `--lf` and `--sw`. For a test outside the rootdir each
+item's command needs `_repro.keyword`, which must know that its expression
+selects no other collected test. Asking every test's matcher for every exported
+item made the collection quadratic (3000 items: 13 s), so `_repro._Matchers`
+indexes the names the matchers match by (`KeywordMatcher._names`, private; without
+it every test is asked): each piece of 6 characters of each lowercased name maps
+to the names that hold it, a name is looked for among those of its rarest piece,
+and only the tests it can select are given to pytest's own matcher, which stays
+the judge.
+
 **Schema 1.** `export_strategies()` and the `to_dict()` methods write schema 1 (`_export.py`,
 whose values go through `_encode.encode()`, as `VectorInfo.to_dict()`'s do).
 `_export.document()` calls each registration's factory as collection does and

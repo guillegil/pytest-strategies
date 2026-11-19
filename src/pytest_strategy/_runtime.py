@@ -208,7 +208,12 @@ class SessionState:
         # command selects it with a -k expression that matches no other test
         # (_repro.keyword)
         self.deselected_items: list[pytest.Item] = []
-        self.keyword_matchers: list[tuple[pytest.Item, Any]] | None = None
+        self.keyword_matchers: Any = None
+        # The arguments the run was started with (PYTEST_ADDOPTS, then pytest's own),
+        # read when the plugin is configured, and the options among them that a
+        # command for chosen rows repeats (_repro.invocation_args, carried_options)
+        self.invocation: list[str] | None = None
+        self.carried: list[str] | None = None
         # The rows of ``recorded`` that passed (their call passed and their teardown
         # did not fail), with the options of their rerun command in this run, by
         # node ID: an entry leaves the failed-seeds map when its row passes under

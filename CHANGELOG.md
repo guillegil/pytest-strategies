@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.4.0] - 2026-11-19
+
+4.4.0 adds to the run export the commands that run its rows again with the same values. It removes nothing, the export stays schema 1, and a seed recorded with 4.3 gives the same rows.
+
+### Added
+
+- Both files of the run export (`--strategy-export`) carry `rerun` objects, each with `args`: the unquoted arguments of a pytest command that gives the same values when run from the top-level `rerun.cwd`. A row's node ID alone does not, since it draws under a new seed.
+  - Top level: `cwd` (the absolute folder pytest was started in), `args` (the whole run: the arguments it was started with as given, those of `PYTEST_ADDOPTS` first, plus `--rng-seed=<seed>` when they did not give the run's seed, as when pytest-strategies chose it, a `conftest.py` set it or a `--lf` run reused it) and `options` (what follows node IDs chosen from the run: `--rng-seed=<seed>`, the generation options, the constraints turned off, as `STRATEGY:NAME`, and the run's other options).
+  - Each test: `args` for the rows the run selected, by the function's node ID when it selected them all, else by the node ID of each selected item.
+  - Each entry of a row's `items`: `args`, the arguments of the rerun command the terminal prints for that row, including the `-k` form for a test file outside the rootdir, with the run's other options after the command's own.
+  - A `rerun` object has a `note` when its command is known not to reproduce the rows (a test outside the rootdir that no `-k` expression selects), and the top-level one when the run's command selects tests by the cache (`--lf`, `--sw`).
+- The commands of the export for chosen rows (`options`, a test's and an item's `args`) repeat the options the run was started with, as given: an option of the project's own that shapes the context (`--tb-config=lab.yaml`), or one the collection needs (`--import-mode=importlib`, `-p`), decides what a row holds, and without it the command would run other values. The run's paths, the options the command gives itself, `--lf`, `--sw`, `--stepwise-skip`, `--cache-clear`, `--collect-only`, `--list-strategies`, `--strategy-export`, `-k`, `-m` and `--deselect` are not repeated. The terminal's rerun command is unchanged: it does not repeat them.
+- The top-level `args` repeat `--lf`, `--sw`, `--collect-only` and `--strategy-export` as they were given; see "Exporting a run" in the README for what each does in a rerun.
+- An export of a suite with test files outside the rootdir no longer makes the collection slower with the square of the number of tests: the `-k` expression of each row's command is checked against the tests its name can select, found through an index of the tests' names, instead of against every collected test (3000 rows: 0.6 s instead of 13 s). The first failed row outside the rootdir gains the same.
+- The agent skill documents the new keys. Run `pytest-strategies skill install` to update an installed copy.
+
 ## [4.3.0] - 2026-11-18
 
 4.3.0 adds a per-run export of the strategies each test used and the vectors it ran, and lets a strategy pin its sample count. It removes nothing, and a seed recorded with 4.2 gives the same rows.
@@ -537,7 +553,8 @@ These emit a `DeprecationWarning` that points at your code, keep working in 3.x,
 - Fixed `AttributeError: 'Parameter' object has no attribute 'generate_samples'` by renaming method to `generate_vectors`.
 - Improved error handling in `Strategy` decorator.
 
-[Unreleased]: https://github.com/guillegil/pytest-strategies/compare/v4.3.0...HEAD
+[Unreleased]: https://github.com/guillegil/pytest-strategies/compare/v4.4.0...HEAD
+[4.4.0]: https://github.com/guillegil/pytest-strategies/compare/v4.3.0...v4.4.0
 [4.3.0]: https://github.com/guillegil/pytest-strategies/compare/v4.2.0...v4.3.0
 [4.2.0]: https://github.com/guillegil/pytest-strategies/compare/v4.1.2...v4.2.0
 [4.1.2]: https://github.com/guillegil/pytest-strategies/compare/v4.1.1...v4.1.2
