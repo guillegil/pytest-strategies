@@ -387,6 +387,7 @@ class TestApiSignatures:
             "export_strategies",
             "get_context",
             "pytest_strategies_context",
+            "pytest_strategies_export_dir",
             "Parameter.__init__",
             "TestArg.__init__",
             *(f"{name}.__init__" for name in rng_types),
@@ -508,6 +509,28 @@ class TestSkillContent:
             "Strategy.set_config()",
         ]:
             assert api in removed
+
+    def test_nsamples_sources_include_the_auto_fallback(self, api_md):
+        # The source text of the -v summary and of the export's nsamples.source
+        from pytest_strategy import _resolver
+
+        suffix = ", no Series/RNGSequence for auto"
+        assert suffix in inspect.getsource(_resolver)
+        options = " ".join(_section(api_md, "10. Command-line and ini options").split())
+        for source in ["--nsamples", "Parameter(nsamples=)", "Parameter(nsamples=, pinned)"]:
+            assert f"`{source}`" in options
+        for source in ["Parameter(nsamples=)", "default"]:
+            assert f"`{source}{suffix}`" in options
+        export = " ".join(_section(api_md, "15. Per-test metadata").split())
+        assert f"`{suffix}`" in export
+
+    def test_export_outcomes_cover_rows_with_an_xfail_mark(self, api_md):
+        # tests/integration/test_run_export_integration.py checks the behaviour
+        export = " ".join(_section(api_md, "15. Per-test metadata").split())
+        assert "`error` for a failed setup or teardown," not in export
+        assert "an item with an xfail mark" in export
+        assert "`xfailed` for a failed setup" in export
+        assert "keeps its call's outcome when its teardown fails" in export
 
     def test_skill_points_to_the_removed_table(self, api_md, skill_md):
         upgrading = _section(skill_md, "Upgrading from 3.x")

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The agent skill was reviewed against 4.2 and 4.3. Its description now also triggers on strategy arguments, `pin_nsamples` and `--strategy-export`, and it states which release each feature needs and the supported Python and pytest versions. The reference adds the `pytest_strategies_export_dir` hook's signature (now checked against the code), the keys of `Parameter.to_dict()`, how the export encodes values (a subclass of int or str is a `$repr`), what the run export's `origin`, `rows` and outcomes hold, the lines a run prints when it writes the export or cannot, the `nsamples` source text when `"auto"` had nothing to enumerate (`default, no Series/RNGSequence for auto`), the outcomes of a row with an xfail mark whose setup or teardown failed, the `--lf` line for failed rows that were not collected, and the errors of `@strategy(..., name=value)` and `pin_nsamples`. Run `pytest-strategies skill install` to update an installed copy.
+
+### Fixed
+
+- The skill no longer says that a factory parameter the plugin does not provide needs a default: since 4.2 a test can pass it with `@strategy(..., name=value)`.
+
 ## [4.3.0] - 2026-11-18
 
 4.3.0 adds a per-run export of the strategies each test used and the vectors it ran, and lets a strategy pin its sample count. It removes nothing, and a seed recorded with 4.2 gives the same rows.

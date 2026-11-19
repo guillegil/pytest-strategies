@@ -312,6 +312,112 @@ class TestPinNsamples:
         result.assert_outcomes(passed=1)
 
 
+class TestDocumentedExportValues:
+    """What the skill's reference says the export holds in its less common cases."""
+
+    def test_pinned_auto_without_sequences_reads_default(self, pytester):
+        pytester.makepyfile(doc_a_strategies="""
+            from pytest_strategy import Parameter, RNGInteger, TestArg, register
+
+            @register("doc_a")
+            def factory():
+                return Parameter(
+                    TestArg("x", rng_type=RNGInteger(0, 3)), nsamples="auto", pin_nsamples=True
+                )
+
+            @register("doc_b")
+            def counted():
+                return Parameter(TestArg("x", rng_type=RNGInteger(0, 3)), nsamples=3)
+            """)
+        pytester.makepyfile(test_doc_a="""
+            from pytest_strategy import strategy
+
+            @strategy("doc_a")
+            def test_pinned(x):
+                pass
+
+            @strategy("doc_b")
+            def test_counted(x):
+                pass
+            """)
+        result = pytester.runpytest_inprocess("--nsamples=5", "-v", "--strategy-export=out")
+        result.assert_outcomes(passed=15)
+        result.stdout.fnmatch_lines(
+            ["*doc_a (*nsamples=10 from default, no Series/RNGSequence for auto"]
+        )
+        definitions = _by_test(_load(pytester.path / "out" / "strategies.json"))
+        (pinned,) = definitions["test_doc_a.py::test_pinned"]
+        assert pinned["nsamples"] == {
+            "value": 10,
+            "source": "default, no Series/RNGSequence for auto",
+        }
+        assert pinned["parameter"]["pin_nsamples"] is True
+
+        result = pytester.runpytest_inprocess("--nsamples=auto", "--strategy-export=out")
+        result.assert_outcomes(passed=13)
+        definitions = _by_test(_load(pytester.path / "out" / "strategies.json"))
+        (counted,) = definitions["test_doc_a.py::test_counted"]
+        assert counted["nsamples"] == {
+            "value": 3,
+            "source": "Parameter(nsamples=), no Series/RNGSequence for auto",
+        }
+
+    def test_outcomes_of_failed_setup_and_teardown(self, pytester):
+        pytester.makepyfile(doc_c_strategies="""
+            import pytest
+            from pytest_strategy import Parameter, RNGInteger, TestArg, register
+
+            @register("doc_c")
+            def factory():
+                return Parameter(
+                    TestArg("y", rng_type=RNGInteger(0, 3)),
+                    nsamples=1,
+                    directed_vectors={"xf": pytest.param(1, marks=pytest.mark.xfail)},
+                )
+            """)
+        pytester.makepyfile(test_doc_c="""
+            import pytest
+            from pytest_strategy import strategy
+
+            @pytest.fixture
+            def bad_setup():
+                raise RuntimeError("setup")
+
+            @pytest.fixture
+            def bad_teardown():
+                yield
+                raise RuntimeError("teardown")
+
+            @strategy("doc_c")
+            def test_setup(y, bad_setup):
+                pass
+
+            @strategy("doc_c")
+            def test_teardown(y, bad_teardown):
+                pass
+
+            @strategy("doc_c")
+            def test_both(y, bad_teardown):
+                assert False
+
+            @pytest.mark.xfail(raises=ValueError)
+            @strategy("doc_c")
+            def test_raises(y, bad_setup):
+                pass
+            """)
+        pytester.runpytest_inprocess("--strategy-export=out")
+        vectors = _by_test(_load(pytester.path / "out" / "strategies.vectors.json"))
+
+        def outcomes(test):
+            (used,) = vectors[f"test_doc_c.py::{test}"]
+            return {row["id"]: row["items"][0]["outcome"] for row in used["rows"]}
+
+        assert outcomes("test_setup") == {"directed-xf": "xfailed", "rand-0": "error"}
+        assert outcomes("test_teardown") == {"directed-xf": "xpassed", "rand-0": "error"}
+        assert outcomes("test_both") == {"directed-xf": "xfailed", "rand-0": "failed"}
+        assert outcomes("test_raises") == {"directed-xf": "error", "rand-0": "error"}
+
+
 class TestIniValue:
     def test_a_toml_value_that_is_not_a_string_stops_the_run(self, pytester):
         pytester.makefile(".toml", pytest="[pytest]\nstrategies_export_dir = 1\n")

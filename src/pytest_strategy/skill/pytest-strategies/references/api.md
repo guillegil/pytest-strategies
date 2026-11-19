@@ -92,9 +92,10 @@ def export_strategies(*, format: str = "json") -> str: ...
   does not pass it. Each name must be a factory parameter that takes a keyword (or the
   factory has `**kwargs`); otherwise collection fails with `@strategy('rw', ...)
   cannot pass 'devce' to strategies.py:12:rw: it has no such parameter (it takes:
-  device). Did you mean 'device'?`. The inputs (`nsamples`, `ctx`, `rng`, `options`)
-  and the reserved names (`base`, `config`, `request`) fail the same way, and `name`
-  and `validate_signature` are the decorator's own. The values are passed as they
+  device). Did you mean 'device'?`. The inputs (`nsamples`, `ctx`, `rng`, `options`),
+  the reserved names (`base`, `config`, `request`) and a positional-only parameter
+  fail the same way, and `name` and `validate_signature` are the decorator's own
+  (`@strategy("rw", name="q")` raises `TypeError` at import). The values are passed as they
   are, also to a factory passed by object. They do not change the random streams:
   a row is keyed by the seed, the test and the strategy name, as without them.
   `pytest.mark.strategy("rw", device="esm")` works the same. `export_strategies()`
@@ -114,14 +115,20 @@ def export_strategies(*, format: str = "json") -> str: ...
   `qualname`, `line`), `context` (a fingerprint or null) and one of `parameter`
   (`Parameter.to_dict()`), `error` (`{"type": "RuntimeError", "message": "boom"}`)
   or `unavailable` (section 13). In `Parameter.to_dict()` (`"schema": 1`) each
-  argument has `source` `"value"` with `value`, or `"rng"` with `rng`
+  entry of `arguments` has `name`, `description`, `python_type`, `validator` (a
+  bool) and `source`: `"value"` with `value`, or `"rng"` with `rng`
   (`RNGType.to_dict()`: `{"type": "RNGInteger", "min": 0, "max": 255, "predicate":
-  false}`); vectors are `{"name", "id", "values"}` lists and constraints
-  `{"name", "enabled"}`. Values that JSON does not hold are tagged:
-  `{"$float": "nan"}`, `{"$enum": "Color", "member": "RED"}`,
-  `{"$repr": "b'\\x00'", "$type": "bytes"}`. Ignore keys and enum values you do not
-  know: 4.x adds them within schema 1, and read an unknown `$`-tagged object like
-  `$repr`.
+  false}`); `directed_vectors` and `test_vectors` are lists of `{"name", "id",
+  "values"}` and `constraints` of `{"name", "enabled"}`; the settings are
+  `always_include_directed`, `max_retries`, `nsamples`, `per_sequence_samples`,
+  `max_exhaustive`, `skip_reason` and `pin_nsamples` (4.3). None and values whose
+  type is exactly bool, int, str or a finite float are plain JSON (an int of any
+  size is a JSON number); the others are tagged: `{"$float": "nan"}`,
+  `{"$enum": "Color", "member": "RED"}`, and `{"$repr": "b'\\x00'", "$type":
+  "bytes"}` for anything else, a subclass of int or str included (`class
+  Addr(int)` gives `{"$repr": "5", "$type": "Addr"}`). Ignore keys and enum
+  values you do not know: 4.x adds them within schema 1, and read an unknown
+  `$`-tagged object like `$repr`.
 
 ## 3. Factories
 
@@ -159,7 +166,9 @@ class StrategyOptions:
 - Any other parameter must have a default, which it keeps, or be passed by every test
   that uses the factory (`@strategy("name", device="esm")`, section 2), and
   `*args`/`**kwargs` receive nothing else. `def factory(n)` or `def factory(n, /)` fails collection with
-  `has a parameter 'n', which the plugin does not provide ... Did you mean 'nsamples'?`.
+  `has a parameter 'n', which the plugin does not provide ... Did you mean 'nsamples'?`;
+  for a parameter that is not the first, or in a factory that declares `nsamples`,
+  the message ends with `or pass it from the test: @strategy(..., n=...)`.
   `base`, `config` and `request` are reserved, even with a default. Later 4.x
   releases add inputs only as `StrategyOptions` fields or under the reserved names.
 - A `functools.partial`, a bound method, a classmethod, a staticmethod, a class, a
@@ -212,7 +221,7 @@ class Parameter:
 | `vector_constraints` | functions taking the row as a `Vector` (`v.lo` or `v[0]`), as a dict of names to functions or a list (named by each function's `__name__`, `constraint_<i>` for a lambda, a partial or a callable object); they run in order and a random row that fails one is redrawn |
 | `max_retries` | redraws per row before giving up (int >= 1) |
 | `nsamples` | this strategy's default count: `None`, an int >= 0 or `"auto"`; `--nsamples` overrides it unless `pin_nsamples=True` |
-| `pin_nsamples` | (4.3) `True` makes `nsamples` a hard count that `--nsamples` does not change (`nsamples="auto", pin_nsamples=True` stays exhaustive under `--nsamples=50`); needs `nsamples`; `--vector-mode`, `--vector-name` and `--vector-index` still apply |
+| `pin_nsamples` | (4.3) `True` makes `nsamples` a hard count that `--nsamples` does not change (`nsamples="auto", pin_nsamples=True` stays exhaustive under `--nsamples=50`); without `nsamples` it raises `ValueError`; `--vector-mode`, `--vector-name` and `--vector-index` still apply; a pinned `"auto"` without `Series`/`RNGSequence` arguments gives 10 random rows; the factory's `nsamples` input and `options.nsamples` stay the run's values |
 | `per_sequence_samples` | count rows per combination of the `Series`/`RNGSequence` arguments (section 7) |
 | `max_exhaustive` | this strategy's limit on exhaustive combinations (section 7) |
 | `ids` | this strategy's test IDs (section 11): `None` follows the `strategies_ids` ini option, `"names"` or `"values"` overrides it, and a function receives each row's `VectorInfo` and returns the ID or `None` to keep it |
@@ -619,12 +628,21 @@ Output:
 - After the collection (also with `-q`): `pytest-strategies: context 976bcfdf` when
   the collection computed a context (section 13).
 - A run with failures prints the reproduce line and the failed rows (section 16).
+- A run that exports (section 15) ends with `pytest-strategies: wrote
+  strategies.json and strategies.vectors.json to DIR` (also with `-q`).
 - `-v` adds a "Strategy Summary" with, per strategy, the number of tests, the
   counts of directed and random rows (and of test, exhaustive and skipped rows when
-  there are some), where `nsamples` came from, `rejected: aligned=412,
+  there are some), where `nsamples` came from (`--nsamples`, `Parameter(nsamples=)`,
+  `Parameter(nsamples=, pinned)` or `default`), `rejected: aligned=412,
   no_4k_cross=37` and `off: ...` for constraints, and `left out: N combinations`
   under `auto`; then a "Contexts" block with each context's fingerprint and number
-  of tests.
+  of tests. When `"auto"` had no `Series`/`RNGSequence` argument to enumerate, the
+  source names the count used instead and ends with `, no Series/RNGSequence for
+  auto`: `Parameter(nsamples=), no Series/RNGSequence for auto` (the strategy's
+  integer count under `--nsamples=auto`), or `default, no Series/RNGSequence for
+  auto` (10 rows; this is what a pinned `"auto"` without such arguments shows, so
+  read `parameter.pin_nsamples` of the export, not the source, to tell whether a
+  strategy is pinned).
 - Warnings raised while generating a strategy's rows are reported at the test,
   prefixed with `Strategy '<name>' (<test>): `.
 
@@ -944,28 +962,44 @@ class VectorInfo:
 
 ### The run export (4.3)
 
+```python
+def pytest_strategies_export_dir(config: pytest.Config) -> Any: ...   # the hookspec
+```
+
 `--strategy-export=DIR` (relative to the folder pytest runs in), else the first
-`pytest_strategies_export_dir(config)` hook implementation that returns a path, else
-the `strategies_export_dir` ini option (both relative to the rootdir) makes the
+`pytest_strategies_export_dir` implementation that does not return `None`
+(`firstresult`; an empty path leaves the choice to the ini option), else the
+`strategies_export_dir` ini option (both relative to the rootdir) makes the
 session write two files into DIR when it ends (the folder is created):
 
 - `strategies.json` (`"kind": "strategy_definitions"`): `schema`, `generator`,
   `seed`, `nsamples` (the session's), and `tests`, one per selected test function
   that got rows (`nodeid` without parameters), each with `strategies`: `name`,
-  `origin`, `arguments` (the `@strategy` keywords), `context`, `nsamples`
-  (`{"value", "source"}`, as the `-v` summary) and `parameter`
+  `origin` (the object of section 2, not `VectorInfo.origin`'s string),
+  `arguments` (the `@strategy` keywords), `context`, `nsamples`
+  (`{"value", "source"}`: the count used and the source text of the `-v` summary,
+  section 10, with its `, no Series/RNGSequence for auto` ending) and `parameter`
   (`Parameter.to_dict()`, with the directed and test vectors), or `error`. No drawn
   values.
 - `strategies.vectors.json` (`"kind": "strategy_vectors"`): the same, plus `rows`
-  per strategy: `id`, `kind`, `name`, `index`, `enumerated`, `values`, and `items`
-  (`[{"nodeid", "outcome"}]`, outcome `passed`, `failed`, `skipped`, `xfailed`,
-  `xpassed`, `error` or `null` when the item did not run).
+  per strategy, the rows this run gave the test (a test vector only under
+  `--vector-mode=test`): `id`, `kind`, `name`, `index`, `enumerated`, `values`
+  (by argument name), and `items` (`[{"nodeid", "outcome"}]`: every item that ran
+  the row, several for stacked decorators; outcome `passed`, `failed`, `skipped`,
+  `xfailed`, `xpassed`, `error` for a failed setup or a failed teardown after a call
+  that did not fail, or `null` when the item did not run; an item with an xfail
+  mark, such as a `pytest.param(..., marks=pytest.mark.xfail)` vector, gets
+  `xfailed` for a failed setup and keeps its call's outcome when its teardown
+  fails, unless the mark's `raises=` does not cover the exception).
 
-Only selected items count (after `-k`, `--deselect`), so `--collect-only` exports
-the rows without running them. Under pytest-xdist the controller writes the files.
-The hook is called when the session starts, so implement it in the rootdir's
-`conftest.py` or a plugin, with `@pytest.hookimpl(optionalhook=True)`; a conftest's
-`pytest_configure` can also set `config.option.strategy_export`.
+Values use the encoding of section 2. Only selected items count (after `-k`,
+`--deselect` and `--lf`), so `--collect-only` exports the rows without running
+them. Under pytest-xdist the controller writes the files. A folder that cannot be
+written gives a red `pytest-strategies: could not write the strategy export to
+DIR: ...` line and does not change the exit code. The option is not part of rerun
+commands. The hook is called once, when the session starts, so implement it in the
+rootdir's `conftest.py` or a plugin, with `@pytest.hookimpl(optionalhook=True)`; a
+conftest's `pytest_configure` can also set `config.option.strategy_export`.
 
 ## 16. Reproducing failures
 
@@ -1040,7 +1074,13 @@ The hook is called when the session starts, so implement it in the rootdir's
   them with:` and `  pytest --lf --rng-seed=S1 tests/a/test_dma.py  # 2 rows`
   (their files, or their node IDs when a file holds other failed tests). A row
   leaves the record when it passes under its seed and options, its teardown
-  included. `--rng-seed` wins; `--ff`, `--nf` and `--sw-reset` draw a new seed.
+  included. When the run did not collect a row whose seed it reused (its test
+  was renamed, or the run's `--nsamples` does not generate it), it ends with
+  `pytest-strategies: 1 failed row recorded under the reused seed was not
+  collected; unless deleted or renamed, run it with:` and the command with the
+  recorded options. `--rng-seed` wins, and so does a `config.option.rng_seed` set
+  in a conftest's `pytest_configure`; `--ff`, `--nf` and `--sw-reset` draw a new
+  seed. Without pytest's cache (`-p no:cacheprovider`) nothing is recorded.
 - Once a failure is understood, keep its values as a directed vector
   (`"bug_1234": {"addr": 4096, "len": 17}`): it runs under every seed, and
   `-k bug_1234` or `--vector-name=bug_1234` runs it alone.
@@ -1125,10 +1165,12 @@ The hook is called when the session starts, so implement it in the rootdir's
 | `parameter 'txn' is annotated with BusTxn, a pydantic model; ... not supported yet` | Only dataclasses are built in 4.0. Take the arguments as parameters or use a dataclass. |
 | `got empty parameter set` skip | `--vector-name`/`--vector-index` selected a vector this strategy lacks, or `--vector-mode=directed_only`/`test` ran a strategy with no directed/test vectors. |
 | `RNGValueError` when building a type | Bad RNG arguments (section 6). |
-| `Strategy factory 'x' (...) has a parameter 'n', which the plugin does not provide` | Factories receive `nsamples`, `ctx`, `rng` and `options` by name. Rename the parameter, or give it a default. |
+| `Strategy factory 'x' (...) has a parameter 'n', which the plugin does not provide` | Factories receive `nsamples`, `ctx`, `rng` and `options` by name. Rename the parameter, give it a default, or pass it from every test that uses the factory: `@strategy("x", n=...)` (4.2). |
+| `@strategy('x', ...) cannot pass 'k' to <factory>: ...` | (4.2) The keyword is not a parameter of the factory that takes a keyword (see "did you mean" and "it takes"), or it is an input or a reserved name. Fix the spelling, or rename the factory's parameter. |
 | `has a parameter 'config', a name the plugin reserves` | `base`, `config` and `request` are reserved. Rename the parameter; pass settings through `ctx`. |
 | `Strategy 'x': ids= returned 42 for row rand-3; return a str or None` | The `ids=` function returned something else, `""`, or raised. |
-| `strategies_ids must be 'names' or 'values'` (usage error) | Fix the ini option or the `-o` value. |
+| `strategies_ids must be 'names' or 'values'` (usage error) | Fix the ini option or the `-o` value. In a native TOML file write a string; pytest 9.2 rejects another type itself (`expects a string`). |
+| `pin_nsamples=True needs nsamples` (`ValueError`) | Pass the count to pin: `Parameter(..., nsamples=25, pin_nsamples=True)` or `nsamples="auto"`. |
 | `strategies_ctx is a session fixture, but the tests that use it have different contexts (...)` | The tests that use `strategies_ctx` (directly or through a fixture such as `tb`) are in folders whose `pytest_strategies_context` answers come from different implementations, named in the message. In a folder with its own implementation, build its fixtures on `get_context(request.config, __file__)`, or run the folders separately. |
 
 ## 19. Upgrading from 3.x and 2.x
