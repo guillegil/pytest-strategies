@@ -709,7 +709,7 @@ For a `tests/dma/strategies.py` that registers `burst` with two arguments, a dir
 {
   "schema": 1,
   "kind": "strategies",
-  "generator": {"name": "pytest-strategies", "version": "4.3.0"},
+  "generator": {"name": "pytest-strategies", "version": "4.4.0"},
   "seed": 1,
   "nsamples": 10,
   "strategies": [
@@ -769,12 +769,18 @@ pytest --strategy-export=reports/strategies --nsamples=3 --rng-seed=1
 {
   "schema": 1,
   "kind": "strategy_vectors",
-  "generator": {"name": "pytest-strategies", "version": "4.3.0"},
+  "generator": {"name": "pytest-strategies", "version": "4.4.0"},
   "seed": 1,
   "nsamples": 3,
+  "rerun": {
+    "cwd": "/home/me/project",
+    "args": ["--strategy-export=reports/strategies", "--nsamples=3", "--rng-seed=1"],
+    "options": ["--rng-seed=1", "--nsamples=3"]
+  },
   "tests": [
     {
       "nodeid": "tests/test_rw.py::test_rw_bpam",
+      "rerun": {"args": ["tests/test_rw.py::test_rw_bpam", "--rng-seed=1", "--nsamples=3"]},
       "strategies": [
         {
           "name": "rw",
@@ -786,10 +792,12 @@ pytest --strategy-export=reports/strategies --nsamples=3 --rng-seed=1
           "rows": [
             {"id": "directed-zeros", "kind": "directed", "name": "zeros", "index": 0, "enumerated": [],
              "values": {"channel": 0, "data": 0},
-             "items": [{"nodeid": "tests/test_rw.py::test_rw_bpam[directed-zeros]", "outcome": "passed"}]},
+             "items": [{"nodeid": "tests/test_rw.py::test_rw_bpam[directed-zeros]", "outcome": "passed",
+                        "rerun": {"args": ["tests/test_rw.py::test_rw_bpam[directed-zeros]", "--rng-seed=1", "--nsamples=3"]}}]},
             {"id": "channel=0-rand-0", "kind": "random", "name": null, "index": 0, "enumerated": ["channel"],
              "values": {"channel": 0, "data": 40213},
-             "items": [{"nodeid": "tests/test_rw.py::test_rw_bpam[channel=0-rand-0]", "outcome": "failed"}]}
+             "items": [{"nodeid": "tests/test_rw.py::test_rw_bpam[channel=0-rand-0]", "outcome": "failed",
+                        "rerun": {"args": ["tests/test_rw.py::test_rw_bpam[channel=0-rand-0]", "--rng-seed=1", "--nsamples=3"]}}]}
           ]
         }
       ]
@@ -802,6 +810,20 @@ pytest --strategy-export=reports/strategies --nsamples=3 --rng-seed=1
 - An outcome is `passed`, `failed`, `skipped`, `xfailed`, `xpassed`, `error` (setup or teardown failed) or `null` for an item that did not run. A row of a test with stacked `@strategy` decorators lists every item that ran it.
 - Values use the encoding of [Metadata Export](#11-metadata-export), and readers follow the same rules for schema 1: ignore unknown keys.
 - Under pytest-xdist the controller writes the files, with the rows the workers collected.
+
+**Running it again (4.4).** A random row's node ID alone does not bring its values back: `pytest "tests/test_rw.py::test_rw_bpam[channel=0-rand-0]"` draws under a new seed. Both files therefore carry `rerun` objects, whose `args` are the arguments of a pytest command (without the word `pytest`) that gives the same values when run from the top-level `rerun.cwd`, the absolute folder pytest was started in:
+
+| Where | `rerun` holds | Runs again |
+| --- | --- | --- |
+| Top level | `cwd`, `args`, `options` | `args`: the whole run. They are the arguments the run was started with, as given (those of `PYTEST_ADDOPTS` first, as pytest reads them, then the command line's), plus `--rng-seed=<seed>` when they did not give the run's seed (pytest-strategies chose it, a `conftest.py` set it, or a `--lf` run reused it). `options`: what to put after node IDs of your own choice from this run: `--rng-seed=<seed>`, then the run's generation options (`--nsamples`, `--vector-mode`, `--vector-name`, `--vector-index`, `-o strategies_*`, `-c`, `--rootdir`), every constraint the run turned off, as `--strategy-constraint-off=STRATEGY:NAME,...`, and then the run's other options (see below). |
+| Each test | `args` | The rows of the test that this run selected. The function's node ID when the run selected all of them, else the node ID of each selected item (after `-k`, `--deselect`, `--lf` or a node ID on the command line), followed by the seed and the options. |
+| Each entry of a row's `items` | `args` | That item: the arguments of the [rerun command](#reproducing-a-failure) the terminal prints when the row fails, with the run's other options after its own. |
+
+- The arguments are an unquoted list: quote each one for your shell (`shlex.join(["pytest", *args])` in Python), or pass the list to `subprocess.run([sys.executable, "-m", "pytest", *args], cwd=cwd)`. Node IDs are relative to `cwd`.
+- **The run's other options.** A command for chosen rows repeats the options the run was started with, as they were given, after its own: an option of your project that shapes the [context](#10-configuration-dependent-strategies) (`--tb-config=lab.yaml`, as in the example above), or one the collection needs (`--import-mode=importlib`, `-p`), decides what a row holds or whether it exists at all, and the export cannot tell such an option from one that does not matter. So `pytest tests/test_rw.py --tb-config=lab.yaml -q` gives `["tests/test_rw.py::test_rw[rand-0]", "--rng-seed=1", "--tb-config=lab.yaml", "-q"]`. The run's paths and node IDs are not repeated (the command names its rows), nor are the options the command gives itself. Left out as well: `--lf`, `--sw`, `--stepwise-skip` and `--cache-clear`, which act on pytest's cache, `--collect-only` and `--list-strategies`, which would not run the rows, `--strategy-export`, which would write over this export, and `-k`, `-m` and `--deselect`: the command names its rows, and the options must also serve a test the run deselected. What an environment variable other than `PYTEST_ADDOPTS` does to the context cannot be known: compare the `context` fingerprints. The terminal's rerun command does not repeat the run's other options: it is printed under the run's own command.
+- A test file outside the rootdir cannot be named by its node ID, so its commands start from the run's own paths and select the rows with `-k` (`[".", "--rng-seed=1", "-c", "ci/pytest.ini", "-k", "test_rw[rand-0] or test_rw[rand-1]"]`). When no `-k` expression selects only those rows, the node ID command is given and the `rerun` object has a `note` that says it does not reproduce them.
+- The top-level `args` repeat every argument as it was given, also those whose effect depends on what is on disk when the command runs: `--lf`, `--ff` and `--sw` select by pytest's cache as it is then (the values stay the same, the selection may not), `--collect-only` collects again without running, and `--strategy-export=DIR` writes the export again into the same folder (add another `--strategy-export` after the arguments to keep the first one: the last wins). With `--lf` or `--sw` the top-level `rerun` has a `note` that says so: once the failed rows pass, `--lf` runs every test. Use a test's or an item's `args` to rerun rows whatever the cache holds. The options of `PYTEST_ADDOPTS` are in the list, so the command runs the same rows where the variable is not set (where it is set, pytest reads them twice, which changes nothing for an option that takes a value). Options from the ini file's `addopts` are not in the list: the file is read again.
+- `rerun` is new in 4.4.0, within schema 1; an export of 4.3 has none.
 
 **Choosing the folder.** The command-line option wins, relative to the folder pytest runs in. Without it, the plugin asks the `pytest_strategies_export_dir` hook, then reads the `strategies_export_dir` ini option, both relative to the rootdir. Implement the hook in the rootdir's `conftest.py` (or a plugin) to choose the folder in code, for example one per testbench configuration:
 

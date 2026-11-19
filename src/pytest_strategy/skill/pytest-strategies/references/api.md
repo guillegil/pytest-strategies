@@ -958,11 +958,41 @@ session write two files into DIR when it ends (the folder is created):
   values.
 - `strategies.vectors.json` (`"kind": "strategy_vectors"`): the same, plus `rows`
   per strategy: `id`, `kind`, `name`, `index`, `enumerated`, `values`, and `items`
-  (`[{"nodeid", "outcome"}]`, outcome `passed`, `failed`, `skipped`, `xfailed`,
+  (`[{"nodeid", "outcome", "rerun"}]`, outcome `passed`, `failed`, `skipped`, `xfailed`,
   `xpassed`, `error` or `null` when the item did not run).
 
 Only selected items count (after `-k`, `--deselect`), so `--collect-only` exports
 the rows without running them. Under pytest-xdist the controller writes the files.
+
+(4.4) Both files carry `rerun` objects: `args` is the unquoted argument list of a
+pytest command (without `pytest`) that gives the same values when run from the
+top-level `rerun.cwd` (absolute; where pytest was started). A node ID alone does
+not: it draws under a new seed.
+
+- top level: `{"cwd", "args", "options"}`. `args` reruns the whole run: the
+  arguments it was started with as given (those of `PYTEST_ADDOPTS`, then the
+  command line's; also `--lf`, `--sw`, `--collect-only` and `--strategy-export`;
+  nothing from the ini file's `addopts`), plus `--rng-seed=<seed>` when they did
+  not give the run's seed. `options` is what follows node IDs chosen from this
+  run: `--rng-seed=<seed>`, then `--nsamples`, `--vector-mode`, `--vector-name`,
+  `--vector-index`, `-o strategies_*`, `-c`, `--rootdir` as the run had them,
+  `--strategy-constraint-off=STRATEGY:NAME,...` for every constraint turned off,
+  and then the run's other options as given (a project option that shapes the
+  context, `--import-mode`, `-p`, ...), without its paths and without `-k`,
+  `-m`, `--deselect`, `--lf`, `--sw`, `--stepwise-skip`, `--cache-clear`,
+  `--collect-only`, `--list-strategies` and `--strategy-export`.
+- each test: `{"args"}` reruns the rows the run selected: the function's node ID
+  when it selected them all, else each selected item's, then the seed and options.
+- each entry of a row's `items`: `{"args"}`, the arguments of the rerun command of
+  section 16 (`shlex.split(command)[1:]`) with the run's other options after its
+  own (the terminal's command does not repeat them).
+- a `rerun` may have `note`: the command is known not to reproduce the rows (a test
+  outside the rootdir that no `-k` expression selects; otherwise its `args` are
+  the run's paths and `-k <expression>`), or, at the top level, the run's command
+  selects tests by the cache (`--lf`, `--sw`) and may select others now.
+
+Run one with `subprocess.run([sys.executable, "-m", "pytest", *args], cwd=cwd)`, or
+quote it for a shell with `shlex.join(["pytest", *args])`.
 The hook is called when the session starts, so implement it in the rootdir's
 `conftest.py` or a plugin, with `@pytest.hookimpl(optionalhook=True)`; a conftest's
 `pytest_configure` can also set `config.option.strategy_export`.

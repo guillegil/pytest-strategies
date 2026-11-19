@@ -26,7 +26,9 @@ empty_parameter_set_mark`` override comes too: the rerun collects the row's whol
 module, where under ``--vector-name`` a strategy without that vector gets an
 empty parameter set, which ``fail_at_collect`` turns into a collection error.
 Options that shape the context cannot be known; its fingerprint shows when the
-rerun got another one.
+rerun got another one. The run export's commands, which are read without the
+run's own command at hand, therefore repeat the run's other options too
+(``carried_options``).
 
 A test file outside the rootdir (``-c ci/pytest.ini`` makes ``ci`` the rootdir) is
 named by pytest relative to the path the run started from that contains it, so a
@@ -58,7 +60,7 @@ import shlex
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import pytest
 from _pytest._code.code import TerminalRepr
@@ -93,6 +95,46 @@ _KEYWORD_OPERATORS = frozenset({"and", "or", "not"})
 # --vector-name gives a strategy without that vector: a rerun command carries its
 # override, which decides no row's values (_reuse compares the others)
 EMPTY_PARAMETER_SET_MARK = "empty_parameter_set_mark"
+
+# The key of the arguments the run was started with, in a pytest-xdist worker's input
+INVOCATION = "pytest_strategies_invocation"
+
+# The options a command for chosen rows gives itself (--rng-seed and
+# ``generation_options``), --strategy-export, which would write over the run's
+# export, and --deselect, which selects tests (as -k and -m, see ``_carried``): they
+# are not taken over from the run's arguments (``carried_options``)
+_OWN_OPTIONS = frozenset(
+    {
+        "--deselect",
+        "--rng-seed",
+        "--nsamples",
+        "--vector-mode",
+        "--vector-name",
+        "--vector-index",
+        "--strategy-constraint-off",
+        "--strategy-export",
+        "--rootdir",
+        "--config-file",
+    }
+)
+
+# The options that select tests by what the cache holds when the command runs, and
+# those that keep the tests from running: a command for chosen rows names its rows
+# and runs them, so it leaves them out
+CACHE_OPTIONS = frozenset({"--lf", "--last-failed", "--sw", "--stepwise"})
+_LEFT_OUT_FLAGS = CACHE_OPTIONS | {
+    "--sw-skip",
+    "--stepwise-skip",
+    "--sw-reset",
+    "--stepwise-reset",
+    "--cache-clear",
+    "--co",
+    "--collect-only",
+    "--list-strategies",
+}
+
+# The length of the pieces of the tests' names that ``_Matchers`` indexes
+_GRAM = 6
 
 # The arguments cmd.exe and PowerShell leave as they are (no ",", which PowerShell
 # reads as an array, no "%", "@", "&", quotes or brackets)
@@ -308,6 +350,18 @@ def rerun_nodeid(item: pytest.Item) -> str:
     return f"{bestrelpath(config.invocation_params.dir, item.path)}::{names}"
 
 
+def rerun_function_nodeid(item: pytest.Item) -> str:
+    """
+    Return the node ID of an item's test function (the item's without its
+    parameters) relative to the folder pytest was started in, as ``rerun_nodeid``.
+    """
+    nodeid = rerun_nodeid(item)
+    name = getattr(item, "originalname", None)
+    if isinstance(name, str) and name != item.name and nodeid.endswith(item.name):
+        return nodeid[: len(nodeid) - len(item.name)] + name
+    return nodeid
+
+
 def rootdir_nodeid(item: pytest.Item) -> str:
     """
     Return an item's node ID relative to the rootdir: its node ID, or for a file
@@ -319,12 +373,265 @@ def rootdir_nodeid(item: pytest.Item) -> str:
     return f"{bestrelpath(item.config.rootpath, item.path)}::{names}"
 
 
+def command_line(args: Sequence[str], *, windows: bool | None = None) -> str:
+    """
+    Return the pytest command of the arguments ``args``, each quoted for the
+    platform's shell (``quote``): on POSIX, ``shlex.split`` of it gives
+    ``["pytest", *args]``.
+
+    Args:
+        windows: Quote for Windows; the platform's rule when None
+    """
+    return " ".join(["pytest", *(quote(arg, windows=windows) for arg in args)])
+
+
+def rerun_args(nodeids: Sequence[str], seed: int, options: Sequence[str]) -> list[str]:
+    """
+    Return the arguments of the command that runs rows again, unquoted: their node
+    IDs, ``--rng-seed=S`` and ``options``.
+    """
+    return [*nodeids, f"--rng-seed={seed}", *options]
+
+
 def rerun_command(nodeid: str, seed: int, options: Sequence[str]) -> str:
     """
     Return the command that runs a row again, ``pytest <node id> --rng-seed=S``
     followed by ``options``, quoted for the platform's shell.
     """
-    return " ".join(["pytest", quote(nodeid), f"--rng-seed={seed}", *map(quote, options)])
+    return command_line(rerun_args([nodeid], seed, options))
+
+
+def given_seed(args: Sequence[str]) -> int | None:
+    """
+    Return the seed the last ``--rng-seed`` of the command-line arguments ``args``
+    gives (``--rng-seed=S`` or ``--rng-seed S``, before a ``--``), or None when
+    none does or its value is not an integer.
+    """
+    found: str | None = None
+    for position, arg in enumerate(args):
+        if arg == "--":
+            break
+        if arg.startswith("--rng-seed="):
+            found = arg.partition("=")[2]
+        elif arg == "--rng-seed" and position + 1 < len(args):
+            found = args[position + 1]
+    if found is None:
+        return None
+    try:
+        return int(found)
+    except ValueError:
+        return None
+
+
+def environment_args() -> list[str]:
+    """
+    Return the arguments the ``PYTEST_ADDOPTS`` environment variable gives, which
+    pytest puts before those of the command line, or none when it cannot be split.
+    """
+    try:
+        return shlex.split(os.environ.get("PYTEST_ADDOPTS", ""))
+    except ValueError:
+        return []
+
+
+def invocation_args(config: pytest.Config) -> list[str]:
+    """
+    Return the arguments the run was started with, unquoted: those of the
+    ``PYTEST_ADDOPTS`` environment variable, then those pytest was called with
+    (``config.invocation_params.args``). The ini file's addopts are not among
+    them: a command run from the same folder reads them again.
+
+    They are read once, when the plugin is configured, so that a test that changes
+    the environment does not change them. A pytest-xdist worker, which was started
+    with other arguments, gets the controller's (``INVOCATION``).
+    """
+    state = runtime.session_of(config)
+    if state is not None and state.invocation is not None:
+        return list(state.invocation)
+    sent = getattr(config, "workerinput", {}).get(INVOCATION)
+    if isinstance(sent, list):
+        args = [str(arg) for arg in sent]
+    else:
+        args = [*environment_args(), *(os.fspath(arg) for arg in config.invocation_params.args)]
+    if state is not None:
+        state.invocation = list(args)
+    return args
+
+
+def _positionals(config: pytest.Config, args: Sequence[str]) -> list[str] | None:
+    """
+    Return the paths and node IDs among ``args``, as pytest's own parser finds them
+    (it knows which options take a value), or None when it cannot say.
+    """
+    parser = getattr(config, "_parser", None)
+    both = getattr(parser, "parse_known_and_unknown_args", None)
+    parse = getattr(parser, "parse_known_args", None)
+    try:
+        if both is not None:
+            # Before pytest 9 a path after an option is among the arguments the
+            # parser did not take, which pytest then adds to the paths itself
+            known, unknown = both(list(args))
+            found = getattr(known, "file_or_dir", None)
+            if isinstance(found, list):
+                found = [*found, *(arg for arg in unknown if not arg.startswith("-"))]
+        elif parse is not None:
+            found = getattr(parse(list(args)), "file_or_dir", None)
+        else:
+            return None
+    except (Exception, SystemExit):
+        # An argument only the run's start could read (a plugin's own parsing)
+        return None
+    return list(found) if isinstance(found, list) else None
+
+
+def _options_of(config: pytest.Config, args: Sequence[str]) -> list[str] | None:
+    """
+    Return ``args`` without the paths and node IDs the run started from, and
+    without what follows a ``--`` (paths too), or None when they cannot be told
+    from the options' values.
+
+    An argument is a path when pytest's parser lists it as one and no longer does
+    once it is taken out; an option's value that reads the same stays.
+    """
+    head = list(args[: args.index("--")] if "--" in args else args)
+    paths = _positionals(config, head)
+    if paths is None:
+        return None
+    options = []
+    left = list(paths)
+    for position, arg in enumerate(head):
+        if arg in left:
+            expected = list(paths)
+            expected.remove(arg)
+            if _positionals(config, head[:position] + head[position + 1 :]) == expected:
+                left.remove(arg)
+                continue
+        options.append(arg)
+    return options
+
+
+def _covered_override(override: str) -> bool:
+    """Whether ``generation_options`` gives an ``-o`` override itself."""
+    name = override.partition("=")[0].strip()
+    return name.startswith("strategies_") or name == EMPTY_PARAMETER_SET_MARK
+
+
+def _carried(options: Sequence[str]) -> list[str]:
+    """
+    Return the options a command for chosen rows takes over from the run's
+    ``options`` (its arguments without the paths): all but those the command gives
+    itself (``_OWN_OPTIONS``, ``-c``, the ``-o`` overrides of
+    ``generation_options``) and those it leaves out (``_LEFT_OUT_FLAGS``, and
+    ``-k``, ``-m`` and ``--deselect``: the command names its rows, and a reader may
+    put the options after a test the run deselected).
+    """
+    kept: list[str] = []
+    position = 0
+    while position < len(options):
+        arg = options[position]
+        name, equals, value = arg.partition("=")
+        position += 1
+        if arg in _LEFT_OUT_FLAGS:
+            continue
+        if name in _OWN_OPTIONS:
+            # "--nsamples=4", or "--nsamples 4"
+            position += 0 if equals else 1
+        elif arg in ("-c", "-k", "-m"):
+            position += 1
+        elif arg[:2] in ("-c", "-k", "-m") and not arg.startswith("--"):
+            # "-kexpression"
+            continue
+        elif arg in ("-o", "--override-ini"):
+            if position < len(options):
+                if not _covered_override(options[position]):
+                    kept += [arg, options[position]]
+                position += 1
+        elif name == "--override-ini" and equals:
+            if not _covered_override(value):
+                kept.append(arg)
+        elif arg.startswith("-o") and not arg.startswith("--"):
+            if not _covered_override(arg[2:]):
+                kept.append(arg)
+        else:
+            kept.append(arg)
+    return kept
+
+
+def carried_options(config: pytest.Config) -> list[str]:
+    """
+    Return the options of the run that a command for chosen rows repeats after its
+    own, unquoted and as they were given: the arguments the run was started with
+    (``invocation_args``) without its paths and node IDs, which the command
+    replaces by its rows, without the options the command gives itself (the seed,
+    ``generation_options``) and without those that would not run the rows or would
+    write over the run's export (``--lf``, ``--sw``, ``--collect-only``,
+    ``--cache-clear``, ``--strategy-export``), nor those that select tests (``-k``,
+    ``-m``, ``--deselect``): the command names its rows.
+
+    An option of the project's own that shapes the context the factories receive
+    (``--width=12``), or one the collection needs (``--import-mode=importlib``,
+    ``-p``), is thus given again, so the rows get the same values. None are
+    repeated when pytest's parser cannot tell the paths from the options.
+    """
+    state = runtime.session_of(config)
+    if state is not None and state.carried is not None:
+        return list(state.carried)
+    options = _options_of(config, invocation_args(config))
+    carried = [] if options is None else _carried(options)
+    if state is not None:
+        state.carried = list(carried)
+    return carried
+
+
+def rerun_options(config: pytest.Config, infos: Sequence[VectorInfo]) -> list[str]:
+    """
+    Return what follows ``--rng-seed`` in a command that runs chosen rows again
+    from the folder pytest was started in, unquoted: the options that decide which
+    rows exist and what they hold (``generation_options``), then the run's other
+    options (``carried_options``).
+    """
+    return [*generation_options(config, infos), *carried_options(config)]
+
+
+def run_args(config: pytest.Config, seed: int) -> list[str]:
+    """
+    Return the arguments of the command that runs the whole run again from the
+    folder pytest was started in, with the same vectors, unquoted: the arguments
+    the run was started with (``invocation_args``: those of ``PYTEST_ADDOPTS``,
+    then those pytest was called with), as given, and ``--rng-seed=S`` when they do
+    not give the run's seed (a seed pytest-strategies chose, a conftest.py set or a
+    ``--lf`` run reused), placed before a ``--``.
+
+    Nothing is taken out: an option whose effect depends on what is on disk
+    (``--lf``, ``--sw``, ``--strategy-export``) is repeated as it was given
+    (``run_note`` says so for those that select tests by the cache).
+    """
+    args = invocation_args(config)
+    if given_seed(args) == seed:
+        return args
+    option = f"--rng-seed={seed}"
+    if "--" in args:
+        args.insert(args.index("--"), option)
+    else:
+        args.append(option)
+    return args
+
+
+def run_note(args: Sequence[str]) -> str | None:
+    """
+    Return what is said of the command of the arguments ``args`` that runs a whole
+    run again, or None when it runs the same tests: with ``--lf`` or ``--sw`` it
+    selects tests by what the cache holds when it runs.
+    """
+    head = args[: args.index("--")] if "--" in args else args
+    found = [arg for arg in dict.fromkeys(head) if arg in CACHE_OPTIONS]
+    if not found:
+        return None
+    return (
+        f"{' and '.join(found)} selects tests by what the cache holds when the command "
+        "runs, so it may select other tests than this run did. Each test's own command "
+        "names the rows this run selected."
+    )
 
 
 def start_args(config: pytest.Config, start: Path) -> list[str] | None:
@@ -360,6 +667,59 @@ def ignore_args(config: pytest.Config, start: Path) -> list[str]:
     return [arg for pair in args for arg in pair]
 
 
+class _Matchers:
+    """
+    pytest's ``-k`` matcher of each test the run collected, with an index of the
+    names they match by, so that the tests a name can select are found without
+    asking every matcher: an export gives every row outside the rootdir its
+    command, which asking every matcher for every row made quadratic.
+
+    A matcher selects a test by a name when the name is part of one of the test's
+    names, whatever the case (``KeywordMatcher.__call__``). The index maps each
+    piece of ``_GRAM`` characters of each lowercased name to the names that hold
+    it; a name to look for is held only by names that hold all its pieces. Without
+    the matchers' private ``_names``, every test is a candidate.
+    """
+
+    def __init__(self, tests: Sequence[pytest.Item], matcher_of: Any) -> None:
+        self.tests = list(tests)
+        self.matchers = [matcher_of(test) for test in self.tests]
+        self._tests_of: dict[str, list[int]] | None = {}
+        self._names_of: dict[str, list[str]] = {}
+        for position, matcher in enumerate(self.matchers):
+            names = getattr(matcher, "_names", None)
+            if not isinstance(names, Iterable) or isinstance(names, str):
+                self._tests_of = None
+                return
+            for name in {str(name).lower() for name in names}:
+                self._tests_of.setdefault(name, []).append(position)
+        for name in self._tests_of:
+            for gram in {name[at : at + _GRAM] for at in range(len(name) - _GRAM + 1)}:
+                self._names_of.setdefault(gram, []).append(name)
+
+    def candidates(self, name: str) -> list[int]:
+        """The positions of the tests an expression that requires ``name`` can select."""
+        if self._tests_of is None:
+            return list(range(len(self.tests)))
+        name = name.lower()
+        names: Sequence[str]
+        if len(name) < _GRAM:
+            names = list(self._tests_of)
+        else:
+            names = min(
+                (
+                    self._names_of.get(name[at : at + _GRAM], ())
+                    for at in range(len(name) - _GRAM + 1)
+                ),
+                key=len,
+            )
+        found: set[int] = set()
+        for holder in names:
+            if name in holder:
+                found.update(self._tests_of[holder])
+        return sorted(found)
+
+
 def keyword(item: pytest.Item) -> str | None:
     """
     Return a ``-k`` expression that selects only ``item`` among the tests the run
@@ -370,7 +730,9 @@ def keyword(item: pytest.Item) -> str | None:
     test_write[rand-3]``), else with its classes' too. None when there is no such
     expression, or a name does not fit ``-k``'s grammar (``test_esm[ch=2-rand-1]``).
 
-    The tests are matched with pytest's own ``-k`` matcher; without it, None.
+    The tests are matched with pytest's own ``-k`` matcher; without it, None. Only
+    the tests the item's name can select are asked (``_Matchers``): every
+    expression requires it.
     """
     state = runtime.session_of(item.config)
     if state is None:
@@ -386,16 +748,35 @@ def keyword(item: pytest.Item) -> str | None:
     classes = [node.name for node in chain if isinstance(node, pytest.Class)]
     if state.keyword_matchers is None:
         tests = [*getattr(item.session, "items", ()), *state.deselected_items]
-        state.keyword_matchers = [(test, KeywordMatcher.from_item(test)) for test in tests]
+        state.keyword_matchers = _Matchers(tests, KeywordMatcher.from_item)
+    matchers: _Matchers = state.keyword_matchers
+    candidates: list[int] | None = None
     for names in ([item.name], [*module, item.name], [*module, *classes, item.name]):
         if not all(_KEYWORD_NAME.fullmatch(n) and n not in _KEYWORD_OPERATORS for n in names):
             continue
         text = " and ".join(names)
         expression = Expression.compile(text)
-        matched = [test for test, matcher in state.keyword_matchers if expression.evaluate(matcher)]
+        if candidates is None:
+            candidates = matchers.candidates(item.name)
+        matched = [
+            matchers.tests[position]
+            for position in candidates
+            if expression.evaluate(matchers.matchers[position])
+        ]
         if matched == [item]:
             return text
     return None
+
+
+def keyword_args(
+    args: Sequence[str], seed: int, options: Sequence[str], expression: str
+) -> list[str]:
+    """
+    Return the arguments of the command that runs rows outside the rootdir again,
+    unquoted: ``args`` (the paths to start from), ``--rng-seed=S``, ``options`` and
+    ``-k <expression>``.
+    """
+    return [*args, f"--rng-seed={seed}", *options, "-k", expression]
 
 
 def keyword_command(args: Sequence[str], seed: int, options: Sequence[str], expression: str) -> str:
@@ -404,16 +785,132 @@ def keyword_command(args: Sequence[str], seed: int, options: Sequence[str], expr
     --rng-seed=S`` followed by ``options`` and ``-k <expression>``, quoted for the
     platform's shell.
     """
-    return " ".join(
-        [
-            "pytest",
-            *map(quote, args),
-            f"--rng-seed={seed}",
-            *map(quote, options),
-            "-k",
-            quote(expression),
-        ]
+    return command_line(keyword_args(args, seed, options, expression))
+
+
+def outside_args(
+    config: pytest.Config,
+    expressions: Sequence[str | None],
+    seed: int,
+    options: Sequence[str],
+    start: Path,
+) -> list[str] | None:
+    """
+    Return the arguments of the command that runs rows outside the rootdir again
+    from the folder ``start``: the paths the run started from, so that pytest gives
+    them the same node IDs, without the files the run's ``--ignore`` and
+    ``--ignore-glob`` left out (``ignore_args``), selected with ``-k`` (each row's
+    expression, as ``keyword`` gives it, joined with ``or``). None when there is no
+    such command: a row without an expression, or a run that started from a
+    ``--pyargs`` module.
+    """
+    chosen = [expression for expression in expressions if expression is not None]
+    if not chosen or len(chosen) != len(expressions):
+        return None
+    args = start_args(config, start)
+    if args is None:
+        return None
+    return keyword_args([*args, *ignore_args(config, start)], seed, options, " or ".join(chosen))
+
+
+def outside_note(config: pytest.Config) -> str:
+    """
+    Return what is said of a node ID command for a test outside the rootdir, which
+    does not reproduce its rows.
+    """
+    rootdir = bestrelpath(config.invocation_params.dir, config.rootpath)
+    return (
+        f"the test is outside the rootdir ({rootdir}), so pytest names it by the "
+        "path it was collected from: this command gives the row another node ID "
+        "and other values. A run with a --rootdir that contains the test prints a "
+        "command that reproduces it."
     )
+
+
+class Rerun(NamedTuple):
+    """The command that runs rows again from the folder pytest was started in."""
+
+    # The command's arguments, unquoted, without "pytest"
+    args: list[str]
+    # Why the command does not reproduce the rows, or None when it does
+    note: str | None = None
+    # For a row outside the rootdir: the -k expression that selects only it
+    expression: str | None = None
+
+    @property
+    def command(self) -> str:
+        """The command, quoted for the platform's shell."""
+        return command_line(self.args)
+
+
+def row_rerun(item: pytest.Item, infos: Sequence[VectorInfo], *, carry: bool = False) -> Rerun:
+    """
+    Return the command that runs an item's row again from the folder pytest was
+    started in: what the section's ``rerun`` line gives and, with the run's other
+    options after it (``carry``), the run export's ``rerun.args``.
+
+    The command names the item's node ID; for a file outside the rootdir it starts
+    from the run's own paths and selects the row with ``-k`` (``outside_args``),
+    and when no ``-k`` expression selects only that row it is the node ID command,
+    with a note that says it does not reproduce the row.
+
+    Args:
+        item: The row's item
+        infos: The row's VectorInfo for each of the item's strategies
+        carry: Repeat the run's other options (``carried_options``), as a reader
+            of the export needs them: the terminal prints the command under the
+            run's own, whose options its reader knows
+    """
+    config = item.config
+    seed = infos[0].seed
+    options = rerun_options(config, infos) if carry else generation_options(config, infos)
+    if not outside_rootdir(item):
+        return Rerun(rerun_args([rerun_nodeid(item)], seed, options))
+    expression = keyword(item)
+    args = outside_args(config, [expression], seed, options, config.invocation_params.dir)
+    if args is not None:
+        return Rerun(args, None, expression)
+    return Rerun(rerun_args([rerun_nodeid(item)], seed, options), outside_note(config))
+
+
+def rows_rerun(
+    items: Sequence[pytest.Item],
+    reruns: Sequence[Rerun],
+    infos: Sequence[VectorInfo],
+    seed: int,
+    *,
+    whole: bool,
+) -> Rerun:
+    """
+    Return the command that runs several rows of one test function again from the
+    folder pytest was started in, with the same values, for the run export: the
+    run's other options come after the command's own (``rerun_options``).
+
+    Args:
+        items: The rows' items, all of one test function
+        reruns: Each item's own command (``row_rerun`` with ``carry``)
+        infos: The VectorInfo of the rows, for the constraints turned off
+        seed: The run's seed
+        whole: Whether they are all the items of the function: the command then
+            names the function instead of each item
+    """
+    config = items[0].config
+    options = rerun_options(config, infos)
+    if outside_rootdir(items[0]):
+        args = outside_args(
+            config,
+            [rerun.expression for rerun in reruns],
+            seed,
+            options,
+            config.invocation_params.dir,
+        )
+        if args is not None:
+            return Rerun(args)
+        note: str | None = outside_note(config)
+    else:
+        note = None
+    nodeids = [rerun_function_nodeid(items[0])] if whole else [rerun_nodeid(item) for item in items]
+    return Rerun(rerun_args(nodeids, seed, options), note)
 
 
 def _outside_command(
@@ -421,17 +918,10 @@ def _outside_command(
 ) -> str | None:
     """
     Return the command that runs a row outside the rootdir again from the folder
-    ``start``: from the paths the run started from, so that pytest gives it the same
-    node ID, without the files the run's ``--ignore`` and ``--ignore-glob`` left out
-    (``ignore_args``), selected with ``-k``. None when there is no such command.
+    ``start`` (``outside_args``), or None when there is no such command.
     """
-    args = start_args(item.config, start)
-    if args is None:
-        return None
-    expression = keyword(item)
-    if expression is None:
-        return None
-    return keyword_command([*args, *ignore_args(item.config, start)], seed, options, expression)
+    args = outside_args(item.config, [keyword(item)], seed, options, start)
+    return None if args is None else command_line(args)
 
 
 def describe(infos: Sequence[VectorInfo]) -> str:
@@ -539,28 +1029,15 @@ def failure(item: pytest.Item, infos: Sequence[VectorInfo]) -> tuple[str, dict[s
     """
     config = item.config
     seed = infos[0].seed
-    options = generation_options(config, infos)
     recorded = generation_options(config, infos, start=config.rootpath)
     verbosity = int(getattr(config.option, "verbose", 0))
     row = describe(infos)
-    note = None
-    outside = outside_rootdir(item)
-    command = (
-        _outside_command(item, seed, options, config.invocation_params.dir) if outside else None
-    )
-    if command is None:
-        command = rerun_command(rerun_nodeid(item), seed, options)
-        if outside:
-            row += " (outside the rootdir)"
-            rootdir = bestrelpath(config.invocation_params.dir, config.rootpath)
-            note = (
-                f"the test is outside the rootdir ({rootdir}), so pytest names it by the "
-                "path it was collected from: this command gives the row another node ID "
-                "and other values. A run with a --rootdir that contains the test prints a "
-                "command that reproduces it."
-            )
+    rerun = row_rerun(item, infos)
+    if rerun.note is not None:
+        row += " (outside the rootdir)"
+    command = rerun.command
     attribute = {"command": command, "row": row, "seed": str(seed), "options": json.dumps(recorded)}
-    return section(infos, command, verbosity, note), attribute
+    return section(infos, command, verbosity, rerun.note), attribute
 
 
 def testcase_properties(item: pytest.Item, infos: Sequence[VectorInfo]) -> list[tuple[str, str]]:

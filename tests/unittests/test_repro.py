@@ -11,6 +11,7 @@ import os
 import shlex
 from argparse import Namespace
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 from _pytest._code.code import TerminalRepr
@@ -18,17 +19,27 @@ from _pytest._code.code import TerminalRepr
 from pytest_strategy import VectorInfo
 from pytest_strategy._repro import (
     VALUE_LIMIT,
+    Rerun,
     SectionedRepr,
+    _carried,
+    _Matchers,
+    _options_of,
+    command_line,
     describe,
     encodable,
     generation_options,
+    given_seed,
     ignore_args,
+    keyword_args,
     keyword_command,
     outside_rootdir,
     quote,
+    rerun_args,
     rerun_command,
     rerun_nodeid,
     rootdir_nodeid,
+    run_args,
+    run_note,
     section,
     start_args,
     suite_properties,
@@ -714,6 +725,281 @@ class TestRerunNodeid:
         assert command == " ".join(
             ["pytest", quote(nodeid), "--rng-seed=5", "--nsamples=3", quote("--vector-name=a b")]
         )
+
+    def test_the_arguments_are_the_command_s(self):
+        nodeid = "t.py::test_a[it's]"
+        options = ["--nsamples=3", "--vector-name=a b"]
+
+        args = rerun_args([nodeid], 5, options)
+
+        assert args == [nodeid, "--rng-seed=5", *options]
+        assert rerun_command(nodeid, 5, options) == command_line(args)
+        assert command_line(args, windows=False) == "pytest " + shlex.join(args)
+        assert shlex.split(command_line(args, windows=False)) == ["pytest", *args]
+        assert Rerun(args).command == command_line(args)
+
+    def test_the_k_arguments_are_the_command_s(self):
+        args = keyword_args([".", "a b"], 5, ["-c", "ci/pytest.ini"], "m.py and t[x]")
+
+        assert args == [".", "a b", "--rng-seed=5", "-c", "ci/pytest.ini", "-k", "m.py and t[x]"]
+        assert command_line(args) == keyword_command(
+            [".", "a b"], 5, ["-c", "ci/pytest.ini"], "m.py and t[x]"
+        )
+
+
+class TestRunArgs:
+    @pytest.fixture(autouse=True)
+    def no_environment_options(self, monkeypatch):
+        monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
+
+    @pytest.mark.parametrize(
+        ("args", "seed"),
+        [
+            ([], None),
+            (["tests", "-q"], None),
+            (["--rng-seed=7"], 7),
+            (["--rng-seed", "7", "tests"], 7),
+            (["--rng-seed=7", "--rng-seed", "9"], 9),
+            (["--rng-seed"], None),
+            (["--rng-seed=x"], None),
+            # After --, a file's name
+            (["--", "--rng-seed=7"], None),
+            (["--rng-seeds=7"], None),
+        ],
+    )
+    def test_the_seed_the_arguments_give(self, args, seed):
+        assert given_seed(args) == seed
+
+    @staticmethod
+    def config(*args):
+        params = Namespace(args=args, dir=Path.cwd())
+        return Namespace(invocation_params=params)
+
+    def test_the_seed_is_added_when_the_arguments_do_not_give_it(self):
+        assert run_args(self.config("tests", "-x"), 5) == ["tests", "-x", "--rng-seed=5"]
+        assert run_args(self.config(), 5) == ["--rng-seed=5"]
+
+    def test_the_seed_is_not_given_twice(self):
+        assert run_args(self.config("--rng-seed=5", "tests"), 5) == ["--rng-seed=5", "tests"]
+        assert run_args(self.config("--rng-seed", "5"), 5) == ["--rng-seed", "5"]
+
+    def test_another_seed_than_the_given_one_is_added_after_it(self):
+        # A conftest.py's config.option.rng_seed won over the option
+        assert run_args(self.config("--rng-seed=4", "tests"), 5) == [
+            "--rng-seed=4",
+            "tests",
+            "--rng-seed=5",
+        ]
+
+    def test_the_seed_goes_before_a_double_dash(self):
+        assert run_args(self.config("-q", "--", "t.py"), 5) == ["-q", "--rng-seed=5", "--", "t.py"]
+
+    def test_a_path_object_is_written_as_text(self):
+        assert run_args(self.config(Path("tests")), 5) == ["tests", "--rng-seed=5"]
+
+    def test_the_environment_s_options_come_first(self, monkeypatch):
+        # pytest puts PYTEST_ADDOPTS before the command line: without them the
+        # command would run other rows where the variable is not set
+        monkeypatch.setenv("PYTEST_ADDOPTS", "--nsamples=6 -k 'a b'")
+
+        assert run_args(self.config("tests"), 5) == [
+            "--nsamples=6",
+            "-k",
+            "a b",
+            "tests",
+            "--rng-seed=5",
+        ]
+
+    def test_a_seed_from_the_environment_is_not_given_twice(self, monkeypatch):
+        monkeypatch.setenv("PYTEST_ADDOPTS", "--rng-seed=5")
+
+        assert run_args(self.config("tests"), 5) == ["--rng-seed=5", "tests"]
+
+    def test_an_environment_that_cannot_be_split_gives_nothing(self, monkeypatch):
+        monkeypatch.setenv("PYTEST_ADDOPTS", "-k 'open")
+
+        assert run_args(self.config("tests"), 5) == ["tests", "--rng-seed=5"]
+
+    def test_a_worker_gets_the_controller_s_arguments(self, monkeypatch):
+        monkeypatch.setenv("PYTEST_ADDOPTS", "--nsamples=6")
+        config = self.config("tests")
+        config.workerinput = {"pytest_strategies_invocation": ["-q", "tests", "--width=12"]}
+
+        assert run_args(config, 5) == ["-q", "tests", "--width=12", "--rng-seed=5"]
+
+    @pytest.mark.parametrize(
+        ("args", "named"),
+        [
+            (["tests", "-q"], None),
+            (["tests", "--lf"], "--lf"),
+            (["--last-failed", "--lf", "--lf"], "--last-failed and --lf"),
+            (["--sw", "tests"], "--sw"),
+            (["--stepwise"], "--stepwise"),
+            # After --, a file's name
+            (["--", "--lf"], None),
+            (["--ff"], None),
+        ],
+    )
+    def test_a_run_selected_by_the_cache_has_a_note(self, args, named):
+        note = run_note(args)
+
+        if named is None:
+            assert note is None
+        else:
+            assert note is not None
+            assert note.startswith(f"{named} selects tests by what the cache holds")
+
+
+class TestCarriedOptions:
+    """The options of the run that an exported command for chosen rows repeats."""
+
+    def test_the_paths_are_told_from_the_options_values(self, pytestconfig):
+        # -k and -p take a value, as pytest's own parser knows; the value that
+        # reads as the path stays
+        args = ["tests", "-k", "tests", "-q", "a.py::test_a[x]", "-p", "no:cacheprovider"]
+
+        assert _options_of(pytestconfig, args) == ["-k", "tests", "-q", "-p", "no:cacheprovider"]
+
+    def test_what_follows_a_double_dash_is_a_path(self, pytestconfig):
+        assert _options_of(pytestconfig, ["-q", "tests", "--", "-x.py"]) == ["-q"]
+
+    def test_without_pytest_s_parser_nothing_is_known(self):
+        assert _options_of(Namespace(), ["tests", "-q"]) is None
+
+    def test_arguments_the_parser_refuses_give_nothing(self, pytestconfig):
+        assert _options_of(pytestconfig, ["tests", "--nsamples=many"]) is None
+
+    def test_what_the_command_gives_itself_is_not_repeated(self):
+        options = [
+            "--rng-seed=5",
+            "--rng-seed",
+            "6",
+            "--nsamples=3",
+            "--nsamples",
+            "4",
+            "--vector-mode=random_only",
+            "--vector-name",
+            "zeros",
+            "--vector-index=1",
+            "--strategy-constraint-off=even",
+            "--rootdir=..",
+            "-c",
+            "ci/pytest.ini",
+            "-cother.ini",
+            "--config-file=x.ini",
+            "-o",
+            "strategies_ids=values",
+            "--override-ini=empty_parameter_set_mark=xfail",
+            "-ostrategies_max_exhaustive=5",
+        ]
+
+        assert _carried(options) == []
+
+    def test_what_would_not_run_the_rows_is_left_out(self):
+        options = [
+            "--lf",
+            "--last-failed",
+            "--sw",
+            "--stepwise",
+            "--sw-skip",
+            "--stepwise-skip",
+            "--cache-clear",
+            "--collect-only",
+            "--co",
+            "--list-strategies",
+            "--strategy-export=out",
+            "--strategy-export",
+            "out",
+            # The command names its rows
+            "-k",
+            "rand-1 or zeros",
+            "-kzeros",
+            "-m",
+            "not slow",
+            "-mslow",
+            "--deselect=t.py::test_a",
+            "--deselect",
+            "t.py::test_b",
+        ]
+
+        assert _carried(options) == []
+
+    def test_the_other_options_stay_as_given(self):
+        options = [
+            "--width=12",
+            "--width",
+            "12",
+            "--import-mode=importlib",
+            "-p",
+            "no:cacheprovider",
+            "-o",
+            "python_files=check_*.py",
+            "--override-ini=console_output_style=classic",
+            "-oaddopts=",
+            "-x",
+            "--ff",
+            "-n",
+            "2",
+            "--strategy-details",
+        ]
+
+        assert _carried(options) == options
+
+    def test_an_option_without_its_value_ends_the_list(self):
+        assert _carried(["-q", "-o"]) == ["-q"]
+        assert _carried(["-q", "--nsamples"]) == ["-q"]
+
+
+class TestMatchers:
+    """The tests a ``-k`` name can select, without asking every matcher."""
+
+    class Matcher:
+        def __init__(self, *names):
+            self._names = set(names)
+
+        def __call__(self, name):
+            return any(name.lower() in held.lower() for held in self._names)
+
+    def matchers(self, tests):
+        return _Matchers(list(tests), lambda test: self.Matcher(*tests[test]))
+
+    TESTS: ClassVar = {
+        "a0": ["test_many.py", "test_w00[rand-3]", "parametrize"],
+        "a1": ["test_many.py", "test_w00[rand-30]", "parametrize"],
+        "a2": ["test_many.py", "Test_W00[RAND-3]x", "parametrize"],
+        "b0": ["test_other.py", "test_w01[rand-3]", "slow"],
+        "b1": ["test_other.py", "tw", "slow"],
+    }
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "test_w00[rand-3]",
+            "TEST_W00[rand-3]",
+            "rand-3",
+            "test_many.py",
+            "tw",
+            "w0",
+            "slow",
+            "no",
+        ],
+    )
+    def test_the_candidates_are_the_tests_the_name_selects(self, name):
+        found = self.matchers(self.TESTS)
+
+        expected = [at for at, matcher in enumerate(found.matchers) if matcher(name)]
+
+        assert found.candidates(name) == expected
+
+    def test_a_name_of_its_own_asks_one_test_among_many(self):
+        tests = {f"t{at}": ["test_many.py", f"test_word[rand-{at}]"] for at in range(2000)}
+
+        assert self.matchers(tests).candidates("test_word[rand-1234]") == [1234]
+
+    def test_without_the_matchers_names_every_test_is_a_candidate(self):
+        found = _Matchers(["a", "b"], lambda test: object())
+
+        assert found.candidates("test_word[rand-1]") == [0, 1]
 
 
 class TestFailedRowsLines:
