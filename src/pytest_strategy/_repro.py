@@ -463,11 +463,21 @@ def _positionals(config: pytest.Config, args: Sequence[str]) -> list[str] | None
     Return the paths and node IDs among ``args``, as pytest's own parser finds them
     (it knows which options take a value), or None when it cannot say.
     """
-    parse = getattr(getattr(config, "_parser", None), "parse_known_args", None)
-    if parse is None:
-        return None
+    parser = getattr(config, "_parser", None)
+    both = getattr(parser, "parse_known_and_unknown_args", None)
+    parse = getattr(parser, "parse_known_args", None)
     try:
-        found = getattr(parse(list(args)), "file_or_dir", None)
+        if both is not None:
+            # Before pytest 9 a path after an option is among the arguments the
+            # parser did not take, which pytest then adds to the paths itself
+            known, unknown = both(list(args))
+            found = getattr(known, "file_or_dir", None)
+            if isinstance(found, list):
+                found = [*found, *(arg for arg in unknown if not arg.startswith("-"))]
+        elif parse is not None:
+            found = getattr(parse(list(args)), "file_or_dir", None)
+        else:
+            return None
     except (Exception, SystemExit):
         # An argument only the run's start could read (a plugin's own parsing)
         return None
