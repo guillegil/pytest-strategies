@@ -19,8 +19,8 @@ constraint has no ``latex``.
 
 A rendering is right or absent: the source is used only when compiling it gives
 the very code object of the function, and a construct whose meaning depends on
-the values' types beyond what the text says is left out. Nothing here calls
-user code, and nothing raises an ``Exception``.
+the values' types beyond what the text says is left out. No predicate or
+constraint is called, and nothing here raises an ``Exception``.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ import linecache
 import math
 import re
 import types
+import unicodedata
 import warnings
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from enum import Enum
@@ -91,10 +92,23 @@ class _Untranslatable(Exception):
 
 
 def _printable(value: str) -> str:
-    """``value`` on one line: the characters that do not print, as Python escapes."""
-    return "".join(
-        ch if ch.isprintable() else ch.encode("unicode_escape").decode("ascii") for ch in value
-    )
+    """
+    ``value`` on one line: the characters that do not print, as Python escapes.
+    So are combining marks and format characters, which have no place of their own
+    in LaTeX text (an accent after a brace has nothing to sit on).
+    """
+    return "".join(ch if _prints(ch) else _python_escape(ch) for ch in value)
+
+
+def _prints(ch: str) -> bool:
+    return ch.isprintable() and unicodedata.category(ch)[0] != "M"
+
+
+def _python_escape(ch: str) -> str:
+    try:
+        return ch.encode("unicode_escape").decode("ascii")
+    except UnicodeError:
+        return f"\\u{ord(ch):04x}"
 
 
 def _escaped(value: str) -> str:
@@ -116,25 +130,46 @@ def text(value: str) -> str:
 
 
 def _quoted(value: str) -> str:
-    r"""A string in double quotes, as Python escapes it; a cut one is followed by ``\dots``."""
-    body = _printable(value.replace("\\", "\\\\").replace('"', '\\"'))
-    quoted = r"\text{" + _escaped('"' + body[:MAX_TEXT] + '"') + "}"
-    return quoted + r"\dots" if len(body) > MAX_TEXT else quoted
+    r"""
+    A string in double quotes, as Python escapes it. One that is too long is cut
+    between characters (never inside an escape) and followed by ``\dots``.
+    """
+    pieces: list[str] = []
+    length = 0
+    cut = False
+    for ch in value:
+        piece = _printable({"\\": "\\\\", '"': '\\"'}.get(ch, ch))
+        if length + len(piece) > MAX_TEXT:
+            cut = True
+            break
+        pieces.append(piece)
+        length += len(piece)
+    quoted = r"\text{" + _escaped('"' + "".join(pieces) + '"') + "}"
+    return quoted + r"\dots" if cut else quoted
+
+
+# The letters outside ASCII a name may have: the Latin ones every text font has
+_NAME_LETTERS = ("\u00c0", "\u024f")
 
 
 def name(identifier: str) -> str:
     r"""
     Return an argument's name as a variable: ``x``, ``\mathit{burst\_len}``, or
-    for a name with other than ASCII letters ``\textit{größe}`` (math mode has
-    no accented letters).
+    for a name with accented Latin letters ``\textit{größe}`` (math mode has
+    none).
 
     Raises:
-        _Untranslatable: For a name that is not an identifier
+        _Untranslatable: For a name that is not an identifier, or with letters of
+            another script (a renderer may have no font for them)
     """
     if not identifier.isidentifier():
         raise _Untranslatable
     if not identifier.isascii():
-        return r"\textit{" + _escaped(identifier) + "}"
+        composed = unicodedata.normalize("NFC", identifier)
+        for ch in composed:
+            if not (ch.isascii() or (_NAME_LETTERS[0] <= ch <= _NAME_LETTERS[1] and ch.isalpha())):
+                raise _Untranslatable
+        return r"\textit{" + _escaped(composed) + "}"
     if len(identifier) == 1 and identifier.isalpha():
         return identifier
     return r"\mathit{" + identifier.replace("_", r"\_") + "}"
@@ -172,6 +207,17 @@ def _float(value: float) -> str:
 def _is_simple(value: Any) -> bool:
     """Whether ``value`` is written as itself: None, a bool, number, str or enum member."""
     return value is None or type(value) in (bool, int, float, str) or _is_member(value)
+
+
+def _is_comparable(value: Any) -> bool:
+    """
+    Whether a simple value is written in a condition. A bool is not (``x == True``
+    holds for 1, which the text would not say: only ``x is True`` is written), nor
+    is a NaN (no comparison with it says what the text would).
+    """
+    if type(value) is bool or (type(value) is float and math.isnan(value)):
+        return False
+    return _is_simple(value)
 
 
 def _is_member(value: Any) -> bool:
@@ -240,11 +286,31 @@ def _set(values: Sequence[Any]) -> str:
     if not kept:
         return r"\emptyset"
     if cut:
-        shown = [value(item) for item in kept[:_LISTED_HEAD]]
-        shown += [r"\dots", value(values[-1])]
+        head = kept[:_LISTED_HEAD]
+        shown = [value(item) for item in head]
+        shown.append(r"\dots")
+        # The last value, unless it is one already shown
+        last = values[-1]
+        if len(_listed([*head, last])[0]) > len(head):
+            shown.append(value(last))
     else:
         shown = [value(item) for item in kept]
     return r"\{" + ", ".join(shown) + r"\}"
+
+
+def _order(item: Any) -> tuple[str, float, str]:
+    """
+    What orders the simple values of a set written out: numbers by value, then
+    each other type by itself, enum members as their class lists them. Calls
+    nothing of the values' own.
+    """
+    if _is_member(item):
+        position = list(type(item).__members__.values()).index(item)
+        return (type(item).__qualname__, float(position), "")
+    if type(item) in (int, float):
+        size = float(item) if abs(item) < 1e300 else math.copysign(1e300, item)
+        return ("", size, repr(item))
+    return (type(item).__qualname__, 0.0, repr(item))
 
 
 def _interval(low: Any, high: Any) -> str:
@@ -345,7 +411,10 @@ class _Source:
     def __init__(self, source: str, filename: str) -> None:
         self.source = source
         self.codes: set[types.CodeType] = set()
-        self.functions: list[_Function] = []
+        # The lambdas and defs, by the first line their code may have
+        self.functions: dict[int, list[_Function]] = {}
+        # What _definition() found for a code object (None: nothing)
+        self.found: dict[types.CodeType, tuple[ast.expr, list[str]] | None] = {}
         with warnings.catch_warnings():
             # The file's own SyntaxWarnings were given when it was imported
             warnings.simplefilter("ignore")
@@ -359,9 +428,14 @@ class _Source:
             code = pending.pop()
             self.codes.add(code)
             pending.extend(const for const in code.co_consts if isinstance(const, types.CodeType))
-        self.functions = [
-            node for node in ast.walk(tree) if isinstance(node, (ast.Lambda, ast.FunctionDef))
-        ]
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Lambda, ast.FunctionDef)):
+                # A code object's first line is its def's, or its first decorator's
+                lines = {node.lineno}
+                if isinstance(node, ast.FunctionDef):
+                    lines.update(decorator.lineno for decorator in node.decorator_list)
+                for line in lines:
+                    self.functions.setdefault(line, []).append(node)
 
 
 # The last files read, by name: a strategy file is asked about once per predicate
@@ -453,11 +527,24 @@ def _definition(fn: Any) -> tuple[ast.expr, list[str]]:
     if any(isinstance(const, types.CodeType) for const in code.co_consts):
         raise _Untranslatable
     source = _source(code.co_filename, fn.__globals__)
+    if code not in source.found:
+        try:
+            source.found[code] = _find(source, code)
+        except _Untranslatable:
+            source.found[code] = None
+    found = source.found[code]
+    if found is None:
+        raise _Untranslatable
+    return found
+
+
+def _find(source: _Source, code: types.CodeType) -> tuple[ast.expr, list[str]]:
+    """Find a code object's expression and parameters in its file (see ``_definition()``)."""
     if code not in source.codes:
         raise _Untranslatable
     expected = list(code.co_varnames[: code.co_argcount])
     best: _Function | None = None
-    for node in source.functions:
+    for node in source.functions.get(code.co_firstlineno, ()):
         if isinstance(node, ast.FunctionDef) and node.name != code.co_name:
             continue
         if isinstance(node, ast.Lambda) and code.co_name != "<lambda>":
@@ -494,7 +581,8 @@ def _bindings(fn: types.FunctionType, parameters: list[str]) -> Callable[[str], 
     """
     code = fn.__code__
     defaults = fn.__defaults__ or ()
-    bound: dict[str, Any] = dict(zip(parameters[len(parameters) - len(defaults) :], defaults))
+    # From the end, as a call binds them
+    bound: dict[str, Any] = dict(zip(reversed(parameters), reversed(defaults)))
     # The first parameter is the subject, whatever its default
     bound.pop(parameters[0], None)
     for free, cell in zip(code.co_freevars, fn.__closure__ or ()):
@@ -528,7 +616,9 @@ def _bindings(fn: types.FunctionType, parameters: list[str]) -> Callable[[str], 
 
 # Precedences, loosest first. The bit operators share one, below the comparisons,
 # so that they are always in parentheses there: few readers know how they bind.
-# A mod is bare only as a whole side of a comparison: "a + b mod 4" reads both ways
+# A mod is in parentheses as an operand of another operator ("a + b mod 4" reads
+# both ways), and so is a sum, a negation or a product on either side of it,
+# except a product on its left ("2 x mod 4")
 _OR, _AND, _NOT, _BITS, _COMPARE, _MOD, _ADD, _MUL, _UNARY, _POWER, _ATOM = range(1, 12)
 
 _COMPARISONS: dict[type, str] = {
@@ -556,13 +646,13 @@ _NEGATED: dict[type, type] = {
     ast.Is: ast.IsNot,
     ast.IsNot: ast.Is,
 }
-# operator: (LaTeX, precedence); left-associative. The shifts are not written:
-# \ll and \gg read as "much less" and "much greater"
+# operator: (LaTeX, precedence); left-associative. The shifts and the bit-or are
+# not written: \ll and \gg read as "much less" and "much greater", and a bar as
+# "such that" or an absolute value
 _BINARY: dict[type, tuple[str, int]] = {
     ast.Add: ("+", _ADD),
     ast.Sub: ("-", _ADD),
     ast.Mult: (r"\cdot", _MUL),
-    ast.BitOr: (r"\mathbin{|}", _BITS),
     ast.BitXor: (r"\oplus", _BITS),
     ast.BitAnd: (r"\mathbin{\&}", _BITS),
 }
@@ -649,6 +739,9 @@ class _Translator:
 
     def _comparison(self, node: ast.Compare) -> tuple[str, int]:
         parts = [self._wrap(self.term(node.left), _MOD)]
+        # After "in", a chain goes on comparing the collection, which no reader expects
+        if any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops[:-1]):
+            raise _Untranslatable
         for op, right in zip(node.ops, node.comparators):
             if isinstance(op, (ast.Is, ast.IsNot)):
                 # Identity is written as equality only against what there is one of:
@@ -691,14 +784,12 @@ class _Translator:
             items = list(bound)
             if not items or len(items) > MAX_LISTED:
                 raise _Untranslatable
-            if not all(_is_simple(item) for item in items):
+            if not all(_is_comparable(item) for item in items):
                 raise _Untranslatable
             if type(bound) in (set, frozenset):
-                # A set's order changes between runs: sorted, or not written
-                try:
-                    items = sorted(items)
-                except TypeError as error:
-                    raise _Untranslatable from error
+                # A set's order changes between runs: by type and text, which calls
+                # nothing of the values' own
+                items.sort(key=_order)
             kept, _ = _listed(items)
             return r"\{" + ", ".join(value(item) for item in kept) + r"\}"
         raise _Untranslatable
@@ -769,7 +860,7 @@ class _Translator:
             left = self._wrap(self.term(node.left), _MUL)
             if left.startswith("-"):
                 left = rf"\left({left}\right)"
-            right = self._wrap(self.term(node.right), _UNARY)
+            right = self._wrap(self.term(node.right), _POWER)
             return rf"{left} \bmod {right}", _MOD
         if type(node.op) not in _BINARY:
             raise _Untranslatable
@@ -862,16 +953,16 @@ class _Translator:
         return self._known(node)
 
     def _value(self, obj: Any) -> tuple[str, int]:
-        if not _is_simple(obj):
+        if not _is_comparable(obj):
             raise _Untranslatable
         shown = value(obj)
         if type(obj) in (int, float):
+            if r"\times" in shown:
+                return shown, _MUL
             if shown.startswith("-"):
                 return shown, _UNARY
             if shown.endswith(" - 1"):
                 return shown, _ADD
-            if r"\times" in shown:
-                return shown, _MUL
             if "^" in shown:
                 return shown, _POWER
         return shown, _ATOM

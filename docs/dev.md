@@ -1990,7 +1990,9 @@ subclass has none. A predicate or constraint is translated from its source, unde
 one rule: a rendering is right or absent.
 
 - `_source()` reads the function's file through `linecache` (refreshed), compiles
-  it and keeps every code object of it (`_Source`, cached by file name and text).
+  it and keeps every code object of it (`_Source`, cached by file name and text,
+  with its lambdas and defs by first line and what was found for each code
+  object, so a file is searched once per function).
   `_definition()` uses the file only when the function's code object is among them
   (equal instructions, constants, names and positions), so a file edited since the
   import, or code compiled from other text under that name, is not translated.
@@ -2007,11 +2009,16 @@ one rule: a rendering is right or absent.
   Where Python's meaning depends on the operands' types, it writes only what holds
   for all of them: `not a < b` is `\nless` (not `\ge`: NaN, sets), a `range` is a
   set of integers (not an interval), `x % n` as a condition is `\ne 0` only with an
-  integer operand, a collection after `in` is written in full or not at all, and a
-  mod or a bit operator next to another operator is in parentheses.
+  integer operand, a collection after `in` is written in full or not at all, a
+  bool or a NaN is not compared (`x == True` holds for 1; only `x is True` is
+  written), and a chain does not go on after `in`. A mod as an operand of another
+  operator, a sum or a negation beside a mod, and anything beside a bit operator
+  are in parentheses. Shifts and `|` are not written (`\ll` and a bar read as
+  something else).
 - Only simple values (numbers, strings, bools, None, enum members, and collections
   of them after `in`) are read from a binding, and no attribute is read except an
-  enum class's member. No predicate or constraint is called.
+  enum class's member. No predicate or constraint is called (values are hashed
+  and compared to list a set once).
 - Text goes through `_escaped()`: LaTeX's special characters, the characters that
   would form a ligature (`--`, `''`) and the spaces LaTeX would drop.
 

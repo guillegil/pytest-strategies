@@ -42,10 +42,16 @@ class Status(Enum):
     DONE = 3
 
 
+MEMBERS = frozenset({Status.DONE, Status.IDLE})
+MIXED = {3, "a", 1, 2.5}
 LIMIT = 4096
 RESERVED = (12, 13)
 ODD = frozenset({3, 1})
 EVENS = tuple(range(0, 20, 2))
+TINY = -1.5e-7
+NAN = float("nan")
+NANS = (NAN, 1)
+FLAGS = (True, 2)
 
 
 class Spaced:
@@ -165,7 +171,26 @@ class TestArgumentLatex:
             r"x = \text{(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11...}"
         )
 
+    def test_a_cut_string_ends_between_characters(self):
+        for tail in ("\nb", '"b', "\\"):
+            assert latex(value="a" * 39 + tail) == r'x = \text{"' + "a" * 39 + r'"}\dots'
+        assert latex(value="a" * 38 + "\\") == (
+            r'x = \text{"' + "a" * 38 + r'\textbackslash{}\textbackslash{}"}'
+        )
+
+    def test_a_combining_mark_is_written_as_its_escape(self):
+        assert latex(value="a_\u0301") == r'x = \text{"a\_\textbackslash{}u0301"}'
+
+    def test_a_cut_set_does_not_repeat_a_value(self):
+        assert latex(RNGChoice([1, 2, 3, 4, 5, 6, 7, 8, 9, 1])) == r"x \in \{1, 2, 3, \dots\}"
+        assert latex(RNGChoice([1, 2, 3, 4, 5, 6, 7, 8, 9, 1.0])) == (
+            r"x \in \{1, 2, 3, \dots, 1.0\}"
+        )
+
     def test_a_name_that_math_mode_cannot_write(self):
+        assert latex(RNGInteger(0, 1), name="ℝ") is None
+        assert latex(RNGInteger(0, 1), name="α_1") is None
+        assert latex(RNGInteger(0, 1), name="e\u0301t") == r"\textit{ét} \in [0, 1]"
         assert latex(RNGInteger(0, 1), name="größe") == r"\textit{größe} \in [0, 1]"
         assert latex(RNGInteger(0, 1), name="a{") is None
         assert latex(RNGInteger(0, 1), name="a b") is None
@@ -294,9 +319,12 @@ class TestPredicateLatex:
             (lambda x: not x % 4, r"x \bmod 4 = 0"),
             (lambda x: x & 1, r"\left(x \mathbin{\&} 1\right) \ne 0"),
             (
-                lambda x: (x | 1) & 0xFF == 3,
-                r"\left(\left(x \mathbin{|} 1\right) \mathbin{\&} 255\right) = 3",
+                lambda x: (x ^ 1) & 0xFF == 3,
+                r"\left(\left(x \oplus 1\right) \mathbin{\&} 255\right) = 3",
             ),
+            (lambda x: x & 3 & 5 == 1, r"\left(x \mathbin{\&} 3 \mathbin{\&} 5\right) = 1"),
+            (lambda x: x | 1 == 3, None),
+            (lambda x: abs(x | 1) > 2, None),
             (lambda x: (x >> 2) & 0xFF == 3, None),
             (lambda x: x << 1 > 4, None),
             (lambda x: x % 3 + 1 == 2, r"\left(x \bmod 3\right) + 1 = 2"),
@@ -310,9 +338,25 @@ class TestPredicateLatex:
             (lambda x: (x / 2) ** 2 > 3, r"\left(\frac{x}{2}\right)^{2} > 3"),
             (lambda x: -(-x) < 1, r"-\left(-x\right) < 1"),  # noqa: B002
             (lambda x: x % LIMIT, r"x \bmod 4096 \ne 0"),
+            (lambda x: x % 4**2 == 1, r"x \bmod 4^{2} = 1"),
+            (lambda x: x % -3 == 0, r"x \bmod \left(-3\right) = 0"),
+            (lambda x: x % TINY == 0, r"x \bmod \left(-1.5 \times 10^{-7}\right) = 0"),
+            (lambda x: x - TINY > 0, r"x - \left(-1.5 \times 10^{-7}\right) > 0"),
+            (lambda x: 0 < x in (1, 2), r"0 < x \in \{1, 2\}"),
+            (lambda x: x in (1, 2) == True, None),  # noqa: E712
+            (lambda x: x in (1, 2) < 3, None),
+            (lambda x: x == NAN, None),
+            (lambda x: x < NAN, None),
+            (lambda x: x in NANS, None),
+            (lambda x: x == True, None),  # noqa: E712
+            (lambda x: x != False, None),  # noqa: E712
+            (lambda x: x in (True, 2), None),
+            (lambda x: x in FLAGS, None),
+            (lambda x: x is True, r"x = \text{True}"),
+            (lambda x: x in MEMBERS, r"x \in \{\text{IDLE}, \text{DONE}\}"),
+            (lambda x: x in MIXED, r'x \in \{1, 2.5, 3, \text{"a"}\}'),
             (lambda x: x % x, None),
             (lambda x: x & RESERVED, None),
-            (lambda x: x | 1 | 2 == 3, r"\left(x \mathbin{|} 1 \mathbin{|} 2\right) = 3"),
             (lambda x: x ^ 1 > 0, r"\left(x \oplus 1\right) > 0"),
             (lambda x: (x + 1) * 2 > 4, r"\left(x + 1\right) \cdot 2 > 4"),
             (lambda x: x - (x - 1) > 0, r"x - \left(x - 1\right) > 0"),
@@ -443,6 +487,35 @@ class TestPredicateLatex:
         assert predicate_latex(outer, "x") is None
         assert predicate_latex(same, "x") is None
         assert predicate_latex(outer(0), "x") == "x > 3"
+
+    def test_defaults_are_bound_as_a_call_binds_them(self):
+        predicate = lambda x, n=10: x < n  # noqa: E731
+        predicate.__defaults__ = (10, 20, 30)
+
+        assert predicate(25)
+        assert predicate_latex(predicate, "x") == "x < 30"
+
+    def test_a_file_is_searched_once_per_function(self, monkeypatch):
+        from pytest_strategy import _latex
+
+        predicate = lambda x: x > 41  # noqa: E731
+        assert predicate_latex(predicate, "x") == "x > 41"
+        searched = []
+        monkeypatch.setattr(_latex, "_find", lambda *args: searched.append(args))
+
+        assert predicate_latex(predicate, "x") == "x > 41"
+        assert searched == []
+
+    def test_a_decorated_function(self):
+        def keep(fn):
+            return fn
+
+        @keep
+        @keep
+        def small(x):
+            return x < 3
+
+        assert predicate_latex(small, "x") == "x < 3"
 
     def test_a_class_private_name_is_not_read_from_the_globals(self):
         namespace = {}
