@@ -39,6 +39,7 @@
             "description": "",
             "python_type": "int",
             "validator": false,
+            "latex": "\\mathit{addr} \\in [0, 15]",
             "source": "rng",
             "rng": {
               "type": "RNGInteger",
@@ -77,6 +78,7 @@
             "description": "",
             "python_type": "int",
             "validator": false,
+            "latex": "\\mathit{addr} \\in [0, 15]",
             "source": "rng",
             "rng": {
               "type": "RNGInteger",
@@ -90,6 +92,7 @@
             "description": "",
             "python_type": "str",
             "validator": false,
+            "latex": "\\mathit{bench} = \\text{\"root\"}",
             "source": "value",
             "value": "root"
           }
@@ -123,6 +126,7 @@
             "description": "",
             "python_type": "int",
             "validator": false,
+            "latex": "\\mathit{integer} \\in [0, 255],\\ \\mathit{integer} \\bmod 2 = 0",
             "source": "rng",
             "rng": {
               "type": "RNGInteger",
@@ -136,6 +140,7 @@
             "description": "a float",
             "python_type": "float",
             "validator": false,
+            "latex": "\\mathit{real} \\in [-1.5, 2.5] \\subset \\mathbb{R}",
             "source": "rng",
             "rng": {
               "type": "RNGFloat",
@@ -149,6 +154,7 @@
             "description": "",
             "python_type": "bool",
             "validator": false,
+            "latex": "\\mathit{flag} \\in \\{\\text{True}, \\text{False}\\},\\ P(\\text{True}) = 0.25",
             "source": "rng",
             "rng": {
               "type": "RNGBoolean",
@@ -160,6 +166,7 @@
             "description": "",
             "python_type": "str",
             "validator": false,
+            "latex": "\\mathit{data} \\in \\{\\text{\"rd\"}, \\text{b'\\textbackslash{}x00\\textbackslash{}xff'}, \\text{(1, 2)}\\}",
             "source": "rng",
             "rng": {
               "type": "RNGChoice",
@@ -181,6 +188,7 @@
             "description": "",
             "python_type": "Color",
             "validator": false,
+            "latex": "\\mathit{color} \\in \\{\\text{RED}, \\text{BLUE}\\}",
             "source": "rng",
             "rng": {
               "type": "RNGEnum",
@@ -223,6 +231,7 @@
             "description": "",
             "python_type": "Color",
             "validator": false,
+            "latex": "\\mathit{hue} \\in \\{\\text{GREEN}, \\text{BLUE}\\}",
             "source": "rng",
             "rng": {
               "type": "RNGEnum",
@@ -250,6 +259,7 @@
             "description": "",
             "python_type": "str",
             "validator": false,
+            "latex": "\\lvert \\mathit{text} \\rvert \\in [2, 4],\\ \\mathit{text} \\in \\Sigma^{*}",
             "source": "rng",
             "rng": {
               "type": "RNGString",
@@ -264,6 +274,7 @@
             "description": "",
             "python_type": "int",
             "validator": false,
+            "latex": "\\mathit{wint} \\in [0, 9] \\cup [100, 109]",
             "source": "rng",
             "rng": {
               "type": "RNGWeightedInteger",
@@ -287,6 +298,7 @@
             "description": "",
             "python_type": "float",
             "validator": false,
+            "latex": "\\mathit{wfloat} \\in [0.0, 1.0] \\cup [10.0, 11.0] \\subset \\mathbb{R}",
             "source": "rng",
             "rng": {
               "type": "RNGWeightedFloat",
@@ -310,6 +322,7 @@
             "description": "",
             "python_type": "str",
             "validator": false,
+            "latex": "\\mathit{pick} \\in \\{\\text{\"x\"}, \\text{\"y\"}\\}",
             "source": "rng",
             "rng": {
               "type": "RNGSequence",
@@ -325,6 +338,7 @@
             "description": "",
             "python_type": "int",
             "validator": false,
+            "latex": "\\mathit{lane} \\in \\{0, 3\\}",
             "source": "rng",
             "rng": {
               "type": "Series",
@@ -341,6 +355,7 @@
             "description": "",
             "python_type": null,
             "validator": false,
+            "latex": null,
             "source": "rng",
             "rng": {
               "type": "Walk",
@@ -362,6 +377,7 @@
             "description": "",
             "python_type": "str",
             "validator": false,
+            "latex": "\\mathit{bench} = \\text{\"a\"}",
             "source": "value",
             "value": "a"
           },
@@ -370,6 +386,7 @@
             "description": "a value",
             "python_type": "str",
             "validator": true,
+            "latex": "\\mathit{mode} = \\text{\"fast\"}",
             "source": "value",
             "value": "fast"
           }
@@ -477,11 +494,13 @@
         "constraints": [
           {
             "name": "even",
-            "enabled": true
+            "enabled": true,
+            "latex": "\\mathit{integer} \\bmod 2 = 0"
           },
           {
             "name": "small",
-            "enabled": false
+            "enabled": false,
+            "latex": "\\mathit{integer} < 100"
           }
         ],
         "always_include_directed": true,

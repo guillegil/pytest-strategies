@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The strategy export has a LaTeX rendering of each strategy: in `Parameter.to_dict()`, and so in `export_strategies()` and both files of `--strategy-export`, every argument has a `latex` key with the set its values are drawn from (`\mathit{addr} \in [1, 20]`, `x \in \{1, 2, 4, 8\}`, `\mathit{count} = 5`) and every constraint one with its condition (`\mathit{addr} + \mathit{len} \le 4096`), as LaTeX math without `$` delimiters. Keys added within schema 1.
+- Simple predicates and constraints are translated from their source: a lambda or a one-`return` function made of comparisons, arithmetic, bit operators, `and`/`or`/`not`, `in` and `abs`/`len`/`min`/`max`, so `RNGInteger(1, 20, predicate=lambda x: x not in (12, 13))` gives `x \in [1, 20],\ x \notin \{12, 13\}`. A predicate that is not translated is written `p(x)`, and such a constraint has `"latex": null`. See "LaTeX" in the README.
+- The agent skill documents the key. Run `pytest-strategies skill install` to update an installed copy.
+
 ## [4.3.0] - 2026-11-18
 
 4.3.0 adds a per-run export of the strategies each test used and the vectors it ran, and lets a strategy pin its sample count. It removes nothing, and a seed recorded with 4.2 gives the same rows.

@@ -257,8 +257,8 @@ def test_the_export_is_schema_1_with_every_registration(project):
     assert arguments["integer"]["source"] == "rng"
     assert "value" not in arguments["integer"]
     assert types["constraints"] == [
-        {"name": "even", "enabled": True},
-        {"name": "small", "enabled": False},
+        {"name": "even", "enabled": True, "latex": r"\mathit{integer} \bmod 2 = 0"},
+        {"name": "small", "enabled": False, "latex": r"\mathit{integer} < 100"},
     ]
     zeros, marked = types["directed_vectors"]
     assert (zeros["name"], zeros["id"], zeros["values"]["real"]) == (

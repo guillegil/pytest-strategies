@@ -1660,7 +1660,7 @@ class Parameter:
         ``test_vectors`` in order as ``{"name", "id", "values"}``, with the
         names-format ID and the values by argument name in the schema's value
         encoding (``{"$float": "nan"}``, ``{"$enum": "Color", "member": "RED"}``,
-        ``{"$repr": ..., "$type": ...}``), ``constraints`` as ``{"name", "enabled"}``
+        ``{"$repr": ..., "$type": ...}``), ``constraints`` as ``{"name", "enabled", "latex"}``
         in evaluation order, ``always_include_directed``, ``max_retries``,
         ``nsamples``, ``per_sequence_samples``, ``max_exhaustive``, ``skip_reason``
         and ``pin_nsamples``. Every constraint is enabled here; the export says which

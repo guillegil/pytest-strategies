@@ -42,6 +42,7 @@ from ._context import below, unloaded_conftests
 from ._encode import encode
 from ._factory import FactoryError, FactoryInputs, analyse, call_factory
 from ._ids import names_id
+from ._latex import argument_latex, constraint_latex
 from ._registry import Factory, display_path, factory_source, registry
 from ._runtime import runtime
 from ._streams import INSTALLED_FOLDERS, StreamKey, path_part, seed_part
@@ -198,14 +199,16 @@ def _python_type(arg: TestArg) -> str | None:
 def argument_dict(arg: TestArg) -> dict[str, Any]:
     """
     Describe a test argument (``TestArg.to_dict()``): its name, description,
-    ``python_type``, whether a validator is set, and its ``source``: ``"value"``
-    with the ``value``, or ``"rng"`` with what its RNG type's ``to_dict()`` returns.
+    ``python_type``, whether a validator is set, its ``latex`` (see ``_latex.py``;
+    None for a custom RNG type) and its ``source``: ``"value"`` with the ``value``,
+    or ``"rng"`` with what its RNG type's ``to_dict()`` returns.
     """
     data: dict[str, Any] = {
         "name": arg.name,
         "description": arg.description,
         "python_type": _python_type(arg),
         "validator": arg._validator is not None,
+        "latex": argument_latex(arg),
     }
     if arg.is_static:
         data["source"] = "value"
@@ -255,7 +258,12 @@ def parameter_dict(param: Parameter, constraints_off: Iterable[str] = ()) -> dic
         "directed_vectors": _vectors(param, "directed"),
         "test_vectors": _vectors(param, "test"),
         "constraints": [
-            {"name": name, "enabled": name not in off} for name in param.vector_constraints
+            {
+                "name": name,
+                "enabled": name not in off,
+                "latex": constraint_latex(fn, param.arg_names),
+            }
+            for name, fn in param.vector_constraints.items()
         ],
         "always_include_directed": bool(param.always_include_directed),
         "max_retries": param.max_retries,

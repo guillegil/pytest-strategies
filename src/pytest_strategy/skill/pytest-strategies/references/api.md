@@ -117,7 +117,17 @@ def export_strategies(*, format: str = "json") -> str: ...
   argument has `source` `"value"` with `value`, or `"rng"` with `rng`
   (`RNGType.to_dict()`: `{"type": "RNGInteger", "min": 0, "max": 255, "predicate":
   false}`); vectors are `{"name", "id", "values"}` lists and constraints
-  `{"name", "enabled"}`. Values that JSON does not hold are tagged:
+  `{"name", "enabled", "latex"}`. Each argument and constraint has `latex`: LaTeX
+  math without `$` for the set the argument is drawn from (`\mathit{addr} \in
+  [1, 20]`, `x \in \{1, 2, 4\}`, `\mathit{count} = 5`) or the constraint's
+  condition (`\mathit{addr} + \mathit{len} \le 4096`). A predicate or constraint
+  is translated from its source only when it is a lambda or a one-`return`
+  function of comparisons, arithmetic, bit operators, `and`/`or`/`not`, `in` and
+  `abs`/`len`/`min`/`max` over the argument (`v.addr` or `v[0]` in a constraint),
+  literals and names bound to numbers, strings, enum members or tuples of them:
+  `lambda x: x not in (12, 13)` adds `,\ x \notin \{12, 13\}`. Otherwise the
+  argument ends with `,\ p(x)` and the constraint's `latex` is null; a custom
+  RNG type's argument has `latex` null. Values that JSON does not hold are tagged:
   `{"$float": "nan"}`, `{"$enum": "Color", "member": "RED"}`,
   `{"$repr": "b'\\x00'", "$type": "bytes"}`. Ignore keys and enum values you do not
   know: 4.x adds them within schema 1, and read an unknown `$`-tagged object like

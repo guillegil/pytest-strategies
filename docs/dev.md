@@ -1981,7 +1981,27 @@ reported as the factory's own exception type and message, and the hint the
 plugin adds to it (`_factory.FactoryError.note`) goes in `note`. Built-in RNG
 types get typed fields by their exact class; a subclass or a custom type gets
 `{"type": ..., "attributes": {...}}`, its public instance attributes in the
-value encoding. Schema 1 evolves by addition only: readers ignore keys they do
+value encoding.
+
+**LaTeX** (`_latex.py`): `argument_dict()` and `parameter_dict()` add `latex` to each
+argument and constraint (keys added within schema 1 in 4.4). The set of a built-in
+RNG type comes from its attributes, by exact class like the typed fields, so a
+subclass has none. A predicate or constraint is translated from its source:
+`_definition()` parses the function's file (`linecache`, refreshed) and takes the
+innermost lambda or def that has the function's parameters and holds every
+instruction position of its code (`co_positions()`, so two lambdas on one line are
+told apart and a file edited since the import does not match), `_bindings()`
+resolves the other names (defaults, closure cells, globals, builtins) and
+`_Translator` renders the subset, raising `_Untranslatable` for anything else. Only
+simple values (numbers, strings, bools, None, enum members, and collections of
+them after `in`) are read from a binding, and no attribute is read except an enum
+class's member, so translating runs no user code other than an `RNGEnum`'s
+predicate over its members (which its constructor runs too). Nothing in the
+module raises: a failure gives `p(name)` for a predicate and None for a
+constraint. When adding to the subset, keep the rule that a rendering is either
+right or absent, and check new output with a LaTeX renderer.
+
+Schema 1 evolves by addition only: readers ignore keys they do
 not know and unknown values of the string enums (`kind`, `source`,
 `VectorInfo.kind`), and read an unknown `$`-tagged object like `$repr`, so a
 4.x release may add keys and enum values (`source: "dependent"` is reserved for
