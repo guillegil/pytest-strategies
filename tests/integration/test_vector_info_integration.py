@@ -412,7 +412,7 @@ class TestVerboseSummary:
     def test_rows_are_counted_by_kind(self, pytester, args, lines):
         _project(pytester)
 
-        result = pytester.runpytest("-v", "--rng-seed=1", *args)
+        result = pytester.runpytest("--strategy-summary", "-v", "--rng-seed=1", *args)
 
         assert result.ret == pytest.ExitCode.OK
         result.stdout.re_match_lines(lines)

@@ -1130,8 +1130,8 @@ class PytestStrategyPlugin:
         (``_failed_rows_lines``), give the commands that rerun the failed rows a
         --lf run reused the seed of but did not collect (``_uncollected_lines``,
         unless the session stopped before its tests ran) and those it set aside
-        (``_deselected_lines``), and summarize the strategies and the contexts
-        with -v.
+        (``_deselected_lines``), and, only with --strategy-summary, say where the run export went and
+        summarize the strategies and the contexts (``_summary_on``).
 
         On the pytest-xdist controller, which collects nothing, first print what the
         workers printed after their collection (the contexts, the unmatched
@@ -1184,7 +1184,7 @@ class PytestStrategyPlugin:
                     f"{export.folder}: {export.error}",
                     red=True,
                 )
-            elif export.written:
+            elif export.written and _summary_on(config):
                 names = " and ".join(path.name for path in export.written)
                 write_line(f"pytest-strategies: wrote {names} to {export.folder}")
         if state is not None:
@@ -1194,7 +1194,7 @@ class PytestStrategyPlugin:
             for line in _deselected_lines(state, config):
                 write_line(line)
 
-        if self._verbosity(config) < 1:
+        if not _summary_on(config):
             return
         terminalreporter.section("Strategy Summary")
         if summary is None:
@@ -2154,6 +2154,16 @@ def _details(config: Config) -> bool:
     return bool(getattr(config.option, "strategy_details", False))
 
 
+def _summary_on(config: Config) -> bool:
+    """
+    Whether the terminal summary shows the "Strategy Summary" section and the line
+    naming the files of the run export: with ``--strategy-summary``. Off by default, -v included, so a run prints
+    only what helps after a failure (how to reproduce it, the failed rows' rerun
+    commands). -vv adds every strategy's name to the section.
+    """
+    return bool(getattr(config.option, "strategy_summary", False))
+
+
 def _failed_rows_lines(rows: Mapping[str, Mapping[str, str]], verbosity: int) -> list[str]:
     """
     Return the lines that list the failed strategy rows after the line that says how
@@ -3061,6 +3071,18 @@ def pytest_addoption(parser: pytest.Parser) -> None:
             "Show a pytest-strategies section under each failed strategy row's "
             "traceback: what the row is, its values, the seed and its rerun command "
             "(off by default; put it in addopts to keep it on)"
+        ),
+    )
+
+    group.addoption(
+        "--strategy-summary",
+        action="store_true",
+        default=False,
+        help=(
+            "Show the Strategy Summary at the end of the run (each strategy's rows, "
+            "where its sample count came from, its rejections, the contexts) and the "
+            "files the strategy export wrote (off by default, -v included; put it in "
+            "addopts to keep it on)"
         ),
     )
 

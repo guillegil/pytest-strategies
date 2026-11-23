@@ -281,7 +281,7 @@ def test_verbose_summary_counts_rejections_by_name(pytester):
     # A subprocess keeps this suite's filterwarnings=error out of the inner run: each
     # test skips the ch=2 combination with a warning
     result = pytester.runpytest_subprocess(
-        "-p", "no:cacheprovider", "-v", "--rng-seed=2", "--nsamples=4"
+        "--strategy-summary", "-p", "no:cacheprovider", "-v", "--rng-seed=2", "--nsamples=4"
     )
 
     result.assert_outcomes(passed=12, warnings=2)
@@ -305,7 +305,7 @@ def test_verbose_summary_counts_rejections_by_name(pytester):
 def test_verbose_summary_counts_the_combinations_auto_left_out(pytester):
     pytester.makepyfile(test_nc_summary_auto=SUMMARY)
 
-    result = pytester.runpytest("-v", "--nsamples=auto")
+    result = pytester.runpytest("--strategy-summary", "-v", "--nsamples=auto")
 
     # Two combinations per test, and the plain strategy's 10 rows
     result.assert_outcomes(passed=2 + 2 + 10)

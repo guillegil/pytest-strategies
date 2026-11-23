@@ -152,7 +152,9 @@ class TestContextLine:
         test = module("plain", "tb['name'] == 'root'").replace("(y)", "(y, tb)")
         write(pytester, {"tests/conftest.py": conftest, "tests/test_x.py": test})
 
-        result = pytester.runpytest_subprocess("-p", "no:cacheprovider", "-v", *args)
+        result = pytester.runpytest_subprocess(
+            "--strategy-summary", "-p", "no:cacheprovider", "-v", *args
+        )
 
         result.assert_outcomes(passed=2)
         assert context_lines(result) == []
@@ -317,7 +319,7 @@ class TestVerboseSummary:
     def test_the_contexts_block(self, pytester):
         two_scopes(pytester)
 
-        result = pytester.runpytest("-p", "no:cacheprovider", "-v")
+        result = pytester.runpytest("--strategy-summary", "-p", "no:cacheprovider", "-v")
 
         result.stdout.fnmatch_lines(
             [
@@ -363,7 +365,7 @@ def test_b(request):
 
         for args in [(), ("-n", "2")]:
             result = pytester.runpytest_subprocess(
-                "-p", "no:cacheprovider", "-v", f"--rng-seed={SEED}", *args
+                "--strategy-summary", "-p", "no:cacheprovider", "-v", f"--rng-seed={SEED}", *args
             )
             result.assert_outcomes(passed=3)
             lines = result.stdout.lines
@@ -373,7 +375,7 @@ def test_b(request):
     def test_no_block_without_a_context(self, pytester):
         write(pytester, {"tests/test_x.py": module("plain")})
 
-        result = pytester.runpytest("-p", "no:cacheprovider", "-v")
+        result = pytester.runpytest("--strategy-summary", "-p", "no:cacheprovider", "-v")
 
         result.stdout.fnmatch_lines(["*Strategy Summary*"])
         result.stdout.no_fnmatch_line("Contexts*")
@@ -439,7 +441,9 @@ def test_second(x):
         )
         (pytester.path / "strategies.py").write_text(dedent(counting))
 
-        result = pytester.runpytest("-p", "no:cacheprovider", "-v", f"--rng-seed={SEED}")
+        result = pytester.runpytest(
+            "--strategy-summary", "-p", "no:cacheprovider", "-v", f"--rng-seed={SEED}"
+        )
 
         result.assert_outcomes(passed=2, failed=1)
         expected = fp(root, pytester)

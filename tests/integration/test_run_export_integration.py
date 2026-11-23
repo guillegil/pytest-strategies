@@ -71,8 +71,18 @@ def suite(pytester):
 
 
 class TestFiles:
-    def test_both_files_are_written_with_definitions_and_rows(self, suite):
+    def test_the_files_are_written_without_a_terminal_line(self, suite):
+        """Without --strategy-summary the run says nothing about the export."""
         result = suite.runpytest_inprocess("--strategy-export=out", "--nsamples=4", "--rng-seed=1")
+        result.assert_outcomes(passed=8, failed=1, xfailed=3)
+        result.stdout.no_fnmatch_line("pytest-strategies: wrote *")
+        assert (suite.path / "out" / "strategies.json").is_file()
+        assert (suite.path / "out" / "strategies.vectors.json").is_file()
+
+    def test_both_files_are_written_with_definitions_and_rows(self, suite):
+        result = suite.runpytest_inprocess(
+            "--strategy-summary", "--strategy-export=out", "--nsamples=4", "--rng-seed=1"
+        )
         result.assert_outcomes(passed=8, failed=1, xfailed=3)
         result.stdout.fnmatch_lines(
             ["pytest-strategies: wrote strategies.json and strategies.vectors.json to *out"]
@@ -306,7 +316,7 @@ class TestPinNsamples:
             def test_x(ch, x):
                 pass
             """)
-        result = pytester.runpytest_inprocess("--nsamples=50", "-v")
+        result = pytester.runpytest_inprocess("--strategy-summary", "--nsamples=50", "-v")
         result.assert_outcomes(passed=2)
         result.stdout.fnmatch_lines(["*test_x?ch=0? PASSED*", "*test_x?ch=1? PASSED*"])
         result.stdout.fnmatch_lines(["*Parameter(nsamples=, pinned)*"])

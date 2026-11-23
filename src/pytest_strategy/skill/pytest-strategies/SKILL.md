@@ -186,7 +186,7 @@ implementation, in this order:
    must run (widths, modes); `RNGSequence` for the same set in random order;
    random types for large domains. Under `--nsamples=auto` the row count is the
    product of the sequence lengths; keep it small.
-6. **Rejections.** Constraints should drop few rows. If the `-v` Strategy Summary
+6. **Rejections.** Constraints should drop few rows. If the Strategy Summary (`--strategy-summary`)
    shows one rejecting most draws, narrow the ranges or split the strategy (`dma_aligned`,
    `dma_unaligned`) rather than raising `max_retries`.
 7. **Size.** Keep `nsamples` small (10 to 25) so every commit runs quickly, and run

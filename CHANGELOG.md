@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The strategy export has a LaTeX rendering of each strategy: in `Parameter.to_dict()`, and so in `export_strategies()` and both files of `--strategy-export`, every argument has a `latex` key with the set its values are drawn from (`\mathit{addr} \in [1, 20]`, `x \in \{1, 2, 4, 8\}`, `\mathit{count} = 5`) and every constraint one with its condition (`\mathit{addr} + \mathit{len} \le 4096`), as LaTeX math without `$` delimiters. Keys added within schema 1.
 - Simple predicates and constraints are translated from their source: a lambda or a one-`return` function made of comparisons, arithmetic, bit operators, `and`/`or`/`not`, `in` and `abs`/`len`/`min`/`max`, so `RNGInteger(1, 20, predicate=lambda x: x not in (12, 13))` gives `x \in [1, 20],\ x \notin \{12, 13\}`. The source is used only when it is what the function was compiled from, and no predicate or constraint is called. A predicate that is not translated is written `p(x)`, and such a constraint has `"latex": null`. See "LaTeX" in the README.
 - The agent skill documents the key. Run `pytest-strategies skill install` to update an installed copy.
+- `--strategy-summary` prints the "Strategy Summary" section at the end of the run (each strategy's rows, where its sample count came from, its rejections, the contexts; `-vv` adds every strategy's name) and the `pytest-strategies: wrote strategies.json and strategies.vectors.json to ...` line. Put it in `addopts` to keep it on. The agent skill documents it.
+
+### Changed
+
+- The end of a run no longer lists the strategies by default: `-v` alone prints no "Strategy Summary", and a run with a strategy export (including the one pytest-reporter asks for) no longer prints the line naming the files it wrote. Pass `--strategy-summary` to get both back. The export files are written as before, a failed export is still reported in red, and a failed run still prints how to reproduce it and the failed rows' rerun commands.
 
 ## [4.4.0] - 2026-11-23
 

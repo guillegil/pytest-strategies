@@ -224,7 +224,7 @@ def test_auto_generates_the_combinations_the_constraint_left_out(pytester, flags
             pass
         """)
 
-    result = pytester.runpytest("-v", "--nsamples=auto", *flags)
+    result = pytester.runpytest("--strategy-summary", "-v", "--nsamples=auto", *flags)
 
     result.assert_outcomes(passed=rows)
     result.stdout.re_match_lines(
@@ -620,7 +620,7 @@ class TestTheItemInAddopts:
     def test_a_run_from_the_rootdir_matches_the_item(self, pytester):
         self._ini(pytester, "co_sd_a:small")
 
-        result = pytester.runpytest("-v")
+        result = pytester.runpytest("--strategy-summary", "-v")
 
         assert result.ret == pytest.ExitCode.OK
         result.assert_outcomes(passed=20)
@@ -729,7 +729,9 @@ class TestReporting:
     def test_verbose_summary_shows_off_and_a_cached_factory_keeps_its_constraints(self, pytester):
         pytester.makepyfile(test_co_cached=CACHED)
 
-        result = pytester.runpytest("-v", "--nsamples=4", "--strategy-constraint-off=never")
+        result = pytester.runpytest(
+            "--strategy-summary", "-v", "--nsamples=4", "--strategy-constraint-off=never"
+        )
 
         result.assert_outcomes(passed=5)
         result.stdout.re_match_lines(
