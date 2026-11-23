@@ -272,6 +272,7 @@ class TestTestArgToDict:
             "description": "the mode",
             "python_type": "str",
             "validator": False,
+            "latex": r'\mathit{mode} = \text{"fast"}',
             "source": "value",
             "value": "fast",
         }
@@ -290,6 +291,7 @@ class TestTestArgToDict:
             "description": "",
             "python_type": "int",
             "validator": True,
+            "latex": r"\mathit{addr} \in [0, 9]",
             "source": "rng",
             "rng": {"type": "RNGInteger", "min": 0, "max": 9, "predicate": False},
         }
@@ -403,12 +405,12 @@ class TestParameterToDict:
         param = _bus(vector_constraints={"low": lambda v: v.addr < 9, "red": lambda v: True})
 
         assert param.to_dict()["constraints"] == [
-            {"name": "low", "enabled": True},
-            {"name": "red", "enabled": True},
+            {"name": "low", "enabled": True, "latex": r"\mathit{addr} < 9"},
+            {"name": "red", "enabled": True, "latex": None},
         ]
         assert parameter_dict(param, {"red", "other"})["constraints"] == [
-            {"name": "low", "enabled": True},
-            {"name": "red", "enabled": False},
+            {"name": "low", "enabled": True, "latex": r"\mathit{addr} < 9"},
+            {"name": "red", "enabled": False, "latex": None},
         ]
 
 

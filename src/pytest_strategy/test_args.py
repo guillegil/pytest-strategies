@@ -114,7 +114,8 @@ class TestArg:
         """
         Describe the argument as a JSON-ready dict: its ``name``, ``description``,
         ``python_type`` (the qualified name of its values' type, or None when unknown),
-        ``validator`` (whether one is set) and ``source``: ``"value"`` with the
+        ``validator`` (whether one is set), ``latex`` (the set its values are drawn
+        from as LaTeX math, or None for a custom RNG type) and ``source``: ``"value"`` with the
         ``value`` in the schema 1 value encoding, or ``"rng"`` with ``rng``, its RNG
         type's ``to_dict()``. A fragment of ``Parameter.to_dict()``, without a schema
         field of its own.

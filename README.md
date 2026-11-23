@@ -738,13 +738,16 @@ For a `tests/dma/strategies.py` that registers `burst` with two arguments, a dir
         "schema": 1,
         "arguments": [
           {"name": "addr", "description": "", "python_type": "int", "validator": false,
+           "latex": "\\mathit{addr} \\in [0, 4095]",
            "source": "rng", "rng": {"type": "RNGInteger", "min": 0, "max": 4095, "predicate": false}},
           {"name": "len", "description": "", "python_type": "int", "validator": false,
+           "latex": "\\mathit{len} \\in [1, 64]",
            "source": "rng", "rng": {"type": "RNGInteger", "min": 1, "max": 64, "predicate": false}}
         ],
         "directed_vectors": [{"name": "zeros", "id": "directed-zeros", "values": {"addr": 0, "len": 1}}],
         "test_vectors": [],
-        "constraints": [{"name": "no_4k_cross", "enabled": true}],
+        "constraints": [{"name": "no_4k_cross", "enabled": true,
+                         "latex": "\\mathit{addr} \\bmod 4096 + \\mathit{len} \\le 4096"}],
         "always_include_directed": true,
         "max_retries": 100,
         "nsamples": null,
@@ -762,7 +765,7 @@ For a `tests/dma/strategies.py` that registers `burst` with two arguments, a dir
 
 - `seed` and `nsamples` are the run's seed and `--nsamples` value (10 without the option).
 - `strategies` holds one entry per registration, a name registered in several folders once per folder, sorted by name and folder. An entry has the strategy's `name`, its `origin` (`folder` and `file`, relative to the rootdir in posix form or absolute outside it, `qualname` and `line`), its `context` (the fingerprint of the context its factory received, or `null`) and one of: `parameter`, the factory's `Parameter.to_dict()`; `error`, such as `{"type": "RuntimeError", "message": "boom"}` for a factory that raised; or `unavailable` (see [A context per folder](#a-context-per-folder)).
-- In `Parameter.to_dict()`, `description` and `note` are always present, `""` when the strategy gives none (see [Describing a strategy](#describing-a-strategy)). Each argument has its `source`: `"rng"` with `rng`, its RNG type's `to_dict()` (a custom type lists its public attributes), or `"value"` with its `value`. Each constraint has `enabled`, `false` for one that `--strategy-constraint-off` turns off in this run.
+- In `Parameter.to_dict()`, `description` and `note` are always present, `""` when the strategy gives none (see [Describing a strategy](#describing-a-strategy)). Each argument has its `source`: `"rng"` with `rng`, its RNG type's `to_dict()` (a custom type lists its public attributes), or `"value"` with its `value`. Each constraint has `enabled`, `false` for one that `--strategy-constraint-off` turns off in this run. Arguments and constraints have a `latex` (see [LaTeX](#latex)).
 - Values keep their type: JSON for None, bools, ints, strings and finite floats, `{"$float": "nan"}`, `{"$enum": "Color", "member": "RED"}`, or `{"$repr": "b'\\x00'", "$type": "bytes"}` for anything else, so the text has no NaN and a strict `json.loads` reads it. `VectorInfo.to_dict()` (see [Per-Test Metadata](#-per-test-metadata)) uses the same encoding.
 - **How the schema evolves.** A reader should ignore the keys it does not know, and the values of `kind` and `source` it does not know, and read an unknown `$`-tagged object like `$repr`: 4.x releases may add them within schema 1. Removing, renaming or retyping a key changes the schema number.
 
@@ -771,6 +774,31 @@ In a pytest session every strategy file is imported first. Each factory gets the
 Its random draws come from a stream derived from the seed, the strategy name and the factory's module name, or the folder of its file for a factory in a strategy file, a test module or a `conftest.py`, so every call in a session, and in every environment and checkout, exports the same values. A file counts as a strategy file, a test module or a `conftest.py` when it has such a name and is inside the rootdir, below a `testpaths` entry, or imported by its path in the session (a test module collected from a folder named on the command line) and, when `consider_namespace_packages` is off (pytest's default), not a module of a regular package that Python holds under its package name (`acme.strategies` for `acme/strategies.py` next to `acme/__init__.py`), the name pytest then imports it under in every import mode. A module named like one elsewhere, such as a library's `extacme/strategies.py` on `sys.path`, is keyed by its module's name, so every checkout folder exports the same values.
 
 A factory in a package module named like one inside the rootdir (`src/acme/strategies.py`, `src/acme/test_utils.py`) is therefore keyed by its folder in a checkout or an editable install and by its module's name when installed, so the two export different values; rename the module (`acme/catalog.py`) to avoid that. Outside the rootdir and the `testpaths`, these are keyed by their folder in a run that collects that folder (one that names it on the command line) and by their module's name in a run that does not: (a) a helper named like one, not in a regular package, imported by its module's name; (b) a regular package's module that Python holds only under a longer namespace-package name (`ns.acme.strategies`); (c) with `consider_namespace_packages = true`, also a regular package's module imported by its name. List such a folder in `testpaths` to key them by their folder in every run.
+
+#### LaTeX
+
+Each argument and each constraint of `Parameter.to_dict()` has a `latex` key: the set the argument's values are drawn from, or the constraint's condition, as LaTeX math without `$` delimiters. It is in `export_strategies()` and in both files of a run export, ready to paste into a document or to give to a renderer such as KaTeX or MathJax.
+
+| Declared | `latex` | Shown as |
+|---|---|---|
+| `TestArg("addr", rng_type=RNGInteger(1, 20))` | `\mathit{addr} \in [1, 20]` | *addr* ∈ [1, 20] |
+| `RNGInteger()` | `x \in [-2^{31}, 2^{31} - 1]` | x ∈ [−2³¹, 2³¹ − 1] |
+| `RNGFloat(0.0, 1.0)` | `x \in [0.0, 1.0] \subset \mathbb{R}` | x ∈ [0.0, 1.0] ⊂ ℝ |
+| `RNGWeightedInteger({(0, 9): 3, (100, 199): 1})` | `x \in [0, 9] \cup [100, 199]` | x ∈ [0, 9] ∪ [100, 199] |
+| `RNGChoice([1, 2, 4, 8])`, `RNGSequence`, `Series` | `x \in \{1, 2, 4, 8\}` | x ∈ {1, 2, 4, 8} |
+| `Series(range(256))` | `x \in \{0, 1, 2, \dots, 255\}` | x ∈ {0, 1, 2, …, 255} |
+| `RNGEnum(Status)` | `x \in \{\text{IDLE}, \text{BUSY}\}` | x ∈ {IDLE, BUSY} |
+| `RNGBoolean(0.3)` | `x \in \{\text{True}, \text{False}\},\ P(\text{True}) = 0.3` | x ∈ {True, False}, P(True) = 0.3 |
+| `RNGString(min_length=1, max_length=20)` | `\lvert x \rvert \in [1, 20],\ x \in \Sigma^{*}` | \|x\| ∈ [1, 20], x ∈ Σ* |
+| `TestArg("count", value=5)` | `\mathit{count} = 5` | *count* = 5 |
+| `RNGInteger(1, 20, predicate=lambda x: x not in (12, 13))` | `x \in [1, 20],\ x \notin \{12, 13\}` | x ∈ [1, 20], x ∉ {12, 13} |
+| `RNGEnum(Status, predicate=lambda s: s is not Status.BUSY)` | `x \in \{\text{IDLE}, \text{BUSY}\},\ x \ne \text{BUSY}` | x ∈ {IDLE, BUSY}, x ≠ BUSY |
+| `{"fits": lambda v: v.addr + v.len <= 4096}` | `\mathit{addr} + \mathit{len} \le 4096` | *addr* + *len* ≤ 4096 |
+
+- **Sets.** A set lists each value once, and one with more than 8 values is cut to its first three and its last. An enum lists the members it draws from (the weighted ones when it has weights), and a `Series` or `RNGSequence` the values its predicate left. A range or member with a zero weight is left out; other weights are not shown, apart from an `RNGBoolean`'s probability when it is not 0.5. `\Sigma` stands for an `RNGString`'s `charset`.
+- **Text.** Strings (in double quotes, escaped as Python writes them), enum members, `True`, `False`, `None` and the `repr` of any other value are written inside `\text{}`, with LaTeX's special characters escaped and at most 40 characters. A name with accented Latin letters is written `\textit{größe}`. Combining marks and characters that do not print are written as Python escapes.
+- **Predicates and constraints** are Python functions, so their condition is translated from their source, and only when it is simple: a lambda, or a function whose body is one `return`, made of comparisons (chained ones too), `+ - * / // % **`, `&` and `^`, `and`, `or`, `not`, `in` and `not in`, and `abs`, `len`, `min` and `max`. The function's parameter becomes the argument's name; in a constraint, `v.addr` and `v[0]` become the arguments' names. Other names are replaced by their values when they are numbers, strings or enum members: a module constant, a closure variable, or a default such as `lambda x, n=4: x % n == 0`. After `in`, a tuple, list or set of at most 8 such values (written there or bound to a name) is a set, and a `range` of consecutive integers is the set of them: `x not in range(12, 14)` gives `x \notin \{12, 13\}`.
+- **Anything else is not translated.** A call to a helper, a comprehension, a conditional expression, a shift or a `|`, a comparison with `True`, `False` or a NaN (`x is True` is translated), a `functools.partial`, a function with several statements, or one whose file is not the source it was compiled from (edited since the import, or not available): the argument then reads `x \in [1, 20],\ p(x)`, where `p` stands for its predicate, and a constraint's `latex` is `null`. An argument has `"latex": null` when its RNG type is a custom one (a subclass of a built-in one too), when its name is not an identifier or has letters of a script other than Latin, or when a bound is an integer too long for Python to write in digits. The export never calls a predicate or a constraint to write this.
 
 #### Exporting a run
 

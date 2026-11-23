@@ -1981,7 +1981,52 @@ reported as the factory's own exception type and message, and the hint the
 plugin adds to it (`_factory.FactoryError.note`) goes in `note`. Built-in RNG
 types get typed fields by their exact class; a subclass or a custom type gets
 `{"type": ..., "attributes": {...}}`, its public instance attributes in the
-value encoding. Schema 1 evolves by addition only: readers ignore keys they do
+value encoding.
+
+**LaTeX** (`_latex.py`): `argument_dict()` and `parameter_dict()` add `latex` to each
+argument and constraint (keys added within schema 1 after 4.4). The set of a built-in
+RNG type comes from its attributes, by exact class like the typed fields, so a
+subclass has none. A predicate or constraint is translated from its source, under
+one rule: a rendering is right or absent.
+
+- `_source()` reads the function's file through `linecache` (refreshed), compiles
+  it and keeps every code object of it (`_Source`, cached by file name and text,
+  with its lambdas and defs by first line and what was found for each code
+  object, so a file is searched once per function).
+  `_definition()` uses the file only when the function's code object is among them
+  (equal instructions, constants, names and positions), so a file edited since the
+  import, or code compiled from other text under that name, is not translated.
+  pytest's assertion rewriting leaves the code of a lambda or a one-`return`
+  function equal, so strategies in test modules and `conftest.py` files work
+  (`tests/integration/test_latex_integration.py`).
+- The node is the innermost lambda or def with the function's parameters that
+  holds every instruction position of the code (`co_positions()`, so two lambdas
+  on one line are told apart). A function with a function inside is refused.
+- `_bindings()` resolves the other names as the code does: defaults, closure cells
+  (an empty one is unknown), and globals or builtins only for names in `co_names`
+  (a class-private name is there mangled, so it is unknown).
+- `_Translator` renders the subset and raises `_Untranslatable` for anything else.
+  Where Python's meaning depends on the operands' types, it writes only what holds
+  for all of them: `not a < b` is `\nless` (not `\ge`: NaN, sets), a `range` is a
+  set of integers (not an interval), `x % n` as a condition is `\ne 0` only with an
+  integer operand, a collection after `in` is written in full or not at all, a
+  bool or a NaN is not compared (`x == True` holds for 1; only `x is True` is
+  written), and a chain does not go on after `in`. A mod as an operand of another
+  operator, a sum or a negation beside a mod, and anything beside a bit operator
+  are in parentheses. Shifts and `|` are not written (`\ll` and a bar read as
+  something else).
+- Only simple values (numbers, strings, bools, None, enum members, and collections
+  of them after `in`) are read from a binding, and no attribute is read except an
+  enum class's member. No predicate or constraint is called (values are hashed
+  and compared to list a set once).
+- Text goes through `_escaped()`: LaTeX's special characters, the characters that
+  would form a ligature (`--`, `''`) and the spaces LaTeX would drop.
+
+Nothing in the module raises an `Exception`: a failure gives `p(name)` for a
+predicate and None for a constraint or argument. When adding to the subset, check
+new output with a LaTeX renderer (KaTeX with `strict: "error"` was used).
+
+Schema 1 evolves by addition only: readers ignore keys they do
 not know and unknown values of the string enums (`kind`, `source`,
 `VectorInfo.kind`), and read an unknown `$`-tagged object like `$repr`, so a
 4.x release may add keys and enum values (`source: "dependent"` is reserved for
