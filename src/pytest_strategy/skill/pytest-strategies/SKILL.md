@@ -5,7 +5,7 @@ description: Write, fix and debug pytest tests that use the pytest-strategies pl
 
 # pytest-strategies
 
-Documents pytest-strategies 4.3.0.
+Documents pytest-strategies 4.4.0.
 
 pytest-strategies (import name `pytest_strategy`) parametrizes pytest tests from
 *strategies*: factories that return a `Parameter` describing each test argument (a
@@ -109,6 +109,8 @@ def ranges():
         nsamples=25,                                    # an integer --nsamples overrides it
                                                         # (unless pin_nsamples=True)
         max_retries=100,                                # draws per row before failing
+        description="Ranges with lo <= hi",             # free text for exports and
+        note="hi=100 is the controller's limit",        # reports; never changes rows
     )
 ```
 
@@ -195,7 +197,9 @@ implementation, in this order:
 8. **Scope and names.** One strategy per behavior, with variants made by `extend()`.
    Names appear in IDs, the failure summary and `--strategy-constraint-off`, so name
    the strategy for what it drives (`dma_burst`), each vector for its case
-   (`page_end`) and each constraint for its rule (`no_4k_cross`).
+   (`page_end`) and each constraint for its rule (`no_4k_cross`). Say what it covers
+   in `description=`, and put a limitation or ticket in `note=`: both go to the
+   exports (`""` when not given).
 
 ## Reusing a strategy
 

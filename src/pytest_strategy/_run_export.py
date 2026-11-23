@@ -11,7 +11,7 @@ origin, the ``@strategy`` arguments, the context fingerprint, the effective
 and test vectors, constraints, settings). No drawn values::
 
     {"schema": 1, "kind": "strategy_definitions",
-     "generator": {"name": "pytest-strategies", "version": "4.3.0"},
+     "generator": {"name": "pytest-strategies", "version": "4.4.0"},
      "seed": 1, "nsamples": 10,
      "tests": [
        {"nodeid": "tests/test_rw.py::test_rw",

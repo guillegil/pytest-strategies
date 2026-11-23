@@ -28,6 +28,8 @@ STRATEGIES = """
             TestArg("v", rng_type=RNGInteger(0, 9)),
             nsamples="auto",
             pin_nsamples=True,
+            description="Every channel once",
+            note="Channel 2 is unused on rev A",
         )
     """
 
@@ -133,6 +135,11 @@ class TestFiles:
         (pinned,) = vectors["test_rx.py::test_pinned"]
         assert pinned["nsamples"] == {"value": "auto", "source": "Parameter(nsamples=, pinned)"}
         assert pinned["parameter"]["pin_nsamples"] is True
+        assert pinned["parameter"]["description"] == "Every channel once"
+        assert pinned["parameter"]["note"] == "Channel 2 is unused on rev A"
+        # Present, and empty, for a strategy that gives neither
+        (rw,) = vectors["test_rx.py::test_rw"]
+        assert (rw["parameter"]["description"], rw["parameter"]["note"]) == ("", "")
         assert [row["id"] for row in pinned["rows"]] == ["ch=0", "ch=1", "ch=2"]
         assert {row["kind"] for row in pinned["rows"]} == {"exhaustive"}
         (xfail,) = vectors["test_rx.py::test_xfail"]

@@ -68,6 +68,21 @@ def _check_ids(ids: object) -> None:
     raise ValueError(f"ids must be None, {formats} or a callable, got {ids!r}")
 
 
+def _check_text(field: str, value: object) -> str:
+    """
+    Check a value of ``Parameter(description=...)`` or ``Parameter(note=...)``, and
+    return the text to keep: stripped, ``""`` for None or blank.
+
+    Raises:
+        ValueError: For anything but a str or None
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a str or None, got {value!r}")
+    return value.strip()
+
+
 def _normalize_vector(kind: str, name: object, raw: object, arg_names: tuple[str, ...]) -> Vector:
     """
     Turn a directed or test vector, as given, into the row it stands for.
@@ -1007,6 +1022,8 @@ class Parameter:
         max_exhaustive: int | None = None,
         ids: _Ids = None,
         pin_nsamples: bool = False,
+        description: str | None = None,
+        note: str | None = None,
     ) -> None:
         """
         Initialize a Parameter container.
@@ -1062,12 +1079,18 @@ class Parameter:
                 change it (nsamples="auto" stays auto under --nsamples=50). It needs
                 an nsamples. --vector-mode, --vector-name and --vector-index still
                 apply.
+            description: What the strategy covers, in a sentence or two, for the
+                people who read the export and the reports. Never used to generate
+                rows. None or blank is no description (""); the text is stripped.
+            note: A remark about the strategy (a known limitation, a ticket, why a
+                range is narrowed). Never used to generate rows. None or blank is no
+                note (""); the text is stripped.
 
         Raises:
             ValueError: If nsamples, max_retries or max_exhaustive is not a valid count,
                 per_sequence_samples or pin_nsamples is not a bool, pin_nsamples is
-                True without nsamples, or ids is not None, "names", "values" or a
-                callable
+                True without nsamples, ids is not None, "names", "values" or a
+                callable, or description or note is not a str or None
             RNGValueError: If two test args have the same name, or a name is not an
                 identifier, is a keyword or starts with "_"
             RNGValueError: If a directed or test vector's name is not a non-empty str,
@@ -1121,6 +1144,8 @@ class Parameter:
         ):
             raise ValueError(f"max_exhaustive must be None or an int >= 1, got {max_exhaustive!r}")
         _check_ids(ids)
+        description = _check_text("description", description)
+        note = _check_text("note", note)
         seen: set[str] = set()
         for arg in test_args:
             _check_arg_name(arg.name)
@@ -1150,6 +1175,8 @@ class Parameter:
         self.max_exhaustive = max_exhaustive
         self.ids: _Ids = ids
         self.pin_nsamples = pin_nsamples
+        self.description: str = description
+        self.note: str = note
 
     @property
     def directed_vectors(self) -> Mapping[str, Vector]:
@@ -1662,8 +1689,9 @@ class Parameter:
         encoding (``{"$float": "nan"}``, ``{"$enum": "Color", "member": "RED"}``,
         ``{"$repr": ..., "$type": ...}``), ``constraints`` as ``{"name", "enabled"}``
         in evaluation order, ``always_include_directed``, ``max_retries``,
-        ``nsamples``, ``per_sequence_samples``, ``max_exhaustive``, ``skip_reason``
-        and ``pin_nsamples``. Every constraint is enabled here; the export says which
+        ``nsamples``, ``per_sequence_samples``, ``max_exhaustive``, ``skip_reason``,
+        ``pin_nsamples``, ``description`` and ``note`` (both always present, ``""``
+        when not given). Every constraint is enabled here; the export says which
         ones the run turns off.
         """
         # Imported here: the export module imports this one
@@ -2539,6 +2567,8 @@ class Parameter:
         max_exhaustive: int | None | _Keep = _KEEP,
         ids: _Ids | _Keep = _KEEP,
         pin_nsamples: bool | _Keep = _KEEP,
+        description: str | None | _Keep = _KEEP,
+        note: str | None | _Keep = _KEEP,
     ) -> Parameter:
         """
         Return a new Parameter built on this one; this one is not changed.
@@ -2565,8 +2595,9 @@ class Parameter:
         takes. A pytest.param(...) vector keeps its marks.
 
         Every other setting (nsamples, pin_nsamples, max_retries,
-        per_sequence_samples, max_exhaustive, ids, always_include_directed) is this
-        Parameter's unless given.
+        per_sequence_samples, max_exhaustive, ids, always_include_directed,
+        description, note) is this Parameter's unless given; description=None (or
+        "") clears the description, and note=None the note.
 
         Args:
             *test_args: Arguments to replace (same name) or add (new name)
@@ -2695,6 +2726,8 @@ class Parameter:
             max_exhaustive=keep(max_exhaustive, self.max_exhaustive),
             ids=keep(ids, self.ids),
             pin_nsamples=keep(pin_nsamples, self.pin_nsamples),
+            description=keep(description, self.description),
+            note=keep(note, self.note),
         )
         result._unnamed = unnamed & set(result._constraints)
         for fn in listed:

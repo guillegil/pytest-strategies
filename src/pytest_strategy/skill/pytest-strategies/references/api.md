@@ -117,7 +117,8 @@ def export_strategies(*, format: str = "json") -> str: ...
   argument has `source` `"value"` with `value`, or `"rng"` with `rng`
   (`RNGType.to_dict()`: `{"type": "RNGInteger", "min": 0, "max": 255, "predicate":
   false}`); vectors are `{"name", "id", "values"}` lists and constraints
-  `{"name", "enabled"}`. Values that JSON does not hold are tagged:
+  `{"name", "enabled"}`; `description` and `note` (4.4) are always there, `""`
+  when not given. Values that JSON does not hold are tagged:
   `{"$float": "nan"}`, `{"$enum": "Color", "member": "RED"}`,
   `{"$repr": "b'\\x00'", "$type": "bytes"}`. Ignore keys and enum values you do not
   know: 4.x adds them within schema 1, and read an unknown `$`-tagged object like
@@ -200,6 +201,8 @@ class Parameter:
             Literal["names", "values"] | Callable[[VectorInfo], str | None] | None
         ) = None,
         pin_nsamples: bool = False,
+        description: str | None = None,
+        note: str | None = None,
     ): ...
 ```
 
@@ -213,6 +216,8 @@ class Parameter:
 | `max_retries` | redraws per row before giving up (int >= 1) |
 | `nsamples` | this strategy's default count: `None`, an int >= 0 or `"auto"`; `--nsamples` overrides it unless `pin_nsamples=True` |
 | `pin_nsamples` | (4.3) `True` makes `nsamples` a hard count that `--nsamples` does not change (`nsamples="auto", pin_nsamples=True` stays exhaustive under `--nsamples=50`); needs `nsamples`; `--vector-mode`, `--vector-name` and `--vector-index` still apply |
+| `description` | (4.4) what the strategy covers, free text for exports and reports; `str` or `None`, stripped, `""` when `None` or blank (`ValueError` for anything else); never changes the rows; the `description` attribute |
+| `note` | (4.4) a remark about the strategy (a limitation, a ticket), with the same rules; the `note` attribute |
 | `per_sequence_samples` | count rows per combination of the `Series`/`RNGSequence` arguments (section 7) |
 | `max_exhaustive` | this strategy's limit on exhaustive combinations (section 7) |
 | `ids` | this strategy's test IDs (section 11): `None` follows the `strategies_ids` ini option, `"names"` or `"values"` overrides it, and a function receives each row's `VectorInfo` and returns the ID or `None` to keep it |
@@ -256,6 +261,8 @@ class Parameter:
         max_exhaustive: int | None | _Keep = _KEEP,
         ids: Literal["names", "values"] | Callable[[VectorInfo], str | None] | None | _Keep = _KEEP,
         pin_nsamples: bool | _Keep = _KEEP,
+        description: str | None | _Keep = _KEEP,
+        note: str | None | _Keep = _KEEP,
     ) -> Parameter: ...
 
     # Generation outside the plugin, and the export
@@ -338,7 +345,8 @@ class Parameter:
   name), replaced in place (known name) or removed (`None`; an unknown name
   raises); a list of constraints is appended, named as `add_constraint()` names
   them. Vectors are written for the new argument list; a `pytest.param` vector
-  keeps its marks. Settings left out (`_KEEP`) are the base's. A `defaults` key
+  keeps its marks. Settings left out (`_KEEP`) are the base's (`description` and `note`
+  too; `None` clears them). A `defaults` key
   that names no added argument raises.
 - `generate_vectors()` and the other generators called directly (outside a test)
   draw from streams keyed by the seed and 128 bits of `RNG.generator()`, so

@@ -57,7 +57,9 @@
         "per_sequence_samples": false,
         "max_exhaustive": null,
         "skip_reason": null,
-        "pin_nsamples": false
+        "pin_nsamples": false,
+        "description": "",
+        "note": ""
       }
     },
     {
@@ -103,7 +105,9 @@
         "per_sequence_samples": true,
         "max_exhaustive": null,
         "skip_reason": null,
-        "pin_nsamples": false
+        "pin_nsamples": false,
+        "description": "",
+        "note": ""
       }
     },
     {
@@ -490,7 +494,9 @@
         "per_sequence_samples": false,
         "max_exhaustive": 1000,
         "skip_reason": null,
-        "pin_nsamples": false
+        "pin_nsamples": false,
+        "description": "",
+        "note": ""
       }
     }
   ]

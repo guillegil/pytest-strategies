@@ -206,6 +206,23 @@ def test_rw_default(channel, data): ...
 - `export_strategies()` calls each factory without them, so it lists a factory whose parameter has no default with an `error`. Give the parameter a default to keep it exportable.
 - To build a strategy on such a factory, pass the arguments on: `def rw_burst(ctx, device="esm"): return rw(ctx, device).extend(...)` (see [Reusing and Extending Strategies](#12-reusing-and-extending-strategies)).
 
+#### Describing a strategy
+
+`Parameter` takes two optional texts for the people who read the exports and reports: `description`, what the strategy covers, and `note`, a remark about it (a known limitation, a ticket, why a range is narrowed). Neither changes the rows.
+
+```python
+@register("burst")
+def burst():
+    return Parameter(
+        TestArg("addr", rng_type=RNGInteger(0, 4095)),
+        TestArg("len", rng_type=RNGInteger(1, 64)),
+        description="DMA bursts anywhere in the 4 KiB window",
+        note="Lengths above 64 wait for the rev B controller",
+    )
+```
+
+Both are `str` or `None`, stripped, and `""` when not given (`None` or blank); anything else raises `ValueError`. They are the `Parameter`'s `description` and `note` attributes, `extend()` keeps them unless given, and `Parameter.to_dict()` always has both keys, so [`export_strategies()`](#11-metadata-export) and the [run export](#exporting-a-run) list them for every strategy, `""` for one that gives none.
+
 A factory must return a `Parameter`. Anything else fails the collection of the tests that use the strategy, with a message that names the strategy and what it returned.
 
 Strategy names are scoped by folder, like fixtures in `conftest.py` files (see [Strategy Files and Scoped Names](#9-strategy-files-and-scoped-names)). A name registered twice in the same folder is an error.
@@ -709,7 +726,7 @@ For a `tests/dma/strategies.py` that registers `burst` with two arguments, a dir
 {
   "schema": 1,
   "kind": "strategies",
-  "generator": {"name": "pytest-strategies", "version": "4.3.0"},
+  "generator": {"name": "pytest-strategies", "version": "4.4.0"},
   "seed": 1,
   "nsamples": 10,
   "strategies": [
@@ -733,7 +750,10 @@ For a `tests/dma/strategies.py` that registers `burst` with two arguments, a dir
         "nsamples": null,
         "per_sequence_samples": false,
         "max_exhaustive": null,
-        "skip_reason": null
+        "skip_reason": null,
+        "pin_nsamples": false,
+        "description": "DMA bursts anywhere in the 4 KiB window",
+        "note": ""
       }
     }
   ]
@@ -742,7 +762,7 @@ For a `tests/dma/strategies.py` that registers `burst` with two arguments, a dir
 
 - `seed` and `nsamples` are the run's seed and `--nsamples` value (10 without the option).
 - `strategies` holds one entry per registration, a name registered in several folders once per folder, sorted by name and folder. An entry has the strategy's `name`, its `origin` (`folder` and `file`, relative to the rootdir in posix form or absolute outside it, `qualname` and `line`), its `context` (the fingerprint of the context its factory received, or `null`) and one of: `parameter`, the factory's `Parameter.to_dict()`; `error`, such as `{"type": "RuntimeError", "message": "boom"}` for a factory that raised; or `unavailable` (see [A context per folder](#a-context-per-folder)).
-- In `Parameter.to_dict()`, each argument has its `source`: `"rng"` with `rng`, its RNG type's `to_dict()` (a custom type lists its public attributes), or `"value"` with its `value`. Each constraint has `enabled`, `false` for one that `--strategy-constraint-off` turns off in this run.
+- In `Parameter.to_dict()`, `description` and `note` are always present, `""` when the strategy gives none (see [Describing a strategy](#describing-a-strategy)). Each argument has its `source`: `"rng"` with `rng`, its RNG type's `to_dict()` (a custom type lists its public attributes), or `"value"` with its `value`. Each constraint has `enabled`, `false` for one that `--strategy-constraint-off` turns off in this run.
 - Values keep their type: JSON for None, bools, ints, strings and finite floats, `{"$float": "nan"}`, `{"$enum": "Color", "member": "RED"}`, or `{"$repr": "b'\\x00'", "$type": "bytes"}` for anything else, so the text has no NaN and a strict `json.loads` reads it. `VectorInfo.to_dict()` (see [Per-Test Metadata](#-per-test-metadata)) uses the same encoding.
 - **How the schema evolves.** A reader should ignore the keys it does not know, and the values of `kind` and `source` it does not know, and read an unknown `$`-tagged object like `$repr`: 4.x releases may add them within schema 1. Removing, renaming or retyping a key changes the schema number.
 
@@ -758,7 +778,7 @@ A factory in a package module named like one inside the rootdir (`src/acme/strat
 
 | File | `kind` | Holds |
 | --- | --- | --- |
-| `strategies.json` | `strategy_definitions` | Each test with the strategies it uses, as it resolved them: the factory's `origin`, the `arguments` the test passed with `@strategy`, the `context` fingerprint, the effective `nsamples` with its `source`, and the `parameter` (`Parameter.to_dict()`: each argument's type and RNG settings or fixed value, the directed and test vectors, the constraints and the settings). No drawn values. |
+| `strategies.json` | `strategy_definitions` | Each test with the strategies it uses, as it resolved them: the factory's `origin`, the `arguments` the test passed with `@strategy`, the `context` fingerprint, the effective `nsamples` with its `source`, and the `parameter` (`Parameter.to_dict()`: each argument's type and RNG settings or fixed value, the directed and test vectors, the constraints, the settings, and the strategy's `description` and `note`, `""` when not given). No drawn values. |
 | `strategies.vectors.json` | `strategy_vectors` | The same, plus each strategy's `rows`: every directed, test, random and exhaustive row the test ran, with its values and the outcome of each test item that ran it. |
 
 ```bash
@@ -769,7 +789,7 @@ pytest --strategy-export=reports/strategies --nsamples=3 --rng-seed=1
 {
   "schema": 1,
   "kind": "strategy_vectors",
-  "generator": {"name": "pytest-strategies", "version": "4.3.0"},
+  "generator": {"name": "pytest-strategies", "version": "4.4.0"},
   "seed": 1,
   "nsamples": 3,
   "tests": [
