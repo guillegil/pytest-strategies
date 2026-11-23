@@ -132,7 +132,7 @@ The factory is called once for each test that uses the strategy, when pytest col
 
 | Field             | Value                                                                                   |
 | ----------------- | --------------------------------------------------------------------------------------- |
-| `strategy`        | The name the strategy was resolved under, as in the `-v` summary                        |
+| `strategy`        | The name the strategy was resolved under, as in the Strategy Summary                        |
 | `nsamples`        | The `--nsamples` value, `"auto"`, or 10 without the option                              |
 | `nsamples_source` | `"--nsamples"` or `"default"`                                                           |
 | `mode`            | The `--vector-mode` value (`"all"` by default)                                          |
@@ -334,9 +334,9 @@ A random row that fails a constraint is drawn again, up to `max_retries` times (
 Could not generate random row 3 after max_retries=100 draws. Rejected by (first failing constraint per draw): aligned=97, no_4k_cross=3. First rows rejected: aligned: Vector(addr=4097, len=16); no_4k_cross: Vector(addr=4090, len=16). Raise Parameter(max_retries=...), relax a constraint, or turn one off for this run with --strategy-constraint-off=dma_burst:aligned.
 ```
 
-With `-v`, the Strategy Summary lists the rejections per constraint for each strategy.
+With `--strategy-summary`, the Strategy Summary lists the rejections per constraint for each strategy.
 
-**Turning a constraint off for one run.** Name it with `--strategy-constraint-off`: `--strategy-constraint-off=ordered` turns off every constraint named `ordered`, and `--strategy-constraint-off=my_strategy:ordered` only the one in that strategy (the name the strategy was resolved under, as in the `-v` summary). Items are separated by commas and the option can be repeated, so `--strategy-constraint-off=my_strategy:ordered,small` turns `ordered` off in `my_strategy` and `small` in every strategy. The `Parameter` keeps its constraints, and the rows that the constraint never rejected keep their values. The report header lists what is off, and `-v` adds `off: ordered` to the strategy's summary line. A factory sees the names in `options.constraints_off`.
+**Turning a constraint off for one run.** Name it with `--strategy-constraint-off`: `--strategy-constraint-off=ordered` turns off every constraint named `ordered`, and `--strategy-constraint-off=my_strategy:ordered` only the one in that strategy (the name the strategy was resolved under, as in the Strategy Summary). Items are separated by commas and the option can be repeated, so `--strategy-constraint-off=my_strategy:ordered,small` turns `ordered` off in `my_strategy` and `small` in every strategy. The `Parameter` keeps its constraints, and the rows that the constraint never rejected keep their values. The report header lists what is off, and `-v` adds `off: ordered` to the strategy's summary line. A factory sees the names in `options.constraints_off`.
 
 An item that matches no constraint of any strategy the run resolved stops a run of the whole suite with a usage error that suggests the closest name and lists the constraints by strategy. A run narrowed to some tests (paths or node IDs, `--lf`, `--sw`, `--ignore`, or no path from a folder below the rootdir, where pytest collects only that folder) resolves only some strategies, and so does a run in which a test module is skipped or fails to collect: it prints that message in red and goes on, so the option can be kept in `addopts`.
 
@@ -531,7 +531,7 @@ def every_channel(ctx):
 - `pin_nsamples=True` needs an `nsamples` (an int or `"auto"`); without one `Parameter` raises `ValueError`.
 - `--vector-mode`, `--vector-name` and `--vector-index` still apply, so `--vector-mode=directed_only` still runs only the directed vectors.
 - A pinned `"auto"` strategy without `Series` or `RNGSequence` arguments falls back to 10 random rows, as an unpinned one does.
-- The `-v` Strategy Summary shows the source as `Parameter(nsamples=, pinned)`, and `extend()` keeps the setting unless it is given.
+- The Strategy Summary (`--strategy-summary`) shows the source as `Parameter(nsamples=, pinned)`, and `extend()` keeps the setting unless it is given.
 
 Directed vectors are added on top of these, according to `--vector-mode`. With `Parameter(per_sequence_samples=True)`, a finite count applies to each `Series`/`RNGSequence` combination instead of the whole strategy (see [`per_sequence_samples`](#6-sequence-testing--exhaustive-generation)). A row keeps its values when the count grows: `--nsamples=50` gives the rows of `--nsamples=10`, with the same values, and 40 more.
 
@@ -706,7 +706,7 @@ pytest-strategies: contexts conftest.py 976bcfdf, tests/tb_a/conftest.py b1e1b23
 - The encoding depends only on what the object holds. Sets are sorted, so the hash order of `PYTHONHASHSEED` does not matter. Paths inside the rootdir are written relative to it, so two checkouts agree. A pydantic v2 model is written as its `model_dump()`, which leaves out `Field(exclude=True)` fields and keeps a `SecretStr` masked. Dataclasses, attrs classes and NamedTuples are written field by field, `SimpleNamespace` and `argparse.Namespace` objects by their attributes, mappings as their pairs in order, floats, dates, `Decimal` and `UUID` as text, and classes and Enum members by their qualified names, never their modules. Anything else is written as its repr, without memory addresses (` at 0x7f...` inside a `<...>` repr, and a mock's `id='140...'`; an address a repr of its own shows, such as `Periph('uart0' at 0x40001000)`, is kept), and with the items of the sets it shows as Python does (`{'b', 'a'}`) sorted. An object that keeps the default repr (`<Plain object at 0x...>`) is in the fingerprint by its type alone, and the line says so: `context 976bcfdf (partial: Plain)`. A repr that shows a set in another form (`",".join(tags)`) should sort it. An object that cannot be encoded (its repr raises) gives `unavailable`, and never fails the run.
 - Leave volatile values out of the context (temporary paths, process IDs, times), or mark them `Field(exclude=True)` in a pydantic model, so that the fingerprint stays the same from one run to the next.
 - When tests fail, the line that says how to reproduce the run ends with the contexts their factories received: `pytest-strategies: reproduce with --rng-seed=S (context 976bcfdf)`, or `(contexts conftest.py 976bcfdf, tests/tb_a/conftest.py b1e1b237)`. Under pytest-xdist the workers send them to the controller. Tests whose setup or call failed count; an error in a test's teardown alone adds no context. With `--strategy-details`, the `pytest-strategies` section of each failed row shows the fingerprint of its factory's context in its `context` line (see [Reproducing a failure](#reproducing-a-failure)).
-- `-v` adds a "Contexts" block to the Strategy Summary, with each context's label, fingerprint and number of tests whose factories received it. `item.stash[VECTOR_KEY].context` holds the fingerprint for the rows of a factory that received `ctx`, and `None` for the others (see [Per-Test Metadata](#-per-test-metadata)).
+- `--strategy-summary` adds a "Contexts" block to the Strategy Summary, with each context's label, fingerprint and number of tests whose factories received it. `item.stash[VECTOR_KEY].context` holds the fingerprint for the rows of a factory that received `ctx`, and `None` for the others (see [Per-Test Metadata](#-per-test-metadata)).
 
 ### 11. Metadata Export
 
@@ -1003,7 +1003,7 @@ def _log_row(request):
 
 | Field             | Value                                                                                                   |
 | ----------------- | ------------------------------------------------------------------------------------------------------- |
-| `strategy`        | The strategy's resolved name, as in the `-v` summary                                                    |
+| `strategy`        | The strategy's resolved name, as in the Strategy Summary                                                    |
 | `origin`          | Where the factory is defined, `"tests/dma/strategies.py:12"` (relative to the rootdir), or `None`        |
 | `kind`            | `"directed"`, `"test"`, `"random"`, `"exhaustive"` (a row of `--nsamples=auto`) or `"skipped"`          |
 | `name`            | The directed or test vector's name, else `None`                                                         |
@@ -1035,6 +1035,7 @@ Control test generation directly from the command line:
 | `--rng-seed`        | Set seed for reproducibility. Without it, `--lf` and `--sw` reuse the seed of the failed run (see [Reproducibility](#-reproducibility)) | `pytest --rng-seed=42`                      |
 | `--strategy-constraint-off` | Turn named constraints off for this run: `NAME` in every strategy, `STRATEGY:NAME` in one; comma-separated, repeatable (see [Rows and Constraints](#4-rows-and-constraints)) | `pytest --strategy-constraint-off=dma_burst:aligned` |
 | `--strategy-details` | Show a `pytest-strategies` section under each failed strategy row's traceback: its values, seed and rerun command (off by default; see [Reproducing a failure](#reproducing-a-failure)) | `pytest --strategy-details` |
+| `--strategy-summary` | Show the Strategy Summary at the end of the run, and the line naming the files the strategy export wrote (off by default, `-v` included; put it in `addopts` to keep it on) | `pytest --strategy-summary` |
 | `--strategy-export` | Write `strategies.json` and `strategies.vectors.json` into a folder when the session ends (see [Exporting a run](#exporting-a-run)) | `pytest --strategy-export=reports/strategies` |
 | `--list-strategies` | List the registered strategy names and exit                             | `pytest --list-strategies`                  |
 
@@ -1050,7 +1051,7 @@ In a native TOML configuration (pytest 9's `pytest.toml`, or `[tool.pytest]` in 
 
 The plugin also provides the session fixture `strategies_ctx` (see [The context in fixtures](#the-context-in-fixtures-strategies_ctx-and-get_context)) and the `strategy` marker that `@strategy` adds. Command-line options added in later releases start with `--strategy-` and ini options with `strategies_`; there are no command-line copies of ini options, since `-o` sets those.
 
-With `-v`, a "Strategy Summary" section lists each strategy with the number of tests that use it, their directed and random rows (and their test rows, the exhaustive rows of `--nsamples=auto` and the skipped row of an empty `skip_if_empty` sequence, when there are some), and where the sample count came from (`--nsamples`, `Parameter(nsamples=)` or the default), the rejections per constraint and the constraints turned off, followed by the contexts' fingerprints.
+With `--strategy-summary` (off by default, `-v` included), a "Strategy Summary" section lists each strategy with the number of tests that use it, their directed and random rows (and their test rows, the exhaustive rows of `--nsamples=auto` and the skipped row of an empty `skip_if_empty` sequence, when there are some), and where the sample count came from (`--nsamples`, `Parameter(nsamples=)` or the default), the rejections per constraint and the constraints turned off, followed by the contexts' fingerprints. `-vv` adds every strategy's name. Without it the end of a run prints only what helps after a failure: how to reproduce it and the failed rows' commands (see [Reproducing a failure](#reproducing-a-failure)).
 
 ## 🔄 Reproducibility
 

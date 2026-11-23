@@ -710,7 +710,7 @@ class TestReporting:
     def test_verbose_summary_counts_rows(self, pytester):
         pytester.makepyfile(test_report=self.SOURCE.replace("{condition}", "x >= 0"))
 
-        result = pytester.runpytest_subprocess("-p", "no:cacheprovider", "-v")
+        result = pytester.runpytest_subprocess("--strategy-summary", "-p", "no:cacheprovider", "-v")
 
         result.stdout.fnmatch_lines(
             [
@@ -720,11 +720,24 @@ class TestReporting:
             ]
         )
 
+    def test_no_summary_without_the_option(self, pytester):
+        """The Strategy Summary is opt-in: -v and -vv alone print none."""
+        pytester.makepyfile(test_report=self.SOURCE.replace("{condition}", "x >= 0"))
+
+        for flag in ("-v", "-vv"):
+            result = pytester.runpytest_subprocess("-p", "no:cacheprovider", flag)
+
+            result.assert_outcomes(passed=5)
+            result.stdout.no_fnmatch_line("*Strategy Summary*")
+            result.stdout.no_fnmatch_line("Registered strategies*")
+
     def test_verbose_summary_under_xdist(self, pytester):
         pytest.importorskip("xdist")
         pytester.makepyfile(test_report=self.SOURCE.replace("{condition}", "x >= 0"))
 
-        result = pytester.runpytest_subprocess("-p", "no:cacheprovider", "-v", "-n", "2")
+        result = pytester.runpytest_subprocess(
+            "--strategy-summary", "-p", "no:cacheprovider", "-v", "-n", "2"
+        )
 
         result.assert_outcomes(passed=5)
         result.stdout.fnmatch_lines(

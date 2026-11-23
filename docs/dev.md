@@ -406,7 +406,7 @@ exception that rejects even that gets no note, and its failure waits in
 `_unattached` until the resolver reports it); for the same reason the resolver's
 `_attributed_warnings` is a class, since a `contextlib.contextmanager` assigns
 the exception's `__traceback__` on the way out. The resolver collects the
-counts (and the combinations `--nsamples=auto` left out) for the `-v` summary in
+counts (and the combinations `--nsamples=auto` left out) for the Strategy Summary in
 a `_GenerationStats` it passes as the `stats` keyword of `_generate_rows()`; the
 private `_stats` keyword of `generate_vectors()` and `generate_exhaustive()`
 passes one on.
@@ -673,7 +673,7 @@ usage errors) and split at their last `:` into `(strategy, name)` pairs on
 `SessionOptions`. Once collection ends, an item that matches no constraint of a
 strategy the run resolved is a usage error when the run collected the whole
 suite, and otherwise a red line after the collection report (on a pytest-xdist
-worker, sent with the `-v` summary and printed by the controller). A run counts
+worker, sent with the Strategy Summary and printed by the controller). A run counts
 as the whole suite (`_collects_whole_suite`) when it was given no paths or node
 IDs (`config.args_source` is not `ARGS`), started in the rootdir (pytest's own
 rule in `Config._decide_args`: a run without arguments from a folder below it
@@ -736,13 +736,14 @@ strategies of its tests may not have been resolved). It is not checked under
   the failed strategy rows' commands (`report.pytest_strategies`, see `_repro`)
 - `pytest_terminal_summary` - After a failed run, prints `pytest-strategies:
   reproduce with --rng-seed=S` with the failed tests' contexts and the failed
-  rows, and in any run the commands of the `--lf` rows set aside; with `-v`, a
+  rows, and in any run the commands of the `--lf` rows set aside; with
+  `--strategy-summary` (`_summary_on`), the export's "wrote" line and a
   Strategy Summary (rows of each kind per strategy, where `nsamples` came from)
   and the Contexts block (label, fingerprint, tests per context). The xdist
   controller first prints the workers' context line, and in red what differed
 - `pytest_sessionfinish` - A tryfirst one adds the `--junitxml` suite
   properties. The other maps the failed tests to their factories' contexts and
-  records the failed seeds; a pytest-xdist worker sends its `-v` summary, the
+  records the failed seeds; a pytest-xdist worker sends its summary, the
   recorded rows that passed and its part of the same-vectors check, and the
   controller compares the parts and turns exit status 0 or 5 into 4 when they
   differ
@@ -974,7 +975,7 @@ records the node IDs of failed setups and calls, and `pytest_sessionfinish`
 maps them to the labels and fingerprints their factories received
 (`plugin._failed_contexts()`, through the test's node ID without parameters,
 `_test_key()`), which end the reproduce line. `_summary()` carries the
-`Contexts` block of the `-v` summary (`_context_entries()`, by label), so a
+`Contexts` block of the Strategy Summary (`_context_entries()`, by label), so a
 pytest-xdist worker sends it with it; the controller prints the first finished
 worker's summary with the blocks of every worker merged by label, since a
 context computed only when a test ran (`strategies_ctx`, `get_context()`) is in

@@ -194,7 +194,7 @@ def pytest_strategies_context(config):
         self.one_scope_project(pytester)
         (pytester.path / "tests/sub/conftest.py").write_text(wrapper)
 
-        result = pytester.runpytest("-p", "no:cacheprovider", "-v")
+        result = pytester.runpytest("--strategy-summary", "-p", "no:cacheprovider", "-v")
 
         result.assert_outcomes(passed=4)
         result.stdout.fnmatch_lines(["pytest-strategies: context ????????"])

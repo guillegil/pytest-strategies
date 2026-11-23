@@ -264,6 +264,7 @@ class TestExamples:
             f"--rng-seed={seed}",
             "--strategy-constraint-off=date_range_test:ordered",
             "-v",
+            "--strategy-summary",
         )
 
         assert result.ret == pytest.ExitCode.OK, result.stdout.str()

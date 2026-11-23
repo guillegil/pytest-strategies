@@ -158,7 +158,7 @@ def factory(nsamples, ctx, rng, options):   # each one optional, any order, by n
 ```python
 @dataclass(frozen=True, kw_only=True, slots=True)
 class StrategyOptions:
-    strategy: str                                # the resolved name, as in the -v summary
+    strategy: str                                # the resolved name, as in the Strategy Summary
     nsamples: int | Literal["auto"] = 10
     nsamples_source: str = "default"             # "--nsamples" or "default"
     mode: str = "all"                            # the --vector-mode value
@@ -615,8 +615,9 @@ usage error listing each strategy's directed vectors.
 | `--vector-mode=MODE` | `all`, `random_only`, `directed_only`, `mixed`, `test` |
 | `--vector-name=NAME` | only the directed vector named NAME |
 | `--vector-index=I` | only the directed vector at index I |
-| `--strategy-constraint-off=[S:]NAME[,...]` | turn the constraint NAME off for this run, in every strategy or only in strategy S (its resolved name, as in the `-v` summary); repeatable. An item that matches no constraint of a resolved strategy is a usage error in a whole-suite run (with "did you mean" and the constraints by strategy), and a red line in a run narrowed by paths, node IDs, `--lf`, `--sw`, `--ignore` or a start below the rootdir, or with a module that was skipped or failed to collect |
+| `--strategy-constraint-off=[S:]NAME[,...]` | turn the constraint NAME off for this run, in every strategy or only in strategy S (its resolved name, as in the Strategy Summary); repeatable. An item that matches no constraint of a resolved strategy is a usage error in a whole-suite run (with "did you mean" and the constraints by strategy), and a red line in a run narrowed by paths, node IDs, `--lf`, `--sw`, `--ignore` or a start below the rootdir, or with a module that was skipped or failed to collect |
 | `--strategy-details` | (4.1) give each failed strategy row a `pytest-strategies` section under its traceback (section 16); off by default; not part of rerun commands |
+| `--strategy-summary` | (4.5) print the Strategy Summary and the line naming the files the export wrote; off by default, also under `-v` |
 | `--strategy-export=DIR` | (4.3) write `strategies.json` and `strategies.vectors.json` into DIR when the session ends (section 15); relative to the folder pytest runs in |
 | `--list-strategies` | collect the tests as usual (which calls their factories, and the context hook for those with `ctx`), load every strategies file, list the registered names and exit; exit code 2 when the collection had errors |
 
@@ -640,7 +641,7 @@ Output:
 - After the collection (also with `-q`): `pytest-strategies: context 976bcfdf` when
   the collection computed a context (section 13).
 - A run with failures prints the reproduce line and the failed rows (section 16).
-- `-v` adds a "Strategy Summary" with, per strategy, the number of tests, the
+- `--strategy-summary` (4.5; `-v` alone no longer does) adds a "Strategy Summary" with, per strategy, the number of tests, the
   counts of directed and random rows (and of test, exhaustive and skipped rows when
   there are some), where `nsamples` came from, `rejected: aligned=412,
   no_4k_cross=37` and `off: ...` for constraints, and `left out: N combinations`
@@ -931,7 +932,7 @@ defined at module level. The IDs are those of section 11 (`rand-3`); under
 ```python
 @dataclass(frozen=True, slots=True, kw_only=True)
 class VectorInfo:
-    strategy: str                     # the resolved name, as in the -v summary
+    strategy: str                     # the resolved name, as in the Strategy Summary
     origin: str | None                # the factory, "tests/dma/strategies.py:12"
     kind: str                         # "directed", "test", "random", "exhaustive", "skipped"
     name: str | None                  # the directed or test vector's name
@@ -974,7 +975,7 @@ session write two files into DIR when it ends (the folder is created):
   `seed`, `nsamples` (the session's), and `tests`, one per selected test function
   that got rows (`nodeid` without parameters), each with `strategies`: `name`,
   `origin`, `arguments` (the `@strategy` keywords), `context`, `nsamples`
-  (`{"value", "source"}`, as the `-v` summary) and `parameter`
+  (`{"value", "source"}`, as the Strategy Summary) and `parameter`
   (`Parameter.to_dict()`, with the directed and test vectors), or `error`. No drawn
   values.
 - `strategies.vectors.json` (`"kind": "strategy_vectors"`): the same, plus `rows`

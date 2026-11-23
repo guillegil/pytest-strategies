@@ -7,6 +7,7 @@ constraints only.
 import functools
 import json
 import linecache
+import os
 import warnings
 from enum import Enum, Flag
 
@@ -457,13 +458,24 @@ class TestPredicateLatex:
 
         assert predicate_latex(edited_predicates.predicate, "x") == "x > 1"
 
+        # linecache sees an edit by the file's size and mtime. Each write has the
+        # same size, and on Windows two quick writes can share an mtime, so give
+        # each one its own.
+        mtime = module.stat().st_mtime
+
+        def edit(text):
+            nonlocal mtime
+            module.write_text(text, encoding="utf-8")
+            mtime += 10
+            os.utime(module, (mtime, mtime))
+
         # The same shape: every position still matches, the code does not
-        module.write_text("predicate = lambda x: x < 1\n", encoding="utf-8")
+        edit("predicate = lambda x: x < 1\n")
 
         assert edited_predicates.predicate(2)
         assert predicate_latex(edited_predicates.predicate, "x") is None
 
-        module.write_text("predicate = lambda x: x > 1\n", encoding="utf-8")
+        edit("predicate = lambda x: x > 1\n")
 
         assert predicate_latex(edited_predicates.predicate, "x") == "x > 1"
 
