@@ -122,11 +122,14 @@ def export_strategies(*, format: str = "json") -> str: ...
   [1, 20]`, `x \in \{1, 2, 4\}`, `\mathit{count} = 5`) or the constraint's
   condition (`\mathit{addr} + \mathit{len} \le 4096`). A predicate or constraint
   is translated from its source only when it is a lambda or a one-`return`
-  function of comparisons, arithmetic, bit operators, `and`/`or`/`not`, `in` and
+  function of comparisons, `+ - * / // % **`, `& | ^`, `and`/`or`/`not`, `in` and
   `abs`/`len`/`min`/`max` over the argument (`v.addr` or `v[0]` in a constraint),
-  literals and names bound to numbers, strings, enum members or tuples of them:
-  `lambda x: x not in (12, 13)` adds `,\ x \notin \{12, 13\}`. Otherwise the
-  argument ends with `,\ p(x)` and the constraint's `latex` is null; a custom
+  literals and names bound to numbers, strings or enum members (after `in`, also
+  a tuple, list or set of at most 8 of them, or a `range` of consecutive
+  integers): `lambda x: x not in (12, 13)` adds `,\ x \notin \{12, 13\}`.
+  Otherwise (a helper call, a shift, several statements, a file edited since the
+  import) the argument ends with `,\ p(x)` and the constraint's `latex` is null;
+  no predicate or constraint is called to write it. A custom
   RNG type's argument has `latex` null. Values that JSON does not hold are tagged:
   `{"$float": "nan"}`, `{"$enum": "Color", "member": "RED"}`,
   `{"$repr": "b'\\x00'", "$type": "bytes"}`. Ignore keys and enum values you do not

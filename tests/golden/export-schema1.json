@@ -166,7 +166,7 @@
             "description": "",
             "python_type": "str",
             "validator": false,
-            "latex": "\\mathit{data} \\in \\{\\text{\"rd\"}, \\text{b'\\textbackslash{}x00\\textbackslash{}xff'}, \\text{(1, 2)}\\}",
+            "latex": "\\mathit{data} \\in \\{\\text{\"rd\"}, \\text{b{'}\\textbackslash{}x00\\textbackslash{}xff{'}}, \\text{(1, 2)}\\}",
             "source": "rng",
             "rng": {
               "type": "RNGChoice",
@@ -231,7 +231,7 @@
             "description": "",
             "python_type": "Color",
             "validator": false,
-            "latex": "\\mathit{hue} \\in \\{\\text{GREEN}, \\text{BLUE}\\}",
+            "latex": "\\mathit{hue} \\in \\{\\text{RED}, \\text{GREEN}, \\text{BLUE}\\},\\ \\mathit{hue} \\ne \\text{RED}",
             "source": "rng",
             "rng": {
               "type": "RNGEnum",

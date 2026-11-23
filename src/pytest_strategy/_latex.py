@@ -15,7 +15,12 @@ or a function whose body is one ``return``, made of comparisons, arithmetic,
 ``and``/``or``/``not``, ``in`` and ``abs``/``len``/``min``/``max`` over the
 argument, numbers, strings, enum members and names bound to such values.
 Anything else is not translated: a predicate is then written ``p(name)``, and a
-constraint has no ``latex``. Nothing here raises.
+constraint has no ``latex``.
+
+A rendering is right or absent: the source is used only when compiling it gives
+the very code object of the function, and a construct whose meaning depends on
+the values' types beyond what the text says is left out. Nothing here calls
+user code, and nothing raises an ``Exception``.
 """
 
 from __future__ import annotations
@@ -25,8 +30,10 @@ import contextlib
 import inspect
 import linecache
 import math
+import re
 import types
-from collections.abc import Callable, Mapping, Sequence
+import warnings
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from enum import Enum
 from typing import Any
 
@@ -53,6 +60,8 @@ MAX_TEXT = 40
 # Integers this large are written as a power of two when they are one (or one less)
 _POWER_FROM = 2**16
 
+# What stands for a character inside \text{}: LaTeX's special characters, and the
+# ones that would join their neighbour ("--" is a dash, "''" a closing quote)
 _TEXT_ESCAPES = {
     "\\": r"\textbackslash{}",
     "{": r"\{",
@@ -64,7 +73,12 @@ _TEXT_ESCAPES = {
     "_": r"\_",
     "^": r"\textasciicircum{}",
     "~": r"\textasciitilde{}",
+    "-": "{-}",
+    "'": "{'}",
+    "`": "{`}",
 }
+# A space that LaTeX would drop: after another space, or at either end
+_LOST_SPACE = re.compile(r"(?<= ) |^ | $")
 
 
 class _Untranslatable(Exception):
@@ -76,19 +90,52 @@ class _Untranslatable(Exception):
 # ---------------------------------------------------------------------------
 
 
+def _printable(value: str) -> str:
+    """``value`` on one line: the characters that do not print, as Python escapes."""
+    return "".join(
+        ch if ch.isprintable() else ch.encode("unicode_escape").decode("ascii") for ch in value
+    )
+
+
+def _escaped(value: str) -> str:
+    r"""``value`` as the content of a ``\text{}``, every character shown as itself."""
+    # A space LaTeX would drop becomes "~"; a real "~" is kept apart as a NUL meanwhile
+    # (_printable leaves no NUL of the value's own)
+    shown = _LOST_SPACE.sub("~", _printable(value).replace("~", "\0"))
+    return "".join(
+        "~" if ch == "~" else _TEXT_ESCAPES["~"] if ch == "\0" else _TEXT_ESCAPES.get(ch, ch)
+        for ch in shown
+    )
+
+
 def text(value: str) -> str:
     r"""Return ``value`` as ``\text{...}``: cut, one line, LaTeX's special characters escaped."""
     if len(value) > MAX_TEXT:
         value = value[: MAX_TEXT - 3] + "..."
-    shown = "".join(
-        ch if ch.isprintable() else ch.encode("unicode_escape").decode("ascii") for ch in value
-    )
-    return r"\text{" + "".join(_TEXT_ESCAPES.get(ch, ch) for ch in shown) + "}"
+    return r"\text{" + _escaped(value) + "}"
+
+
+def _quoted(value: str) -> str:
+    r"""A string in double quotes, as Python escapes it; a cut one is followed by ``\dots``."""
+    body = _printable(value.replace("\\", "\\\\").replace('"', '\\"'))
+    quoted = r"\text{" + _escaped('"' + body[:MAX_TEXT] + '"') + "}"
+    return quoted + r"\dots" if len(body) > MAX_TEXT else quoted
 
 
 def name(identifier: str) -> str:
-    r"""Return an argument's name as a variable: ``x``, or ``\mathit{burst\_len}``."""
-    if len(identifier) == 1 and identifier.isascii() and identifier.isalpha():
+    r"""
+    Return an argument's name as a variable: ``x``, ``\mathit{burst\_len}``, or
+    for a name with other than ASCII letters ``\textit{größe}`` (math mode has
+    no accented letters).
+
+    Raises:
+        _Untranslatable: For a name that is not an identifier
+    """
+    if not identifier.isidentifier():
+        raise _Untranslatable
+    if not identifier.isascii():
+        return r"\textit{" + _escaped(identifier) + "}"
+    if len(identifier) == 1 and identifier.isalpha():
         return identifier
     return r"\mathit{" + identifier.replace("_", r"\_") + "}"
 
@@ -145,7 +192,7 @@ def value(obj: Any) -> str:
     if _is_member(obj):
         return text(obj.name)
     if type(obj) is str:
-        return text('"' + obj + '"')
+        return _quoted(obj)
     try:
         shown = repr(obj)
     except Exception:
@@ -153,24 +200,50 @@ def value(obj: Any) -> str:
     return text(shown)
 
 
-def _distinct(values: Sequence[Any]) -> Sequence[Any]:
-    """The values without repeats, in order (as they are, when one cannot be hashed)."""
-    try:
-        return list({(type(item), item): item for item in values}.values())
-    except Exception:
-        return values
+def _listed(values: Iterable[Any]) -> tuple[list[Any], bool]:
+    """
+    The first distinct values of ``values``, in order, at most MAX_LISTED + 1 of
+    them (a 1, a True and a 1.0 are three values), and whether the walk stopped
+    there. A value that can be neither hashed nor compared counts as a new one.
+    """
+    seen: set[Any] = set()
+    kept: list[Any] = []
+    for item in values:
+        try:
+            key = (type(item), item)
+            known = key in seen
+            if not known:
+                seen.add(key)
+        except Exception:
+            known = _among(item, kept)
+        if not known:
+            kept.append(item)
+            if len(kept) > MAX_LISTED:
+                return kept, True
+    return kept, False
+
+
+def _among(item: Any, kept: list[Any]) -> bool:
+    """Whether an unhashable value equals one already kept (never when comparing fails)."""
+    for other in kept:
+        try:
+            if type(other) is type(item) and bool(other == item):
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def _set(values: Sequence[Any]) -> str:
     r"""``\{1, 2, 4\}``, each value once, cut past MAX_LISTED; ``\emptyset`` without values."""
-    values = _distinct(values)
-    if not values:
+    kept, cut = _listed(values)
+    if not kept:
         return r"\emptyset"
-    if len(values) > MAX_LISTED:
-        shown = [value(item) for item in values[:_LISTED_HEAD]]
+    if cut:
+        shown = [value(item) for item in kept[:_LISTED_HEAD]]
         shown += [r"\dots", value(values[-1])]
     else:
-        shown = [value(item) for item in values]
+        shown = [value(item) for item in kept]
     return r"\{" + ", ".join(shown) + r"\}"
 
 
@@ -191,24 +264,9 @@ def _filtered(var: str, predicate: Any) -> str:
     return r",\ " + (condition if condition is not None else f"p({var})")
 
 
-def _enum_members(rng_type: RNGEnum[Any]) -> tuple[list[Any], bool]:
-    """
-    The members an RNGEnum draws from (the weighted ones with a positive weight,
-    else all; of those, the ones its predicate accepts), and whether the predicate
-    was applied (it is not when it raises).
-    """
-    weights = rng_type.weights
-    if weights:
-        candidates = [member for member, weight in weights.items() if weight > 0]
-    else:
-        candidates = list(rng_type.enum_class.__iter__())
-    predicate = rng_type.predicate
-    if predicate is None:
-        return candidates, True
-    try:
-        return [member for member in candidates if predicate(member)], True
-    except Exception:
-        return candidates, False
+def _drawn(weighted: Mapping[Any, Any]) -> list[Any]:
+    """The keys of a weights mapping that can be drawn: the ones with a positive weight."""
+    return [key for key, weight in weighted.items() if weight > 0]
 
 
 def _rng_latex(var: str, rng_type: Any) -> str | None:
@@ -221,7 +279,10 @@ def _rng_latex(var: str, rng_type: Any) -> str | None:
         domain = _interval(rng_type.min, rng_type.max)
         return rf"{var} \in {domain} \subset \mathbb{{R}}" + _filtered(var, rng_type.predicate)
     if kind in (RNGWeightedInteger, RNGWeightedFloat):
-        domain = r" \cup ".join(_interval(low, high) for low, high in rng_type.ranges)
+        ranges = _drawn(rng_type.ranges)
+        if not ranges:
+            return None
+        domain = r" \cup ".join(_interval(low, high) for low, high in ranges)
         real = r" \subset \mathbb{R}" if kind is RNGWeightedFloat else ""
         return rf"{var} \in {domain}{real}" + _filtered(var, rng_type.predicate)
     if kind is RNGBoolean:
@@ -231,13 +292,16 @@ def _rng_latex(var: str, rng_type: Any) -> str | None:
             return domain
         return domain + rf",\ P({value(True)}) = {value(probability)}"
     if kind is RNGChoice:
-        return rf"{var} \in " + _set(list(rng_type.choices))
+        return rf"{var} \in " + _set(rng_type.choices)
     if kind is RNGEnum:
-        members, applied = _enum_members(rng_type)
-        return rf"{var} \in " + _set(members) + ("" if applied else rf",\ p({var})")
+        # The members it draws from: the weighted ones, else the ones iteration gives.
+        # Its predicate is not called here: it is a condition, like any other
+        weights = rng_type.weights
+        members = _drawn(weights) if weights else list(iter(rng_type.enum_class))
+        return rf"{var} \in " + _set(members) + _filtered(var, rng_type.predicate)
     if kind in (RNGSequence, Series):
         # A predicate was applied when the sequence was built: these are the values left
-        return rf"{var} \in " + _set(list(rng_type.sequence))
+        return rf"{var} \in " + _set(rng_type.sequence)
     if kind is RNGString:
         if rng_type.length is not None:
             length = rf"\lvert {var} \rvert = {value(rng_type.length)}"
@@ -253,7 +317,8 @@ def argument_latex(arg: Any) -> str | None:
     """
     Return the LaTeX of a test argument (``TestArg.to_dict()``'s ``latex``): its
     fixed value, or the set its built-in RNG type draws from with the condition of
-    its predicate. None for a custom RNG type, and when anything fails.
+    its predicate. None for a custom RNG type, for a name that is not an
+    identifier, and when anything fails.
     """
     try:
         var = name(arg.name)
@@ -267,6 +332,53 @@ def argument_latex(arg: Any) -> str | None:
 # ---------------------------------------------------------------------------
 # Functions: finding the source
 # ---------------------------------------------------------------------------
+
+_Function = ast.Lambda | ast.FunctionDef
+
+
+class _Source:
+    """
+    One file's source as it is now: the code objects that compiling it gives, and
+    its lambdas and defs.
+    """
+
+    def __init__(self, source: str, filename: str) -> None:
+        self.source = source
+        self.codes: set[types.CodeType] = set()
+        self.functions: list[_Function] = []
+        with warnings.catch_warnings():
+            # The file's own SyntaxWarnings were given when it was imported
+            warnings.simplefilter("ignore")
+            try:
+                tree = ast.parse(source, filename)
+                module = compile(tree, filename, "exec", dont_inherit=True)
+            except (SyntaxError, ValueError, RecursionError, MemoryError):
+                return
+        pending = [module]
+        while pending:
+            code = pending.pop()
+            self.codes.add(code)
+            pending.extend(const for const in code.co_consts if isinstance(const, types.CodeType))
+        self.functions = [
+            node for node in ast.walk(tree) if isinstance(node, (ast.Lambda, ast.FunctionDef))
+        ]
+
+
+# The last files read, by name: a strategy file is asked about once per predicate
+# and constraint
+_SOURCES: dict[str, _Source] = {}
+_MAX_SOURCES = 32
+
+
+def _source(filename: str, module_globals: dict[str, Any]) -> _Source:
+    linecache.checkcache(filename)
+    source = "".join(linecache.getlines(filename, module_globals))
+    cached = _SOURCES.get(filename)
+    if cached is None or cached.source != source:
+        if len(_SOURCES) >= _MAX_SOURCES:
+            _SOURCES.clear()
+        cached = _SOURCES[filename] = _Source(source, filename)
+    return cached
 
 
 def _within(node: ast.AST, code: types.CodeType) -> bool:
@@ -286,7 +398,7 @@ def _within(node: ast.AST, code: types.CodeType) -> bool:
     return found
 
 
-def _parameters(node: ast.Lambda | ast.FunctionDef) -> list[str] | None:
+def _parameters(node: _Function) -> list[str] | None:
     """The names of a function's parameters, or None when it has more than plain ones."""
     args = node.args
     if args.vararg or args.kwarg or args.kwonlyargs:
@@ -294,7 +406,7 @@ def _parameters(node: ast.Lambda | ast.FunctionDef) -> list[str] | None:
     return [arg.arg for arg in (*args.posonlyargs, *args.args)]
 
 
-def _body(node: ast.Lambda | ast.FunctionDef) -> ast.expr | None:
+def _body(node: _Function) -> ast.expr | None:
     """The expression a function returns: a lambda's body, or the one ``return`` of a def."""
     if isinstance(node, ast.Lambda):
         return node.body
@@ -317,13 +429,17 @@ def _definition(fn: Any) -> tuple[ast.expr, list[str]]:
     Find the source of a plain function: the expression it returns and its
     parameters' names.
 
-    The node is the innermost lambda or def of the function's file that holds
-    every instruction of its code (by position, so two lambdas on one line are
-    told apart) and has its parameters.
+    The file is used only when compiling it as it is now gives the function's
+    very code object (same instructions, constants, names and positions): not
+    after an edit, and not for code compiled from other text under that file's
+    name. The node is then the innermost lambda or def that holds every
+    instruction of the code (by position, so two lambdas on one line are told
+    apart) and has its parameters.
 
     Raises:
         _Untranslatable: For anything that is not a plain function, without source,
-            whose source does not match its code, or with more than one expression
+            whose source is not what was compiled, with a function inside it, or
+            with more than one expression
     """
     if not isinstance(fn, types.FunctionType):
         raise _Untranslatable
@@ -332,21 +448,19 @@ def _definition(fn: Any) -> tuple[ast.expr, list[str]]:
         raise _Untranslatable
     if code.co_kwonlyargcount or code.co_flags & (inspect.CO_VARARGS | inspect.CO_VARKEYWORDS):
         raise _Untranslatable
-    filename = code.co_filename
-    linecache.checkcache(filename)
-    lines = linecache.getlines(filename, fn.__globals__)
-    if not lines:
+    # A function that holds another one (a lambda that returns a lambda) is not simple,
+    # and its instructions would lie inside the inner one's source
+    if any(isinstance(const, types.CodeType) for const in code.co_consts):
         raise _Untranslatable
-    try:
-        tree = ast.parse("".join(lines))
-    except (SyntaxError, ValueError, RecursionError) as error:
-        raise _Untranslatable from error
+    source = _source(code.co_filename, fn.__globals__)
+    if code not in source.codes:
+        raise _Untranslatable
     expected = list(code.co_varnames[: code.co_argcount])
-    best: ast.Lambda | ast.FunctionDef | None = None
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.Lambda, ast.FunctionDef)):
-            continue
+    best: _Function | None = None
+    for node in source.functions:
         if isinstance(node, ast.FunctionDef) and node.name != code.co_name:
+            continue
+        if isinstance(node, ast.Lambda) and code.co_name != "<lambda>":
             continue
         if _parameters(node) != expected or not _within(node, code):
             continue
@@ -375,22 +489,28 @@ _MISSING = object()
 def _bindings(fn: types.FunctionType, parameters: list[str]) -> Callable[[str], Any]:
     """
     Return the lookup of the names a function's expression reads that are not its
-    subject: a parameter's default, a closure variable, a global or a builtin.
+    subject: a parameter's default, a closure variable, a global or a builtin, as
+    the code itself finds them (``_MISSING`` for any other name).
     """
+    code = fn.__code__
     defaults = fn.__defaults__ or ()
     bound: dict[str, Any] = dict(zip(parameters[len(parameters) - len(defaults) :], defaults))
     # The first parameter is the subject, whatever its default
     bound.pop(parameters[0], None)
-    for free, cell in zip(fn.__code__.co_freevars, fn.__closure__ or ()):
+    for free, cell in zip(code.co_freevars, fn.__closure__ or ()):
         # A cell may still be empty
         with contextlib.suppress(ValueError):
             bound[free] = cell.cell_contents
-    local = set(fn.__code__.co_varnames) | set(fn.__code__.co_cellvars)
+    # Names the code never looks up in the globals, whatever they hold
+    local = set(code.co_varnames) | set(code.co_cellvars) | set(code.co_freevars)
+    # The names it does look up there: a class-private name (__limit in a class
+    # body) is among them under its mangled name only, so it stays unknown
+    read = set(code.co_names)
 
     def lookup(identifier: str) -> Any:
         if identifier in bound:
             return bound[identifier]
-        if identifier in local:
+        if identifier in local or identifier not in read:
             return _MISSING
         if identifier in fn.__globals__:
             return fn.__globals__[identifier]
@@ -407,8 +527,9 @@ def _bindings(fn: types.FunctionType, parameters: list[str]) -> Callable[[str], 
 # ---------------------------------------------------------------------------
 
 # Precedences, loosest first. The bit operators share one, below the comparisons,
-# so that they are always in parentheses there: few readers know how they bind
-_OR, _AND, _NOT, _BITS, _COMPARE, _ADD, _MUL, _UNARY, _POWER, _ATOM = range(1, 11)
+# so that they are always in parentheses there: few readers know how they bind.
+# A mod is bare only as a whole side of a comparison: "a + b mod 4" reads both ways
+_OR, _AND, _NOT, _BITS, _COMPARE, _MOD, _ADD, _MUL, _UNARY, _POWER, _ATOM = range(1, 12)
 
 _COMPARISONS: dict[type, str] = {
     ast.Eq: "=",
@@ -420,29 +541,30 @@ _COMPARISONS: dict[type, str] = {
     ast.In: r"\in",
     ast.NotIn: r"\notin",
 }
+# "not a < b" is not "a >= b" for values without a total order (a NaN, sets)
+_NEGATED_SYMBOLS: dict[type, str] = {
+    ast.Lt: r"\nless",
+    ast.LtE: r"\nleq",
+    ast.Gt: r"\ngtr",
+    ast.GtE: r"\ngeq",
+}
 _NEGATED: dict[type, type] = {
     ast.Eq: ast.NotEq,
     ast.NotEq: ast.Eq,
-    ast.Lt: ast.GtE,
-    ast.GtE: ast.Lt,
-    ast.Gt: ast.LtE,
-    ast.LtE: ast.Gt,
     ast.In: ast.NotIn,
     ast.NotIn: ast.In,
     ast.Is: ast.IsNot,
     ast.IsNot: ast.Is,
 }
-# operator: (LaTeX, precedence); left-associative
+# operator: (LaTeX, precedence); left-associative. The shifts are not written:
+# \ll and \gg read as "much less" and "much greater"
 _BINARY: dict[type, tuple[str, int]] = {
     ast.Add: ("+", _ADD),
     ast.Sub: ("-", _ADD),
     ast.Mult: (r"\cdot", _MUL),
-    ast.Mod: (r"\bmod", _MUL),
     ast.BitOr: (r"\mathbin{|}", _BITS),
     ast.BitXor: (r"\oplus", _BITS),
     ast.BitAnd: (r"\mathbin{\&}", _BITS),
-    ast.LShift: (r"\ll", _BITS),
-    ast.RShift: (r"\gg", _BITS),
 }
 # The operators whose result, used as a condition, means "is not zero"
 _NUMERIC_TESTS = (ast.Mod, ast.BitAnd)
@@ -487,77 +609,114 @@ class _Translator:
             return self._negation(node.operand)
         if isinstance(node, ast.Compare):
             return self._comparison(node)
-        if isinstance(node, ast.BinOp) and isinstance(node.op, _NUMERIC_TESTS):
-            return rf"{self._wrap(self.term(node), _COMPARE + 1)} \ne 0", _COMPARE
+        if self._is_numeric_test(node):
+            return rf"{self._wrap(self.term(node), _MOD)} \ne 0", _COMPARE
         raise _Untranslatable
 
+    def _is_numeric_test(self, node: ast.expr) -> bool:
+        """
+        Whether a value used as a condition is a number tested against zero:
+        ``x % 4`` or ``x & 1`` with an integer on one side (the same operators
+        over sets or strings are empty or not, which is not what "≠ 0" says).
+        """
+        if not (isinstance(node, ast.BinOp) and isinstance(node.op, _NUMERIC_TESTS)):
+            return False
+        for operand in (node.left, node.right):
+            with contextlib.suppress(_Untranslatable):
+                if type(self._constant(operand)) is int:
+                    return True
+        return False
+
     def _negation(self, node: ast.expr) -> tuple[str, int]:
-        """``not`` of a condition: a single comparison is reversed, the rest gets a ¬."""
-        if isinstance(node, ast.Compare) and len(node.ops) == 1 and type(node.ops[0]) in _NEGATED:
-            reversed_ = ast.Compare(
-                left=node.left, ops=[_NEGATED[type(node.ops[0])]()], comparators=node.comparators
-            )
-            return self._comparison(reversed_)
-        if isinstance(node, ast.BinOp) and isinstance(node.op, _NUMERIC_TESTS):
-            return f"{self._wrap(self.term(node), _COMPARE + 1)} = 0", _COMPARE
+        """``not`` of a condition: one comparison gets the negated relation, the rest a ¬."""
+        if isinstance(node, ast.Compare) and len(node.ops) == 1:
+            kind = type(node.ops[0])
+            if kind in _NEGATED:
+                reversed_ = ast.Compare(
+                    left=node.left, ops=[_NEGATED[kind]()], comparators=node.comparators
+                )
+                return self._comparison(reversed_)
+            if kind in _NEGATED_SYMBOLS:
+                left = self._wrap(self.term(node.left), _MOD)
+                right = self._wrap(self.term(node.comparators[0]), _MOD)
+                return f"{left} {_NEGATED_SYMBOLS[kind]} {right}", _COMPARE
+        if self._is_numeric_test(node):
+            return f"{self._wrap(self.term(node), _MOD)} = 0", _COMPARE
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
             return self.condition(node.operand)
         inner = self.condition(node)
         return rf"\lnot \left({inner[0]}\right)", _NOT
 
     def _comparison(self, node: ast.Compare) -> tuple[str, int]:
-        parts = [self._wrap(self.term(node.left), _COMPARE + 1)]
+        parts = [self._wrap(self.term(node.left), _MOD)]
         for op, right in zip(node.ops, node.comparators):
             if isinstance(op, (ast.Is, ast.IsNot)):
-                # Identity is written as equality only against None, True and False
-                if not (isinstance(right, ast.Constant) and right.value in (None, True, False)):
-                    raise _Untranslatable
-                if type(right.value) not in (bool, type(None)):
+                # Identity is written as equality only against what there is one of:
+                # None, True, False and an enum's members
+                other = right.value if isinstance(right, ast.Constant) else self._known(right)
+                if not (type(other) in (bool, type(None)) or _is_member(other)):
                     raise _Untranslatable
                 parts.append("=" if isinstance(op, ast.Is) else r"\ne")
-                parts.append(value(right.value))
+                parts.append(value(other))
             elif isinstance(op, (ast.In, ast.NotIn)):
                 parts.append(_COMPARISONS[type(op)])
                 parts.append(self._collection(right))
             else:
                 parts.append(_COMPARISONS[type(op)])
-                parts.append(self._wrap(self.term(right), _COMPARE + 1))
+                parts.append(self._wrap(self.term(right), _MOD))
         return " ".join(parts), _COMPARE
 
     # -- collections (the right side of "in") --------------------------------
 
     def _collection(self, node: ast.expr) -> str:
+        """
+        A collection, written in full: a set that is cut would not say which
+        values it holds, so a longer one is not translated.
+        """
         if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
             if not node.elts or len(node.elts) > MAX_LISTED:
                 raise _Untranslatable
             return r"\{" + ", ".join(self.term(item)[0] for item in node.elts) + r"\}"
         if isinstance(node, ast.Call) and self._function(node) is range:
+            if node.keywords or any(isinstance(argument, ast.Starred) for argument in node.args):
+                raise _Untranslatable
             bounds = [self._constant(argument) for argument in node.args]
-            if not bounds or not all(type(bound) is int for bound in bounds):
+            if not 1 <= len(bounds) <= 3 or not all(type(bound) is int for bound in bounds):
                 raise _Untranslatable
             return self._range(range(*bounds))
         bound = self._known(node)
-        if isinstance(bound, range):
+        if type(bound) is range:
             return self._range(bound)
-        if isinstance(bound, (tuple, list, set, frozenset)):
+        if type(bound) in (tuple, list, set, frozenset):
             items = list(bound)
-            if not items or not all(_is_simple(item) for item in items):
+            if not items or len(items) > MAX_LISTED:
                 raise _Untranslatable
-            if isinstance(bound, (set, frozenset)):
+            if not all(_is_simple(item) for item in items):
+                raise _Untranslatable
+            if type(bound) in (set, frozenset):
                 # A set's order changes between runs: sorted, or not written
                 try:
                     items = sorted(items)
                 except TypeError as error:
                     raise _Untranslatable from error
-            return _set(items)
+            kept, _ = _listed(items)
+            return r"\{" + ", ".join(value(item) for item in kept) + r"\}"
         raise _Untranslatable
 
     @staticmethod
     def _range(numbers: range) -> str:
-        """A range of consecutive integers as an interval; any other one is not written."""
+        r"""
+        A range of consecutive integers as the set of them, ``\{1, 2, \dots, 9\}``
+        (an interval would also hold the reals between); any other is not written.
+        """
         if len(numbers) == 0 or numbers.step not in (1, -1):
             raise _Untranslatable
-        return _interval(min(numbers[0], numbers[-1]), max(numbers[0], numbers[-1]))
+        low, high = min(numbers[0], numbers[-1]), max(numbers[0], numbers[-1])
+        if high - low < MAX_LISTED:
+            shown = [value(number) for number in range(low, high + 1)]
+        else:
+            shown = [value(low), value(low + 1), r"\dots", value(high)]
+        return r"\{" + ", ".join(shown) + r"\}"
 
     # -- terms ---------------------------------------------------------------
 
@@ -583,7 +742,10 @@ class _Translator:
             return name(field), _ATOM
         if isinstance(node, ast.UnaryOp):
             if isinstance(node.op, ast.USub):
-                return "-" + self._wrap(self.term(node.operand), _UNARY), _UNARY
+                operand = self._wrap(self.term(node.operand), _UNARY)
+                if operand.startswith("-"):
+                    operand = rf"\left({operand}\right)"
+                return "-" + operand, _UNARY
             if isinstance(node.op, ast.UAdd):
                 return self.term(node.operand)
             raise _Untranslatable
@@ -595,13 +757,20 @@ class _Translator:
 
     def _binary(self, node: ast.BinOp) -> tuple[str, int]:
         if isinstance(node.op, ast.Div):
-            return rf"\frac{{{self.term(node.left)[0]}}}{{{self.term(node.right)[0]}}}", _ATOM
+            # Below an atom: as the base of a power it gets parentheses
+            return rf"\frac{{{self.term(node.left)[0]}}}{{{self.term(node.right)[0]}}}", _POWER
         if isinstance(node.op, ast.FloorDiv):
             left, right = self.term(node.left)[0], self.term(node.right)[0]
             return rf"\left\lfloor \frac{{{left}}}{{{right}}} \right\rfloor", _ATOM
         if isinstance(node.op, ast.Pow):
             base = self._wrap(self.term(node.left), _ATOM)
             return f"{base}^{{{self.term(node.right)[0]}}}", _POWER
+        if isinstance(node.op, ast.Mod):
+            left = self._wrap(self.term(node.left), _MUL)
+            if left.startswith("-"):
+                left = rf"\left({left}\right)"
+            right = self._wrap(self.term(node.right), _UNARY)
+            return rf"{left} \bmod {right}", _MOD
         if type(node.op) not in _BINARY:
             raise _Untranslatable
         symbol, level = _BINARY[type(node.op)]
@@ -723,7 +892,7 @@ def _translate(fn: Any, *, subject: str | None, fields: Sequence[str]) -> str | 
             return None
         translator = _Translator(
             subject=subject,
-            fields=fields,
+            fields=tuple(fields),
             parameter=parameters[0],
             lookup=_bindings(fn, parameters),
         )
@@ -746,4 +915,4 @@ def constraint_latex(constraint: Any, arg_names: Sequence[str]) -> str | None:
     Return the condition of a vector constraint as LaTeX, each ``v.<argument>`` (or
     ``v[<position>]``) as that argument's name; None when it is not translated.
     """
-    return _translate(constraint, subject=None, fields=tuple(arg_names))
+    return _translate(constraint, subject=None, fields=arg_names)
