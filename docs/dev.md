@@ -1984,7 +1984,7 @@ types get typed fields by their exact class; a subclass or a custom type gets
 value encoding.
 
 **LaTeX** (`_latex.py`): `argument_dict()` and `parameter_dict()` add `latex` to each
-argument and constraint (keys added within schema 1 in 4.4). The set of a built-in
+argument and constraint (keys added within schema 1 after 4.4). The set of a built-in
 RNG type comes from its attributes, by exact class like the typed fields, so a
 subclass has none. A predicate or constraint is translated from its source, under
 one rule: a rendering is right or absent.

@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Simple predicates and constraints are translated from their source: a lambda or a one-`return` function made of comparisons, arithmetic, bit operators, `and`/`or`/`not`, `in` and `abs`/`len`/`min`/`max`, so `RNGInteger(1, 20, predicate=lambda x: x not in (12, 13))` gives `x \in [1, 20],\ x \notin \{12, 13\}`. The source is used only when it is what the function was compiled from, and no predicate or constraint is called. A predicate that is not translated is written `p(x)`, and such a constraint has `"latex": null`. See "LaTeX" in the README.
 - The agent skill documents the key. Run `pytest-strategies skill install` to update an installed copy.
 
+## [4.4.0] - 2026-11-23
+
+4.4.0 lets a strategy say what it covers and carry a remark. It removes nothing, and a seed recorded with 4.3 gives the same rows.
+
+### Added
+
+- `Parameter(description=..., note=...)`: two optional texts about the strategy, `description` for what it covers and `note` for a remark (a known limitation, a ticket). Each is a `str` or `None`, stripped, and `""` when not given; anything else raises `ValueError`. They never change the rows. They are the `description` and `note` attributes, and `extend()` keeps them unless given (`None` clears one). See "Describing a strategy" in the README.
+- `Parameter.to_dict()`, and so `export_strategies()`, `strategies.json` and `strategies.vectors.json`, always has the keys `description` and `note`, `""` for a strategy that gives none (keys added within schema 1).
+- The agent skill documents both. Run `pytest-strategies skill install` to update an installed copy.
+
 ## [4.3.0] - 2026-11-18
 
 4.3.0 adds a per-run export of the strategies each test used and the vectors it ran, and lets a strategy pin its sample count. It removes nothing, and a seed recorded with 4.2 gives the same rows.
@@ -543,7 +553,8 @@ These emit a `DeprecationWarning` that points at your code, keep working in 3.x,
 - Fixed `AttributeError: 'Parameter' object has no attribute 'generate_samples'` by renaming method to `generate_vectors`.
 - Improved error handling in `Strategy` decorator.
 
-[Unreleased]: https://github.com/guillegil/pytest-strategies/compare/v4.3.0...HEAD
+[Unreleased]: https://github.com/guillegil/pytest-strategies/compare/v4.4.0...HEAD
+[4.4.0]: https://github.com/guillegil/pytest-strategies/compare/v4.3.0...v4.4.0
 [4.3.0]: https://github.com/guillegil/pytest-strategies/compare/v4.2.0...v4.3.0
 [4.2.0]: https://github.com/guillegil/pytest-strategies/compare/v4.1.2...v4.2.0
 [4.1.2]: https://github.com/guillegil/pytest-strategies/compare/v4.1.1...v4.1.2
